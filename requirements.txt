@@ -1,0 +1,9 @@
+numpy
+pandas
+matplotlib
+statsmodels
+scikit-learn
+scipy
+tensorflow
+torch
+joblib
