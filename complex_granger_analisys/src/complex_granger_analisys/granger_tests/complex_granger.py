@@ -1,5 +1,3 @@
-
-
 import pandas as pd
 import numpy as np
 from typing import List
@@ -21,12 +19,15 @@ class ComplexGrangerAnalisysModel():
     with_zero_lag=False
 
     def __init__(self,
-                 auto_sparse_iterations,
-                 max_lag
+                 auto_sparse_iterations:int,
+                 max_lag:int,
+                 non_static:List[str]=[],
+                 **kwargs
                 ):
         self.auto_sparse_iterations = auto_sparse_iterations
         self.max_lag = max_lag
         self.verbose = False
+        self.non_static=non_static
         self.results = GrangerAnalisysResults([],[])
 
     def _select_optimal_l1_param(self, X, y, constraint=None, callbacks=[], seed=None):
@@ -89,11 +90,10 @@ class ComplexGrangerAnalisysModel():
         alphas = [0] + alphas
         return X_train, X_val, y_train, y_val, alphas, best_score, best_alpha
      
-    def fit_analisys_parameters(self,
+    def prepare_static(self,
                 data_list: List[pd.DataFrame],
                 causes: list = None,
                 effects: list = None,
-                lag: int = None,
             ):
         
         #Analised data control
@@ -109,9 +109,37 @@ class ComplexGrangerAnalisysModel():
             #Presupposition check
             results=[]
             for var in data.columns:
-                results.append(static_adfuller_order(data[var], self.max_lag))
+                if var in self.non_static:
+                    results.append(0)
+                else:
+                    results.append(static_adfuller_order(data[var], self.max_lag))
             static_orders=np.max([static_orders,results],axis=0)
-            
+        self.static_orders=static_orders
+
+        def force_static(data,static_orders):
+            data_c=pd.DataFrame()
+            data_c=data.copy()
+            for order,name in zip(static_orders,data.columns):
+                data_c[name] = make_static(data[name], order = order)
+            data_c=data.dropna()    
+            return data_c
+        
+        tasks = []
+        for data in data_list:
+            tasks.append((data, static_orders))
+        
+        data_list_static = Parallel(n_jobs=self.n_jobs)(
+            delayed(force_static)(*task) for task in tasks
+        )
+
+        return nrows, columns_id, data_list_static
+    
+    def prepare_lag(self,
+                data_list: List[pd.DataFrame],
+                effects: list = None,
+                lag: int = None,
+                ):
+    
         if lag is None:
             tasks = []
             for data in data_list:
@@ -123,42 +151,45 @@ class ComplexGrangerAnalisysModel():
             lag_order = np.max(results)
         else:
             lag_order = lag
+        self.lag_order=lag_order
 
         if self.with_zero_lag: lag_order=lag_order+1
 
-        return nrows, columns_id, lag_order, static_orders
+        tasks = []
+        for data in data_list:
+            tasks.append((data, lag_order, self.with_zero_lag))
+        
+        results = Parallel(n_jobs=self.n_jobs)(
+            delayed(create_lagged_data)(*task) for task in tasks
+        )    
+        
+        Xs=np.concat(results,axis=0)
+        
+        def drop_unusable_ys(data, effects, order):
+            return data[effects].iloc[order:].values
+
+        tasks2 = []
+        for data in data_list:
+            tasks2.append((data, effects, lag_order))
+        
+        results2 = Parallel(n_jobs=self.n_jobs)(
+            delayed(drop_unusable_ys)(*task) for task in tasks2
+        )    
+        
+        y=np.concat(results2,axis=0)
+        return Xs, y, lag_order
     
-    def prepare_data_for_analisys(
+    def prepare_experts_knowladge(
             self,
-            data_list: List[pd.DataFrame],
+            Xs:pd.DataFrame|np.ndarray,
+            y:pd.DataFrame|np.ndarray,
             columns: list = None,
             effects: list = None,
             relation: dict = dict(),
-            static_orders: List[int] = 0,
             lag_order: int = 0,
             seed=None,
             unused_data=0
         ):
-
-        Xs=None
-        y=None
-
-        for data in data_list:
-            #Force presupposition
-            data=data.copy()
-            for order,name in zip(static_orders,data.columns):
-                data[name] = make_static(data[name], order = order)
-            data=data.dropna()
-            
-            Xs_part = create_lagged_data(data, lag_order,with_zero=self.with_zero_lag)
-            y_part = data[effects].iloc[lag_order:].values
-        
-            if Xs is None or y is None:
-                Xs=Xs_part
-                y=y_part
-            else:
-                Xs=np.concat([Xs,Xs_part],axis=0)
-                y=np.concat([y,y_part],axis=0)
 
         #Using only part of data
         if unused_data:
@@ -188,4 +219,4 @@ class ComplexGrangerAnalisysModel():
                 j = columns.index(c)*lag_order
                 possible_relation[i,j] = 0                    
 
-        return Xs, y, forced_relation,possible_relation
+        return Xs, y, forced_relation, possible_relation
