@@ -199,9 +199,10 @@ class TFNeuralSparseConstaraintedMVGC(ComplexGrangerAnalisysModel):
             writer = False,
             writer_outdir:str = "logs/fit/",
             optimizer = Adam(),
+            **kwargs
         ):
         super().__init__(auto_sparse_iterations = auto_sparse_iterations,
-                         max_lag = max_lag)
+                         max_lag = max_lag, **kwargs)
         self.learning_rate = learning_rate
         self.relative_referece_learning_rate = relative_referece_learning_rate
         self.batch_size = batch_size
@@ -362,14 +363,15 @@ class TFNeuralSparseConstaraintedMVGC(ComplexGrangerAnalisysModel):
         if effects is None or effects is []:
             effects = columns_names
         
+        nrows, columns_id, data_list_static = super().prepare_static(data_list=data,causes=causes,effects=effects)        
         if self.verbose: print("Set lag:")
-        nrows, columns_id, lag_order, static_orders=super().fit_analisys_parameters(data_list=data, causes=causes, effects=effects, lag=lag)
-        if self.verbose: print(f"{lag_order}")
-        Xs, y, forced_relation,possible_relation=super().prepare_data_for_analisys(data_list=data, columns=columns_names,
-                                                                                   effects=effects, relation=relation, 
-                                                                                   static_orders=static_orders, 
-                                                                                   lag_order=lag_order, seed=seed,
-                                                                                   unused_data=unused_data)
+        Xs, y, lag_order =  super().prepare_lag(data_list=data_list_static,effects=effects,lag=lag)
+        if self.verbose: print(f"{self.lag_order}")
+        Xs, y, forced_relation, possible_relation = super().prepare_experts_knowladge(Xs=Xs,y=y,columns=columns_names,
+                                                                                      effects=effects,relation=relation,
+                                                                                      lag_order=lag_order,
+                                                                                      seed=seed,unused_data=unused_data)
+        
         x_l = Xs.shape[1]
         constraint=RelationExists(relation_table=possible_relation,relation_list=forced_relation)  
         constraint2=RelationExists(relation_table=possible_relation,relation_list=forced_relation)
