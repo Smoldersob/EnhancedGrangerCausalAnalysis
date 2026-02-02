@@ -1,5 +1,5 @@
 from .granger_tests.tensorflow_granger import TFNeuralSparseConstaraintedMVGC
-from .granger_tests.scikit_granger import SparseConstaraintedMVGC,MTCLR
+from .granger_tests.scikit_granger import SparseConstaraintedMVGC, MTCLR
 from .granger_tests.statsmodels_granger import grangers_causation_matrix
 from .callbacks.callbacks import Callback,ProcentageChange,EarlyStopping
 from .regularizers.regularizers_keras import KerasCyclicL1Regularizer

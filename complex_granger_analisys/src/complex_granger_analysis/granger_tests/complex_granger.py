@@ -9,7 +9,7 @@ from ..lag_engine import (
     create_lagged_data,
     make_static
 )
-from ..granger_analisys_results import GrangerAnalisysResults
+from ..granger_analysis_results import GrangerAnalisysResults
 
 from sklearn.model_selection import train_test_split
 

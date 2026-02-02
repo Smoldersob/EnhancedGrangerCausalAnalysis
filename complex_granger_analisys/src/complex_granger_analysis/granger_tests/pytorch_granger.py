@@ -1,95 +1,42 @@
-import numpy as np
 import pandas as pd
+import numpy as np
 import copy
-from typing import List
-import datetime
 import random
+import datetime
+from typing import List
 
-from tensorflow import summary as SummaryWriter
+import torch.optim as optim
+from torch.utils.tensorboard import SummaryWriter
 
 from .complex_granger import ComplexGrangerAnalisysModel
-from ..models.MultiTaskConstrainedLinearRegression import MultiTaskConstrainedLinearRegression as MTCLR
-from ..callbacks.callbacks import ProcentageChange
-from ..granger_analisys_results import RSS
+from ..models.PytorchSparseLinearModel import SparseLinearModel,RelationExists
+from ..callbacks.callbacks import EarlyStopping,ProcentageChange
+from ..granger_analysis_results import RSS
+from ..regularizers.regularizers_pytorch import CyclicL1Regularizer
 
-class SparseConstaraintedMVGC(ComplexGrangerAnalisysModel):
-    """
-    Sparse Constrained Multivariate Granger Causality (MVGC) model class.
-
-    This class implements a multivariate Granger causality model with sparsity constraints and lagged dependencies.
-    It supports training with gradient-based optimization, configurable learning rates, batch sizes, and epoch counts.
-    The model can automatically select sparsity parameters through iterative procedures and optionally log training progress.
-
-    Parameters
-    ----------
-    max_lag : int, optional (default=20)
-        Maximum number of time lags to consider in the model.
-    learning_rate : float, optional (default=1)
-        Base learning rate for model optimization.
-    relative_referece_learning_rate : float, optional (default=1.0)
-        Relative learning rate multiplier for reference models compared to the base model.
-    batch_size : int or None, optional (default=None)
-        Size of batches for training optimization. If None, full-batch training is used.
-    epochs : int, optional (default=1000)
-        Number of training iterations (epochs).
-    sparse : float, optional (default=0.0)
-        Sparsity regularization parameter controlling L1 penalty strength.
-    auto_sparse_iterations : int, optional (default=20)
-        Number of iterations for automatic sparsity parameter selection.
-    sparse_fit_epochs : int, optional (default=1000)
-        Number of training iterations (epochs) for automatic regularization parameter fitting. 
-    writer : bool or object, optional (default=False)
-        If True or a writer object, enables logging of training progress (e.g., TensorBoard).
-    writer_outdir : str, optional (default="logs/fit/")
-        Directory path where training logs will be saved if writer is enabled.
-
-    Attributes
-    ----------
-    max_lag : int
-        Maximum lag order used in the model.
-    learning_rate : float
-        Learning rate for optimization.
-    relative_referece_learning_rate : float
-        Multiplier for learning rate in reference models.
-    batch_size : int or None
-        Batch size for training.
-    epochs : int
-        Number of training epochs.
-    sparse : float
-        Sparsity regularization parameter.
-    auto_sparse_iterations : int
-        Iterations for auto sparsity tuning.
-    writer : bool or object
-        Logger for training progress.
-    writer_outdir : str
-        Output directory for logs.
-    results : GA_results
-        Container for storing model fitting results.
-
-    Examples
-    --------
-    >>> model = SparseConstaraintedMVGC(max_lag=10, learning_rate=0.5, epochs=500, sparse=0.1)
-    >>> model.fit(data=df, causes=['X1', 'X2'], effects=['Y'], lag=3, seed=42)
-    >>> model.results.result()
-    """
-
+class PTNeuralSparseConstaraintedMVGC(ComplexGrangerAnalisysModel):
+    regularizer=CyclicL1Regularizer()
+    
     def __init__(
             self,
             max_lag:int = 20,
-            learning_rate:float = 1,
-            relative_referece_learning_rate:float = 1.,
+            learning_rate:float|None = None,
+            relative_referece_learning_rate:float = 0.1,
             batch_size:int = None,
             epochs:int = 1000,
             sparse:float = 0.0,
             auto_sparse_iterations:int = 20,
             sparse_fit_epochs:int = 30,
-            writer = False,
+            writer = None,
             writer_outdir:str = "logs/fit/",
-            cycle_lasso=False,
+            optimizer=optim.Adam,
+            scheduler=None,
             **kwargs
         ):
         super().__init__(auto_sparse_iterations = auto_sparse_iterations,
                          max_lag = max_lag,**kwargs)
+        self.optimizer=optimizer
+        self.scheduler=scheduler
         
         self.learning_rate = learning_rate
         self.relative_referece_learning_rate = relative_referece_learning_rate
@@ -98,14 +45,13 @@ class SparseConstaraintedMVGC(ComplexGrangerAnalisysModel):
         
         self.sparse=sparse
         self.sparse_fit_epochs = sparse_fit_epochs
-        self.cycle_lasso=cycle_lasso
 
         self.writer = writer
         self.writer_outdir = writer_outdir
 
-        self.verbose = False
-    
-    def _select_optimal_l1_param(self, X, y, min_coefs=None, max_coefs=None, forced_relation=None, callbacks=[], seed=None):
+        self.verbose=False
+        
+    def _select_optimal_l1_param(self, X, y, constraint=None, callbacks=[], seed=None):
         """
         Select optimal L1 regularization parameter for a MultiTaskConstrainedLinearRegression2D
         (should work for Lasso scikit-learn-like models).
@@ -137,20 +83,27 @@ class SparseConstaraintedMVGC(ComplexGrangerAnalisysModel):
                 The optimal regularization parameter value found
         """
         X_train, X_val, y_train, y_val, alphas, best_score, best_alpha = super().prepare_data_for_l1_fitting(X, y, seed)
-
         for alpha in alphas:
             # Instantiate the model with L1 penalty and current alpha
-            model = MTCLR(lasso = alpha,
-                      learning_rate = self.learning_rate,
-                      max_iter = self.sparse_fit_epochs)
+            model = SparseLinearModel(input_dim=X_train.shape[1],
+                                      output_dim=y_train.shape[1],
+                                      constraint=constraint,
+                                      lasso = alpha,
+                                      batch_size=self.batch_size,
+                                      epochs=self.sparse_fit_epochs,
+                                      x_norm_mean=self.mean1,
+                                      x_norm_std=self.std1,
+                                      y_norm_mean=self.mean2,
+                                      y_norm_std=self.std2,
+                                      seed=seed)
+        
             
+            opt=self.optimizer(model.parameters(), lr=self.learning_rate)
             # Fit model
-            model.fit(X=X_train,y=y_train,
-                     min_coef=min_coefs, max_coef=max_coefs,
-                     abs_sum_min=forced_relation,
-                     batch=self.batch_size,
-                     tensoboard_writer=False,
-                     callbacks=[copy.deepcopy(cb) for cb in callbacks])
+            model.train_model(X_train=X_train,
+                              y_train=y_train,
+                              optimizer=opt,
+                              callbacks=[copy.deepcopy(cb) for cb in callbacks])
             
             # Evaluate on validation set
             score = np.mean(RSS(model, X_val, y_val))
@@ -167,9 +120,9 @@ class SparseConstaraintedMVGC(ComplexGrangerAnalisysModel):
             effects: list = None,
             relation: dict = dict(),
             lag: int = None,
-            callbacks = [ProcentageChange()],
-            seed = None,
-            unused_data = 0
+            callbacks=[EarlyStopping(),ProcentageChange()],
+            seed=None,
+            unused_data=0
         ):
         """
         Fit the model to the provided time series data, estimating causal relationships with lagged effects.
@@ -219,14 +172,14 @@ class SparseConstaraintedMVGC(ComplexGrangerAnalisysModel):
 
         Examples
         --------
-        >>> model = SparseConstaraintedMVGC(max_lag=5, sparse=0.1, learning_rate=0.01, epochs=100)
+        >>> model = NeuralSparseConstaraintedMVGC(max_lag=5, sparse=0.1, learning_rate=0.01, epochs=100)
         >>> model.fit(data=df, causes=['X1', 'X2'], effects=['Y'], lag=3, seed=42)
         >>> model.results.result()
         """
 
         if seed is not None:
-            np.random.seed(seed)
             random.seed(seed)
+            np.random.seed(seed)
         
         if type(data)==type(pd.DataFrame()):
             data=[data]
@@ -234,13 +187,13 @@ class SparseConstaraintedMVGC(ComplexGrangerAnalisysModel):
             pass
         else:
             raise TypeError("Data should be dataframe or list of dataframes")
-
+        
         columns_names=data[0].columns.to_list()
         if causes is None or causes is []:
             causes = columns_names
         if effects is None or effects is []:
             effects = columns_names
-
+        
         nrows, columns_id, data_list_static = super().prepare_static(data_list=data,causes=causes,effects=effects)        
         if self.verbose: print("Set lag:")
         Xs, y, lag_order =  super().prepare_lag(data_list=data_list_static,effects=effects,lag=lag)
@@ -250,66 +203,112 @@ class SparseConstaraintedMVGC(ComplexGrangerAnalisysModel):
                                                                                       lag_order=lag_order,
                                                                                       seed=seed,unused_data=unused_data)
         
-        x_l = Xs.shape[1]
-        min_coefs = -np.inf**possible_relation+1
-        max_coefs = -min_coefs
         
+        x_l = Xs.shape[1]  
+        constraint=RelationExists(possible_relation,forced_relation) 
+
+        if hasattr(self.regularizer,'period'):
+            self.regularizer.period=lag_order
+            
+        #Auto learning rate
+        if self.learning_rate is None:
+            self.learning_rate = 0.1/x_l*y.shape[1]
+        
+        if self.batch_size is None:
+            self.batch_size = Xs.shape[0]
+
         #Writer
         if self.writer:
-            writer = SummaryWriter.create_file_writer(self.writer_outdir+"base_model_scikit_"+datetime.datetime.now().strftime("%Y%m%d-%H%M%S"))
+            writer = SummaryWriter(self.writer_outdir+"base_model_pytorch_"+datetime.datetime.now().strftime("%Y%m%d-%H%M%S"))
         else:
             writer=self.writer
+
+        #Normalization and denormalization parameters
+        self.mean1 = Xs.mean(axis=0)
+        self.mean2 = -y.mean(axis=0)/y.std(axis=0)
+        self.std1 = Xs.std(axis=0)
+        self.std2 = 1/y.std(axis=0)
 
         #Sparsity control
         if self.sparse < 0:
             self.sparse = self._select_optimal_l1_param(X=Xs,y=y,
-                                                        min_coefs=min_coefs, max_coefs=max_coefs,
-                                                        forced_relation=forced_relation,
-                                                        callbacks=callbacks, seed=seed)
+                                                        constraint=constraint,
+                                                        callbacks=callbacks,
+                                                        seed=seed)
         alfa = float(self.sparse)    
-        cycle=0
-        if self.cycle_lasso: cycle=lag_order
-
         #Base model
-        modelall = MTCLR(lasso = alfa,
-                      learning_rate = self.learning_rate,
-                      max_iter = self.epochs,
-                      cycle_period=cycle)
-        if self.verbose: print("Training base model")
-        modelall.fit(X=Xs,y=y,
-                     min_coef=min_coefs, max_coef=max_coefs,
-                     abs_sum_min=forced_relation,
-                     batch=self.batch_size, tensoboard_writer=writer,
-                     callbacks=[copy.deepcopy(cb) for cb in callbacks])
+        SparseLinearModel.regularizer=self.regularizer
+
+        modelall = SparseLinearModel(input_dim=x_l,
+                                     output_dim=nrows,
+                                     constraint=constraint,
+                                     lasso = alfa,
+                                     batch_size=self.batch_size,
+                                     epochs=self.epochs,
+                                     x_norm_mean=self.mean1,
+                                     x_norm_std=self.std1,
+                                     y_norm_mean=self.mean2,
+                                     y_norm_std=self.std2,
+                                     seed=seed)
+
+        opt=self.optimizer(modelall.parameters(), lr=self.learning_rate)
+        if self.scheduler is not None:
+            scheduler = copy.deepcopy(self.scheduler)
+            scheduler.optimizer=opt
+        else:
+            scheduler = None
+        
+        modelall.train_model(X_train=Xs,y_train=y,
+                             optimizer=opt,
+                             callbacks=[copy.deepcopy(cb) for cb in callbacks],
+                             tensoboard_writer=writer,
+                             scheduler=scheduler,
+                             verbose=self.verbose)
         
         #Data lacking models
         lr = self.learning_rate*self.relative_referece_learning_rate
-        modelmissone = MTCLR(lasso = alfa,
-                          learning_rate = lr,
-                          max_iter = self.epochs,
-                          cycle_period=cycle)
-        min_coefs_add = min_coefs.copy()
-        max_coefs_add = max_coefs.copy()
+        possible_relation_mod=possible_relation.copy()
+        
         for nr,name in zip(columns_id,causes):
             if self.verbose: print(name)
-            min_coefs_add[:,[nr*lag_order+_ for _ in range(lag_order)]]=0
-            max_coefs_add[:,[nr*lag_order+_ for _ in range(lag_order)]]=0
+            possible_relation_mod[:,[nr*lag_order+_ for _ in range(lag_order)]]=0
 
             if self.writer:
-                writer = SummaryWriter.create_file_writer(self.writer_outdir+"reference_model_"+name+"_scikit_"+datetime.datetime.now().strftime("%Y%m%d-%H%M%S"))
-            if self.verbose:
-                print(f"Training reference model without {name}")
-            modelmissone.fit(X = Xs, y = y,
-                             min_coef = min_coefs_add, max_coef = max_coefs_add,
-                             abs_sum_min = forced_relation,
-                             batch = self.batch_size, tensoboard_writer = writer,
+                writer = SummaryWriter(self.writer_outdir+"reference_model_"+name+"_pytorch_"+datetime.datetime.now().strftime("%Y%m%d-%H%M%S"))
+
+            constraint2=RelationExists(relation_table=possible_relation_mod,relation_list=forced_relation)
+            modelmissone = SparseLinearModel(input_dim=x_l,
+                                         output_dim=nrows,
+                                         constraint=constraint2,
+                                         lasso = alfa,
+                                         batch_size=self.batch_size,
+                                         epochs=self.epochs,
+                                         x_norm_mean=self.mean1,
+                                         x_norm_std=self.std1,
+                                         y_norm_mean=self.mean2,
+                                         y_norm_std=self.std2,
+                                         seed=seed)
+            
+            if self.verbose: print("Copying weights")
+            modelmissone.set_weights(modelall.linear.weight.data.clone(), modelall.linear.bias.data.clone())
+            
+            opt2=self.optimizer(modelmissone.parameters(), lr=lr)
+            if self.scheduler is not None:
+                scheduler = copy.deepcopy(self.scheduler)
+                scheduler.optimizer=opt2
+            else:
+                scheduler = None
+
+            modelmissone.train_model(X_train=Xs,y_train=y,
+                             optimizer=opt2,
                              callbacks=[copy.deepcopy(cb) for cb in callbacks],
-                             initial_beta = modelall.coef_)
+                             tensoboard_writer=writer,
+                             verbose=self.verbose)
         
             self.results.update_column(name, column_id=nr,
                                        base_model = modelall, ref_model = modelmissone,
                                        x = Xs,y = y,
-                                       lag_order = lag_order)
+                                       lag_order = lag_order,
+                                       model_type=2)
             
-            min_coefs_add[:,[nr*lag_order+_ for _ in range(lag_order)]] = min_coefs[:,[nr*lag_order+_ for _ in range(lag_order)]]
-            max_coefs_add[:,[nr*lag_order+_ for _ in range(lag_order)]] = max_coefs[:,[nr*lag_order+_ for _ in range(lag_order)]]
+            possible_relation_mod[:,[nr*lag_order+_ for _ in range(lag_order)]] = possible_relation[:,[nr*lag_order+_ for _ in range(lag_order)]]
