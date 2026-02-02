@@ -4,7 +4,7 @@ Library of causal analisys alorthims which was created as main subject of BSc th
 # Installing
 It is recomended to clone repository or complex_granger_analysis folder to download repository. You can use:
 
-`git clone https://github.com/Smoldersob/complex_granger_analisys.git`
+`git clone https://github.com/Smoldersob/complex_granger_analysis.git`
 
 # Using
 After importing/cloning you can access add library by importing it using import:
