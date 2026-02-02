@@ -1,6 +1,9 @@
 from sklearn.linear_model._base import _preprocess_data,LinearModel
 from sklearn.base import RegressorMixin
-from tensorflow import summary
+try: 
+    from tensorflow import summary
+except:
+    raise ImportWarning("No tensorflow found")
 from sklearn.utils.validation import (
     check_consistent_length,
     validate_data,

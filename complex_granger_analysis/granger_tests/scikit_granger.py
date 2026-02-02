@@ -5,7 +5,10 @@ from typing import List
 import datetime
 import random
 
-from tensorflow import summary as SummaryWriter
+try: 
+    from tensorflow import summary as SummaryWriter
+except:
+    raise ImportWarning("No tensorflow found")
 
 from .complex_granger import ComplexGrangerAnalisysModel
 from ..models.MultiTaskConstrainedLinearRegression import MultiTaskConstrainedLinearRegression as MTCLR
@@ -256,7 +259,10 @@ class SparseConstaraintedMVGC(ComplexGrangerAnalisysModel):
         
         #Writer
         if self.writer:
-            writer = SummaryWriter.create_file_writer(self.writer_outdir+"base_model_scikit_"+datetime.datetime.now().strftime("%Y%m%d-%H%M%S"))
+            try:
+                writer = SummaryWriter.create_file_writer(self.writer_outdir+"base_model_scikit_"+datetime.datetime.now().strftime("%Y%m%d-%H%M%S"))
+            except:
+                writer=False
         else:
             writer=self.writer
 
@@ -296,7 +302,10 @@ class SparseConstaraintedMVGC(ComplexGrangerAnalisysModel):
             max_coefs_add[:,[nr*lag_order+_ for _ in range(lag_order)]]=0
 
             if self.writer:
-                writer = SummaryWriter.create_file_writer(self.writer_outdir+"reference_model_"+name+"_scikit_"+datetime.datetime.now().strftime("%Y%m%d-%H%M%S"))
+                try:        
+                    writer = SummaryWriter.create_file_writer(self.writer_outdir+"reference_model_"+name+"_scikit_"+datetime.datetime.now().strftime("%Y%m%d-%H%M%S"))
+                except:
+                    writer=False
             if self.verbose:
                 print(f"Training reference model without {name}")
             modelmissone.fit(X = Xs, y = y,
