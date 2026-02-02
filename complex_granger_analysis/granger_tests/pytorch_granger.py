@@ -11,7 +11,7 @@ from torch.utils.tensorboard import SummaryWriter
 from .complex_granger import ComplexGrangerAnalisysModel
 from ..models.PytorchSparseLinearModel import SparseLinearModel,RelationExists
 from ..callbacks.callbacks import EarlyStopping,ProcentageChange
-from ..granger_analisys_results import RSS
+from ..granger_analysis_results import RSS
 from ..regularizers.regularizers_pytorch import CyclicL1Regularizer
 
 class PTNeuralSparseConstaraintedMVGC(ComplexGrangerAnalisysModel):

@@ -26,7 +26,7 @@ from keras.regularizers import L1
 from keras.optimizers import Adam
 
 from .complex_granger import ComplexGrangerAnalisysModel
-from ..granger_analisys_results import RSS
+from ..granger_analysis_results import RSS
 from ..regularizers.regularizers_keras import KerasCyclicL1Regularizer
         
 
