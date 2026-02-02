@@ -1,2 +1,18 @@
 # Complex Granger Analisys Library
 Library of causal analisys alorthims which was created as main subject of BSc thesis and further developted as part of MA thesis.  It implements various implementations of Granger Analisys algorithms with modifications.  It is also beening developed in a way that is supposed to allow easy customization and development
+
+# Installing
+It is recomended to clone repository or complex_granger_analysis folder to download repository. You can use:
+
+git clone https://github.com/Smoldersob/complex_granger_analisys.git
+
+# Using
+After importing/cloning you can access add library by importing it using import:
+
+import complex_granger_analysis as cga
+
+Or its parts using from:
+
+from complex_granger_analysis.granger_tests import tensorflow_granger
+
+Since torch and tensorflow are not recomended to be used in one enviroment, parts that use tensorflow or torch will be automatically included or excluded dependend on available library.
