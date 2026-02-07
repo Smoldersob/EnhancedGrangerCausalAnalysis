@@ -3,7 +3,7 @@ import pandas as pd
 from statsmodels.tsa.vector_ar.var_model import VAR
 
 
-def auto_select_lag(data: pd.DataFrame,  max_lag: int = 20, min_lag: int = 1 , maximum: bool = True) -> int:
+def auto_select_lag(data: pd.DataFrame,  min_lag: int = 1 , max_lag: int = 20, maximum: bool = True) -> int:
     """
     Determines the optimal lag order for a VAR model using information criteria.
 
@@ -95,4 +95,5 @@ def make_static(data,order:int):
         #data[-order:]=np.nan
         return data
     else:
+
         return data
