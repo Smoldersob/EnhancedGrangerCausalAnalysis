@@ -167,7 +167,7 @@ class MultiTaskConstrainedLinearRegression(LinearModel, RegressorMixin):
         while prev_epoch_loss<0 or (np.abs(prev_epoch_loss - epoch_loss) > self.tol):
             if (step>0): 
                 for callback in callbacks:
-                    if hasattr(callback, 'on_epoch_begining') and not callback.on_epoch_begining(prev_epoch_loss,epoch_loss):
+                    if hasattr(callback, 'on_epoch_begining') and not callback.on_epoch_begining(prev_epoch_loss,epoch_loss,step):
                         if_break=True
                         break
             if if_break:

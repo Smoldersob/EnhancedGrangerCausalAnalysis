@@ -78,7 +78,7 @@ class SparseLinearModel(nn.Module):
         self.linear = nn.Linear(input_dim, output_dim, bias=fit_intercept)
         self.constraint = constraint
         
-        nn.init.normal_(self.linear.weight, mean=0., std=0.05)
+        nn.init.zeros_(self.linear.weight)
         if fit_intercept:
             nn.init.zeros_(self.linear.bias)
 
@@ -125,7 +125,7 @@ class SparseLinearModel(nn.Module):
                 g.manual_seed(self.seed)
             self.dataloader = DataLoader(dataset, batch_size=self.batch_size, shuffle=True, generator=g)
 
-        prev_epoch_loss = float('inf')
+        prev_epoch_loss = -1
         epoch_loss = float('inf')
 
         for callback in callbacks:
@@ -140,7 +140,7 @@ class SparseLinearModel(nn.Module):
                 if(np.abs(prev_epoch_loss - epoch_loss) < self.tol):
                     break
                 for callback in callbacks:
-                    if hasattr(callback, 'on_epoch_begining') and callback.on_epoch_begining(prev_epoch_loss,epoch_loss) is False:
+                    if hasattr(callback, 'on_epoch_begining') and callback.on_epoch_begining(prev_epoch_loss,epoch_loss,epoch) is False:
                         if_break=True
                         break
                 if if_break:

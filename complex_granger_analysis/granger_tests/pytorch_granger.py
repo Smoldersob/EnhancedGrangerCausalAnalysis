@@ -10,7 +10,7 @@ from torch.utils.tensorboard import SummaryWriter
 
 from .complex_granger import ComplexGrangerAnalisysModel
 from ..models.PytorchSparseLinearModel import SparseLinearModel,RelationExists
-from ..callbacks.callbacks import EarlyStopping,ProcentageChange
+from ..callbacks.callbacks import EarlyStopping
 from ..granger_analysis_results import RSS
 from ..regularizers.regularizers_pytorch import CyclicL1Regularizer
 
@@ -21,7 +21,7 @@ class PTNeuralSparseConstaraintedMVGC(ComplexGrangerAnalisysModel):
             self,
             max_lag:int = 20,
             learning_rate:float|None = None,
-            relative_referece_learning_rate:float = 0.1,
+            relative_referece_learning_rate:float = 0.05,
             batch_size:int = None,
             epochs:int = 1000,
             sparse:float = 0.0,
@@ -121,7 +121,7 @@ class PTNeuralSparseConstaraintedMVGC(ComplexGrangerAnalisysModel):
             relation: dict = dict(),
             base_lag:int = None,
             custom_lag: Dict[str,List[int]] = {},
-            callbacks=[EarlyStopping(),ProcentageChange()],
+            callbacks=[EarlyStopping()],
             seed=None,
             unused_data=0
         ):
@@ -216,7 +216,7 @@ class PTNeuralSparseConstaraintedMVGC(ComplexGrangerAnalisysModel):
             
         #Auto learning rate
         if self.learning_rate is None:
-            self.learning_rate = 0.1/x_l*y.shape[1]
+            self.learning_rate = 0.5/x_l
         
         if self.batch_size is None:
             self.batch_size = Xs.shape[0]

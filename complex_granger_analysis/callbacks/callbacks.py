@@ -33,7 +33,7 @@ class Callback():
         """
         pass
 
-    def on_epoch_begining(self, prev_epoch_loss, curr_epoch_loss):
+    def on_epoch_begining(self, prev_epoch_loss, curr_epoch_loss,epoch):
         """
         Decide whether to continue training at epoch start.
 
@@ -91,7 +91,7 @@ class ProcentageChange(Callback):
     def __init__(self,proc_change=1e-4):
         self.proc_change=proc_change
 
-    def on_epoch_begining(self,prev_epoch_loss,curr_epoch_loss):
+    def on_epoch_begining(self,prev_epoch_loss,curr_epoch_loss,epoch):
         return ((np.abs(prev_epoch_loss - curr_epoch_loss) > self.proc_change*curr_epoch_loss))
 
 
@@ -108,11 +108,17 @@ class EarlyStopping(Callback):
         self.current_model=None
         self.river_to_best=river_to_best
 
-    def on_epoch_begining(self,prev_epoch_loss,curr_epoch_loss):
-        if (curr_epoch_loss - self.current_best) < 0:
+    def on_train_begining(self):
+        self.current_patience=self.patience
+        self.current_best=np.inf
+        self.best_model=None
+        self.current_model=None
+
+    def on_epoch_begining(self,prev_epoch_loss,curr_epoch_loss,epoch):
+        if (curr_epoch_loss - self.current_best) >= 0:
             self.current_patience=self.current_patience-1
         else:
-            self.current_best=self.patience
+            self.current_best=curr_epoch_loss
             self.current_patience=self.patience
             if self.river_to_best: 
                 self.best_model=self.current_model
