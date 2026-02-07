@@ -3,7 +3,7 @@ import pandas as pd
 from statsmodels.tsa.vector_ar.var_model import VAR
 
 
-def auto_select_lag(data: pd.DataFrame, max_lag: int = 20, maximum: bool = True) -> int:
+def auto_select_lag(data: pd.DataFrame,  max_lag: int = 20, min_lag: int = 1 , maximum: bool = True) -> int:
     """
     Determines the optimal lag order for a VAR model using information criteria.
 
@@ -32,7 +32,7 @@ def auto_select_lag(data: pd.DataFrame, max_lag: int = 20, maximum: bool = True)
     
     aic, bic, fpe, hqic = [], [], [], []
     model = VAR(data) 
-    p = np.arange(1,max_lag)
+    p = np.arange(max(1,min_lag),max_lag)
     for i in p:
         try:
             result = model.fit(i)
@@ -55,7 +55,7 @@ def auto_select_lag(data: pd.DataFrame, max_lag: int = 20, maximum: bool = True)
     else:
         return min(lags_metrics_df.idxmin(axis=0))
     
-def create_lagged_data(data: pd.DataFrame, lag: int, with_zero=True) -> tuple[pd.DataFrame, pd.DataFrame]:
+def create_lagged_data(data: pd.DataFrame, min_lags: np.ndarray, max_lags: np.ndarray) -> tuple[pd.DataFrame, pd.DataFrame]:
     """
     Generates lagged features and aligned target variables for time-series modeling.
 
@@ -76,19 +76,15 @@ def create_lagged_data(data: pd.DataFrame, lag: int, with_zero=True) -> tuple[pd
     - Drops initial rows with falsely values due to lagging.
     - Columns in X are sorted hierarchically by signal name and lag value (ascending).
     """
-    
     x=data.values.copy()
-    if with_zero:
-        X=np.zeros((x.shape[0],x.shape[1]*lag))
-        for k in range(x.shape[1]):
-            X[:,k*lag:k*lag+lag]=np.concat([np.roll(x[:,[k]],i,axis=0) for i in range(lag)],axis=1)
-        X=X[lag:,:]
-    else:
-        x=data.values.copy()
-        X=np.zeros((x.shape[0],x.shape[1]*lag))
-        for k in range(x.shape[1]):
-            X[:,k*lag:k*lag+lag]=np.concat([np.roll(x[:,[k]],i+1,axis=0) for i in range(lag)],axis=1)
-        X=X[lag:,:]
+    
+    X=np.zeros((x.shape[0],(max_lags-min_lags+1).sum(dtype=int)))
+    data_indexes=(max_lags-min_lags+1).cumsum(dtype=int)
+    data_indexes=np.concat([[0],data_indexes],dtype=int)
+
+    for k in range(x.shape[1]):
+        X[:,data_indexes[k]:data_indexes[k+1]]=np.concat([np.roll(x[:,[k]],i,axis=0) for i in range(int(min_lags[k]),int(max_lags[k]+1))],axis=1)
+    X=X[max_lags.max():,:]
     return X
 
 def make_static(data,order:int):

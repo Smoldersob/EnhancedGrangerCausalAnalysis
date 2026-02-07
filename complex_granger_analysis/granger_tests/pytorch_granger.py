@@ -3,7 +3,7 @@ import numpy as np
 import copy
 import random
 import datetime
-from typing import List
+from typing import List,Dict
 
 import torch.optim as optim
 from torch.utils.tensorboard import SummaryWriter
@@ -119,7 +119,8 @@ class PTNeuralSparseConstaraintedMVGC(ComplexGrangerAnalisysModel):
             causes: list = None,
             effects: list = None,
             relation: dict = dict(),
-            lag: int = None,
+            base_lag:int = None,
+            custom_lag: Dict[str,List[int]] = {},
             callbacks=[EarlyStopping(),ProcentageChange()],
             seed=None,
             unused_data=0
@@ -143,8 +144,11 @@ class PTNeuralSparseConstaraintedMVGC(ComplexGrangerAnalisysModel):
         relation : dict, optional
             Dictionary specifying known causal relations between variables as keys (tuples of cause and effect) and values indicating
             the type of relation (e.g., 0 to enforce no causal effect). Used to constrain model coefficients accordingly.
-        lag : int, optional
-            The number of lagged time steps to include in the model. If None, the lag order is selected automatically.
+        base_lag : int, optional
+            Number of lagged time steps to include. If None, lag order is selected automatically.
+        custom_lag : dict, optional
+            Dictionary of lag ranges for column given by key. If value consists of of list of 2 elements first they are
+            treated as lowest and largest lag used on column. If there is list with one value ist is treated  as largest lag.  
         callbacks : list, optional
             List of callback instances to be called during model training, e.g., for monitoring or early stopping.
         seed : int, optional
@@ -196,19 +200,19 @@ class PTNeuralSparseConstaraintedMVGC(ComplexGrangerAnalisysModel):
         
         nrows, columns_id, data_list_static = super().prepare_static(data_list=data,causes=causes,effects=effects)        
         if self.verbose: print("Set lag:")
-        Xs, y, lag_order =  super().prepare_lag(data_list=data_list_static,effects=effects,lag=lag)
+        Xs, y, column_indexes =  super().prepare_lag(data_list=data_list_static,effects=effects,lag=base_lag,custom_lag=custom_lag)
         if self.verbose: print(f"{self.lag_order}")
         Xs, y, forced_relation, possible_relation = super().prepare_experts_knowladge(Xs=Xs,y=y,columns=columns_names,
                                                                                       effects=effects,relation=relation,
-                                                                                      lag_order=lag_order,
+                                                                                      column_indexes=column_indexes,
                                                                                       seed=seed,unused_data=unused_data)
         
         
         x_l = Xs.shape[1]  
         constraint=RelationExists(possible_relation,forced_relation) 
 
-        if hasattr(self.regularizer,'period'):
-            self.regularizer.period=lag_order
+        if hasattr(self.regularizer,'set_lag_orders'):
+            self.regularizer.set_lag_orders(column_indexes)
             
         #Auto learning rate
         if self.learning_rate is None:
@@ -235,6 +239,8 @@ class PTNeuralSparseConstaraintedMVGC(ComplexGrangerAnalisysModel):
                                                         constraint=constraint,
                                                         callbacks=callbacks,
                                                         seed=seed)
+            if self.verbose:print(f'L1 value: {self.sparse}')
+            
         alfa = float(self.sparse)    
         #Base model
         SparseLinearModel.regularizer=self.regularizer
@@ -271,7 +277,7 @@ class PTNeuralSparseConstaraintedMVGC(ComplexGrangerAnalisysModel):
         
         for nr,name in zip(columns_id,causes):
             if self.verbose: print(name)
-            possible_relation_mod[:,[nr*lag_order+_ for _ in range(lag_order)]]=0
+            possible_relation_mod[:,column_indexes[nr]:column_indexes[nr+1]]=0
 
             if self.writer:
                 writer = SummaryWriter(self.writer_outdir+"reference_model_"+name+"_pytorch_"+datetime.datetime.now().strftime("%Y%m%d-%H%M%S"))
@@ -308,7 +314,8 @@ class PTNeuralSparseConstaraintedMVGC(ComplexGrangerAnalisysModel):
             self.results.update_column(name, column_id=nr,
                                        base_model = modelall, ref_model = modelmissone,
                                        x = Xs,y = y,
-                                       lag_order = lag_order,
+                                       column_indexes = column_indexes,
                                        model_type=2)
             
-            possible_relation_mod[:,[nr*lag_order+_ for _ in range(lag_order)]] = possible_relation[:,[nr*lag_order+_ for _ in range(lag_order)]]
+            possible_relation_mod[:,column_indexes[nr]:column_indexes[nr+1]]=possible_relation[:,column_indexes[nr]:column_indexes[nr+1]]
+        
