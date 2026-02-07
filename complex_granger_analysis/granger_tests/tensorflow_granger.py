@@ -249,7 +249,7 @@ class TFNeuralSparseConstaraintedMVGC(ComplexGrangerAnalisysModel):
             model = Sequential([
                 Input(shape = (X.shape[1],)),
                 Normalization(mean = self.mean1, variance = self.var1, dtype='float32', name = 'NormX'),
-                Dense(y.shape[1], kernel_initializer = 'random_normal',
+                Dense(y.shape[1], kernel_initializer = 'zeros',
                   activation = "linear",
                   kernel_constraint = constraint,
                   bias_initializer = 'zeros',
@@ -417,7 +417,7 @@ class TFNeuralSparseConstaraintedMVGC(ComplexGrangerAnalisysModel):
         modelall = Sequential([
             Input(shape = (Xs.shape[1],)),
             Normalization(mean = self.mean1, variance = self.var1, dtype='float32', name = 'NormX'),
-            Dense(nrows, kernel_initializer = 'random_normal',
+            Dense(nrows, kernel_initializer = 'zeros',
                   activation = "linear",
                   kernel_constraint = constraint,
                   bias_initializer = 'zeros',
@@ -478,4 +478,5 @@ class TFNeuralSparseConstaraintedMVGC(ComplexGrangerAnalisysModel):
                                        model_type=1)
             
             possible_relation_add[:,column_indexes[nr]:column_indexes[nr+1]]=possible_relation[:,column_indexes[nr]:column_indexes[nr+1]]
+
         
