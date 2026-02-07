@@ -1,6 +1,6 @@
 from sklearn.linear_model._base import _preprocess_data,LinearModel
 from sklearn.base import RegressorMixin
-try: 
+try:
     from tensorflow import summary
 except:
     raise ImportWarning("No tensorflow found")
@@ -68,7 +68,7 @@ class MultiTaskConstrainedLinearRegression(LinearModel, RegressorMixin):
         tol=1e-15,
         learning_rate=1.0,
         max_iter=10000,
-        cycle_period=1
+        cycle_indexes=False
     ):
         self.fit_intercept = fit_intercept
         self.copy_X = copy_X
@@ -78,7 +78,7 @@ class MultiTaskConstrainedLinearRegression(LinearModel, RegressorMixin):
         self.tol = tol
         self.learning_rate = learning_rate
         self.max_iter = max_iter
-        self.cycle_period=cycle_period
+        self.cycle_indexes=cycle_indexes
 
     def _set_coef(self, beta):
         self.coef_ = beta
@@ -160,8 +160,8 @@ class MultiTaskConstrainedLinearRegression(LinearModel, RegressorMixin):
         if_break=False
         
         cycling=1
-        if self.cycle_period>1:
-            positions=np.arange(len(self.cycle))%int(self.cycle_period)
+        if self.cycle_indexes is not False:
+            positions=np.concat([np.arange(l) for l in np.diff(self.cycle_indexes)])
             cycling=self.cycle[positions]
 
         while prev_epoch_loss<0 or (np.abs(prev_epoch_loss - epoch_loss) > self.tol):
@@ -229,7 +229,7 @@ class MultiTaskConstrainedLinearRegression(LinearModel, RegressorMixin):
 
     def _update_beta(self, beta, grad, hessian, loss_scale, min_coef, max_coef,abs_sum_min, n_features, cycling):
         prev_value = beta
-        new_value = beta - grad / hessian.diagonal() * self.learning_rate/(n_features/4)
+        new_value = beta - grad / hessian.diagonal() * self.learning_rate/n_features
         
         if self.lasso:
             new_value = self._apply_cycling_lasso(beta, grad, hessian, loss_scale, prev_value, new_value, n_features, cycling)
@@ -243,11 +243,11 @@ class MultiTaskConstrainedLinearRegression(LinearModel, RegressorMixin):
         return np.clip(new_value, min_coef, max_coef)
 
     def _apply_cycling_lasso(self, beta, grad, hessian, loss_scale, prev_value, new_value, n_features, cycling):
-        sign=np.sign([[prev_value[i][j] or new_value[i][j] for j in range(len(prev_value[i]))] for i in range(len(prev_value))])
+        sign=np.sign([[prev_value[i][j] for j in range(len(prev_value[i]))] for i in range(len(prev_value))])
         new_value2 = (
             beta
-            - cycling*(grad + sign * self.lasso * loss_scale)
-            / hessian.diagonal()/(n_features/4)
+            - (grad + cycling * sign * self.lasso * loss_scale)
+            / hessian.diagonal()/n_features
             * self.learning_rate
         )
 

@@ -1,4 +1,5 @@
 import tensorflow as tf
+import numpy as np
 from tensorflow.keras.regularizers import Regularizer
 
 class KerasCyclicL1Regularizer(Regularizer):
@@ -18,7 +19,11 @@ class KerasCyclicL1Regularizer(Regularizer):
             coeffs = tf.linspace(1.0, 3.0, 20)
         self.coeffs = tf.convert_to_tensor(coeffs, dtype=tf.float32)
         self.enable_cyclic = bool(enable_cyclic)
-        self.period=len(coeffs)
+        self.lag_order=len(coeffs)
+
+
+    def set_lag_orders(self,lag_order):
+        self.indices=tf.convert_to_tensor(np.concat([np.arange(l) for l in np.diff(lag_order)]), dtype=tf.int32)
 
     def __call__(self, x):
         x = tf.convert_to_tensor(x, dtype=tf.float32)
@@ -35,12 +40,9 @@ class KerasCyclicL1Regularizer(Regularizer):
             raise ValueError(f"Nieobsługiwany kształt tensora wag: {abs_x.shape}")
 
         m = tf.shape(weights_per_input)[0]
-        if self.period is None:
-            self.period= tf.shape(self.coeffs)[0]
 
         if self.enable_cyclic:
-            indices = tf.math.mod(tf.range(m), self.period)
-            multipliers = tf.gather(self.coeffs, indices)
+            multipliers = tf.gather(self.coeffs, self.indices)
         else:
             multipliers = tf.ones_like(weights_per_input)
 

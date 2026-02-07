@@ -1,6 +1,8 @@
+
+
 import pandas as pd
 import numpy as np
-from typing import List
+from typing import List, Dict
 from joblib import Parallel, delayed
 
 from ..utilits import static_adfuller_order
@@ -16,14 +18,17 @@ from sklearn.model_selection import train_test_split
 class ComplexGrangerAnalisysModel():
     
     n_jobs=1
-    with_zero_lag=False
 
     def __init__(self,
                  auto_sparse_iterations:int,
                  max_lag:int,
                  non_static:List[str]=[],
+                 use_zero_lag=False,
+                 min_lag=1,
                  **kwargs
                 ):
+        self.zero_lag=use_zero_lag
+        self.min_lag=min_lag
         self.auto_sparse_iterations = auto_sparse_iterations
         self.max_lag = max_lag
         self.verbose = False
@@ -39,7 +44,8 @@ class ComplexGrangerAnalisysModel():
             causes: list = None,
             effects: list = None,
             relation: dict = dict(),
-            lag: int = None,
+            base_lag: int|List[int] = None,
+            custom_lag: Dict[str,List[int]] = {},
             callbacks=[],
             seed=None,
             unused_data=0
@@ -83,7 +89,7 @@ class ComplexGrangerAnalisysModel():
     def prepare_data_for_l1_fitting(self, X, y, seed=None):
         X_train, X_val, y_train, y_val = train_test_split(X, y, test_size=0.2, random_state=seed)
         # Generate a list of candidate alphas on a log scale (e.g., from 1e-4 to 1)
-        alphas = np.logspace(-6, 0, self.auto_sparse_iterations)
+        alphas = np.logspace(-8, -2, self.auto_sparse_iterations)
         best_score = np.inf
         alphas = alphas.tolist()
         best_alpha = 0
@@ -99,13 +105,17 @@ class ComplexGrangerAnalisysModel():
         #Analised data control
         columns_names=data_list[0].columns.to_list()
         columns_id=[data_list[0].columns.to_list().index(cause) for cause in causes]
-    
+        
+        data_list_common_columns=[]
+        for data in data_list:
+            data_list_common_columns.append(data[data_list[0].columns])
+        
         nrows=len(effects)
         self.results = GrangerAnalisysResults(effects = effects,causes = causes)
         
         static_orders=[0 for i in range(len(columns_names))]
             
-        for data in data_list:
+        for data in data_list_common_columns:
             #Presupposition check
             results=[]
             for var in data.columns:
@@ -125,7 +135,7 @@ class ComplexGrangerAnalisysModel():
             return data_c
         
         tasks = []
-        for data in data_list:
+        for data in data_list_common_columns:
             tasks.append((data, static_orders))
         
         data_list_static = Parallel(n_jobs=self.n_jobs)(
@@ -138,26 +148,44 @@ class ComplexGrangerAnalisysModel():
                 data_list: List[pd.DataFrame],
                 effects: list = None,
                 lag: int = None,
+                custom_lag: Dict[str,List[int]] = {}
                 ):
-    
+        
+        columns_names=data_list[0].columns.to_list()
+        
+        min_lags=np.ones(len(columns_names),dtype=int)
+        min_lags=(self.zero_lag==False)*min_lags
+        
+        max_lags=np.ones(len(columns_names),dtype=int)
+        
         if lag is None:
             tasks = []
             for data in data_list:
-                tasks.append((data, self.max_lag))
+                tasks.append((data, self.min_lag, self.max_lag))
             
             results = Parallel(n_jobs=self.n_jobs)(
                 delayed(auto_select_lag)(*task) for task in tasks
             )
-            lag_order = np.max(results)
+            max_lags = max_lags*int(np.max(results))
         else:
-            lag_order = lag
-        self.lag_order=lag_order
+            max_lags = max_lags*int(lag)
 
-        if self.with_zero_lag: lag_order=lag_order+1
+        for i,name in enumerate(columns_names):
+            if custom_lag.__contains__(name):
+                if len(custom_lag[name])==1:
+                    max_lags[i]=int(custom_lag[name][0])
+                elif len(custom_lag[name])==2:
+                    max_lags[i]=int(custom_lag[name][1])
+                    min_lags[i]=int(custom_lag[name][0])
+                else:
+                    raise ValueError("Custom lag has to contain list of one (max lag) or\n" \
+                    " two (min and max lag) int values")
+        
+        self.lag_order={'min':min_lags,'max':max_lags}
 
         tasks = []
         for data in data_list:
-            tasks.append((data, lag_order, self.with_zero_lag))
+            tasks.append((data, min_lags, max_lags))
         
         results = Parallel(n_jobs=self.n_jobs)(
             delayed(create_lagged_data)(*task) for task in tasks
@@ -170,23 +198,26 @@ class ComplexGrangerAnalisysModel():
 
         tasks2 = []
         for data in data_list:
-            tasks2.append((data, effects, lag_order))
+            tasks2.append((data, effects, max_lags.max()))
         
         results2 = Parallel(n_jobs=self.n_jobs)(
             delayed(drop_unusable_ys)(*task) for task in tasks2
         )    
         
         y=np.concat(results2,axis=0)
-        return Xs, y, lag_order
+        
+        column_indexes=(max_lags-min_lags+1).cumsum(dtype=int)
+        column_indexes=np.concat([[0],column_indexes])
+        return Xs, y, column_indexes
     
     def prepare_experts_knowladge(
             self,
             Xs:pd.DataFrame|np.ndarray,
             y:pd.DataFrame|np.ndarray,
+            column_indexes: np.ndarray,
             columns: list = None,
             effects: list = None,
             relation: dict = dict(),
-            lag_order: int = 0,
             seed=None,
             unused_data=0
         ):
@@ -207,16 +238,16 @@ class ComplexGrangerAnalisysModel():
             if c2 in effects:
                 i = effects.index(c1)
                 if c2 in columns:
-                    j = columns.index(c2)*lag_order
+                    j = columns.index(c2)
                     if relation[(c1,c2)] == 0:
-                        possible_relation[i,j:lag_order+j] = 0
+                        possible_relation[i,column_indexes[j]:column_indexes[j+1]] = 0
                     else:
-                        forced_relation.append([i,[k for k in range(j,lag_order+j)],relation[(c1,c2)]]) 
+                        forced_relation.append([i,[k for k in range(column_indexes[j],column_indexes[j+1])],relation[(c1,c2)]]) 
         
-        if  self.with_zero_lag:
-            for c in effects:
-                i = effects.index(c)
-                j = columns.index(c)*lag_order
-                possible_relation[i,j] = 0                    
-
+        for i,effect in enumerate(effects):
+            j=columns.index(effect)
+            if self.lag_order['min'][j]==0:
+                j0 = column_indexes[j]
+                possible_relation[i,j0] = 0                    
+           
         return Xs, y, forced_relation, possible_relation

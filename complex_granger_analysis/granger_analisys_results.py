@@ -23,20 +23,19 @@ class GrangerAnalisysResults():
         self.F_test=pd.DataFrame(np.ones((nrows,ncols)),effects,causes)
         self.p_value=pd.DataFrame(np.ones((nrows,ncols)),effects,causes)
         self.sign=pd.DataFrame(np.ones((nrows,ncols)),effects,causes)
-        self.delay=1
         self.base_weights=None
         self.ref_weights=dict()
     
-    def update_column(self,column,column_id,base_model,ref_model,x,y,lag_order,model_type=0):
+    def update_column(self,column,column_id,base_model,ref_model,x,y,column_indexes,model_type=0):
         #Models errors
         RSS_base=RSS(base_model,x,y)
         RSS_ref=RSS(ref_model,x,y)
         self.base_error.loc[:,column]=RSS_base/y.shape[0]/y.shape[1]
         self.ref_error.loc[:,column]=RSS_ref/y.shape[0]/y.shape[1]
-        self.delay=lag_order
         
         #Sign of relation check
-        start = lag_order*column_id
+        start = column_indexes[column_id]
+        end = column_indexes[column_id+1]
         
         max_coef = 0
         min_coef = 0
@@ -44,20 +43,20 @@ class GrangerAnalisysResults():
         match model_type:
             case 0:
                 #Scikit model
-                max_coef = np.array([max(_) for _ in base_model.coef_[:,int(start):int(start+lag_order)]])
-                min_coef = np.array([min(_) for _ in base_model.coef_[:,int(start):int(start+lag_order)]])
+                max_coef = np.array([max(_) for _ in base_model.coef_[:,int(start):int(end)]])
+                min_coef = np.array([min(_) for _ in base_model.coef_[:,int(start):int(end)]])
                 self.ref_weights.update({column:ref_model.coef_})
                 self.base_weights = base_model.coef_
             case 2:
                 #Pytorch model
-                max_coef = np.array([max(_) for _ in base_model.linear.weight.data.cpu().numpy()[:,int(start):int(start+lag_order)]])
-                min_coef = np.array([min(_) for _ in base_model.linear.weight.data.cpu().numpy()[:,int(start):int(start+lag_order)]])
+                max_coef = np.array([max(_) for _ in base_model.linear.weight.data.cpu().numpy()[:,int(start):int(end)]])
+                min_coef = np.array([min(_) for _ in base_model.linear.weight.data.cpu().numpy()[:,int(start):int(end)]])
                 self.ref_weights.update({column:ref_model.linear.weight.data.cpu().numpy()})
                 self.base_weights = base_model.linear.weight.data.cpu().numpy()
             case 1:
                 #Tensorflow model
-                max_coef=np.array([max(_) for _ in base_model.get_weights()[-2].transpose()[:,int(start):int(start+lag_order)]])
-                min_coef=np.array([min(_) for _ in base_model.get_weights()[-2].transpose()[:,int(start):int(start+lag_order)]])
+                max_coef=np.array([max(_) for _ in base_model.get_weights()[-2].transpose()[:,int(start):int(end)]])
+                min_coef=np.array([min(_) for _ in base_model.get_weights()[-2].transpose()[:,int(start):int(end)]])
                 self.ref_weights.update({column:ref_model.get_weights()[-2].transpose()})
                 self.base_weights = base_model.get_weights()[-2].transpose()
             case _:
@@ -65,6 +64,8 @@ class GrangerAnalisysResults():
         self.sign.loc[:,column]=np.sign(max_coef+min_coef)
         
         #Causation check
+        lag_order=end-start
+        
         n,p = x.shape
         p=p/lag_order
         self.F_test.loc[:,column]=F_test_value(RSS_ref,RSS_base,lag_order,p,n)
@@ -84,10 +85,10 @@ class GrangerAnalisysResults():
         else:
             sorted_arr = sort_rows_desc_abs(self.base_weights)
         
-        rows = sorted_arr.shape[0]  # Liczba wierszy w tablicy
-        fig, axes = plt.subplots(rows, 1, figsize=(6, rows * 2))  # Tworzenie siatki wykresów
+        rows = sorted_arr.shape[0]  # Number of necessry rows
+        fig, axes = plt.subplots(rows, 1, figsize=(6, rows * 2))
         if rows == 1:
-            axes = [axes]  # Upewnienie się, że axes zawsze jest iterowalnym obiektem
+            axes = [axes]
         
         if i is None or i>sorted_arr.shape[1] or i<0:
             i=sorted_arr.shape[1]

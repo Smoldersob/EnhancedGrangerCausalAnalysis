@@ -1,11 +1,11 @@
 import numpy as np
 import pandas as pd
 import copy
-from typing import List
+from typing import List, Dict
 import datetime
 import random
 
-try: 
+try:
     from tensorflow import summary as SummaryWriter
 except:
     raise ImportWarning("No tensorflow found")
@@ -80,12 +80,12 @@ class SparseConstaraintedMVGC(ComplexGrangerAnalisysModel):
             self,
             max_lag:int = 20,
             learning_rate:float = 1,
-            relative_referece_learning_rate:float = 1.,
+            relative_referece_learning_rate:float = 1,
             batch_size:int = None,
-            epochs:int = 1000,
+            epochs:int = 10000,
             sparse:float = 0.0,
             auto_sparse_iterations:int = 20,
-            sparse_fit_epochs:int = 30,
+            sparse_fit_epochs:int = 100,
             writer = False,
             writer_outdir:str = "logs/fit/",
             cycle_lasso=False,
@@ -169,7 +169,8 @@ class SparseConstaraintedMVGC(ComplexGrangerAnalisysModel):
             causes: list = None,
             effects: list = None,
             relation: dict = dict(),
-            lag: int = None,
+            base_lag:int = None,
+            custom_lag: Dict[str,List[int]] = {},
             callbacks = [ProcentageChange()],
             seed = None,
             unused_data = 0
@@ -193,8 +194,11 @@ class SparseConstaraintedMVGC(ComplexGrangerAnalisysModel):
         relation : dict, optional
             Dictionary specifying known causal relations between variables as keys (tuples of cause and effect) and values indicating
             the type of relation (e.g., 0 to enforce no causal effect). Used to constrain model coefficients accordingly.
-        lag : int, optional
-            The number of lagged time steps to include in the model. If None, the lag order is selected automatically.
+        base_lag : int, optional
+            Number of lagged time steps to include. If None, lag order is selected automatically.
+        custom_lag : dict, optional
+            Dictionary of lag ranges for column given by key. If value consists of of list of 2 elements first they are
+            treated as lowest and largest lag used on column. If there is list with one value ist is treated  as largest lag.  
         callbacks : list, optional
             List of callback instances to be called during model training, e.g., for monitoring or early stopping.
         seed : int, optional
@@ -246,11 +250,11 @@ class SparseConstaraintedMVGC(ComplexGrangerAnalisysModel):
 
         nrows, columns_id, data_list_static = super().prepare_static(data_list=data,causes=causes,effects=effects)        
         if self.verbose: print("Set lag:")
-        Xs, y, lag_order =  super().prepare_lag(data_list=data_list_static,effects=effects,lag=lag)
+        Xs, y, column_indexes =  super().prepare_lag(data_list=data_list_static,effects=effects,lag=base_lag,custom_lag=custom_lag)
         if self.verbose: print(f"{self.lag_order}")
         Xs, y, forced_relation, possible_relation = super().prepare_experts_knowladge(Xs=Xs,y=y,columns=columns_names,
                                                                                       effects=effects,relation=relation,
-                                                                                      lag_order=lag_order,
+                                                                                      column_indexes=column_indexes,
                                                                                       seed=seed,unused_data=unused_data)
         
         x_l = Xs.shape[1]
@@ -272,15 +276,15 @@ class SparseConstaraintedMVGC(ComplexGrangerAnalisysModel):
                                                         min_coefs=min_coefs, max_coefs=max_coefs,
                                                         forced_relation=forced_relation,
                                                         callbacks=callbacks, seed=seed)
+            if self.verbose:print(f'L1 value: {self.sparse}')
         alfa = float(self.sparse)    
-        cycle=0
-        if self.cycle_lasso: cycle=lag_order
-
+        cycle=False
+        if self.cycle_lasso: cycle=column_indexes
         #Base model
         modelall = MTCLR(lasso = alfa,
                       learning_rate = self.learning_rate,
                       max_iter = self.epochs,
-                      cycle_period=cycle)
+                      cycle_indexes=cycle)
         if self.verbose: print("Training base model")
         modelall.fit(X=Xs,y=y,
                      min_coef=min_coefs, max_coef=max_coefs,
@@ -293,13 +297,13 @@ class SparseConstaraintedMVGC(ComplexGrangerAnalisysModel):
         modelmissone = MTCLR(lasso = alfa,
                           learning_rate = lr,
                           max_iter = self.epochs,
-                          cycle_period=cycle)
+                          cycle_indexes=cycle)
         min_coefs_add = min_coefs.copy()
         max_coefs_add = max_coefs.copy()
         for nr,name in zip(columns_id,causes):
             if self.verbose: print(name)
-            min_coefs_add[:,[nr*lag_order+_ for _ in range(lag_order)]]=0
-            max_coefs_add[:,[nr*lag_order+_ for _ in range(lag_order)]]=0
+            min_coefs_add[:,column_indexes[nr]:column_indexes[nr+1]]=0
+            max_coefs_add[:,column_indexes[nr]:column_indexes[nr+1]]=0
 
             if self.writer:
                 try:        
@@ -318,7 +322,7 @@ class SparseConstaraintedMVGC(ComplexGrangerAnalisysModel):
             self.results.update_column(name, column_id=nr,
                                        base_model = modelall, ref_model = modelmissone,
                                        x = Xs,y = y,
-                                       lag_order = lag_order)
+                                       column_indexes = column_indexes)
             
-            min_coefs_add[:,[nr*lag_order+_ for _ in range(lag_order)]] = min_coefs[:,[nr*lag_order+_ for _ in range(lag_order)]]
-            max_coefs_add[:,[nr*lag_order+_ for _ in range(lag_order)]] = max_coefs[:,[nr*lag_order+_ for _ in range(lag_order)]]
+            min_coefs_add[:,column_indexes[nr]:column_indexes[nr+1]] = min_coefs[:,column_indexes[nr]:column_indexes[nr+1]]
+            max_coefs_add[:,column_indexes[nr]:column_indexes[nr+1]] = max_coefs[:,column_indexes[nr]:column_indexes[nr+1]]

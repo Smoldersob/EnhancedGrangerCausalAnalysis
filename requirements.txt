@@ -5,6 +5,7 @@ matplotlib
 statsmodels
 scikit-learn
 scipy
-tensorflow
-torch
 joblib
+# It is adviced to use tensorflow or torch not both
+tensorflow
+# torch

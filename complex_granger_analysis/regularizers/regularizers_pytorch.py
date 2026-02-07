@@ -1,3 +1,4 @@
+import np
 import torch
 import torch.nn as nn
 
@@ -18,8 +19,10 @@ class CyclicL1Regularizer(nn.Module):
         else:
             self.register_buffer('coeffs', torch.tensor(coeffs, dtype=torch.float32))
         self.enable_cyclic = enable_cyclic
-        self.period = len(self.coeffs)
+        self.lag_order = 1
         
+    def set_lag_orders(self,lag_order):
+        self.indices=np.concat([np.arange(l) for l in np.diff(lag_order)])
 
     def forward(self, param):
         if not self.training or param.numel() == 0:
@@ -39,8 +42,7 @@ class CyclicL1Regularizer(nn.Module):
         device = weights_per_input.device
         
         if self.enable_cyclic:
-            indices = torch.arange(m, device=device) % self.period
-            multipliers = self.coeffs[indices].to(device)
+            multipliers = self.coeffs[self.indices].to(device)
         else:
             multipliers = torch.ones(m, device=device, dtype=weights_per_input.dtype)
         

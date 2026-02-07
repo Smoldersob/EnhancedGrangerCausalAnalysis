@@ -3,7 +3,7 @@ import numpy as np
 import copy
 import random
 import datetime
-from typing import List
+from typing import List, Dict
 
 import tensorflow as tf
 from tensorflow import random as tfrandom 
@@ -190,7 +190,7 @@ class TFNeuralSparseConstaraintedMVGC(ComplexGrangerAnalisysModel):
             self,
             max_lag:int = 20,
             learning_rate:float = None,
-            relative_referece_learning_rate:float = 0.1,
+            relative_referece_learning_rate:float = 0.05,
             batch_size:int = None,
             epochs:int = 1000,
             sparse:float = 0.0,
@@ -279,8 +279,9 @@ class TFNeuralSparseConstaraintedMVGC(ComplexGrangerAnalisysModel):
             causes:list = None,
             effects:list = None,
             relation:dict = dict(),
-            lag:int = None,
-            callbacks = [EarlyStopping(monitor = 'loss', patience = 10,start_from_epoch=1,min_delta=1e-8)],
+            base_lag:int = None,
+            custom_lag: Dict[str,List[int]] = {},
+            callbacks = [EarlyStopping(monitor = 'loss', patience = 15,start_from_epoch=1,min_delta=1e-8)],
             seed = None,
             unused_data = 0
         ):
@@ -304,8 +305,11 @@ class TFNeuralSparseConstaraintedMVGC(ComplexGrangerAnalisysModel):
         relation : dict, optional
             Dictionary specifying known causal relations as keys (cause, effect) and values indicating relation type
             (e.g., 0 to forbid causality). Used to build constraints on model weights.
-        lag : int, optional
+        base_lag : int, optional
             Number of lagged time steps to include. If None, lag order is selected automatically.
+        custom_lag : dict, optional
+            Dictionary of lag ranges for column given by key. If value consists of of list of 2 elements first they are
+            treated as lowest and largest lag used on column. If there is list with one value ist is treated  as largest lag.  
         callbacks : list, optional
             List of Keras callback instances for training control (e.g., early stopping).
         seed : int, optional
@@ -365,24 +369,24 @@ class TFNeuralSparseConstaraintedMVGC(ComplexGrangerAnalisysModel):
         
         nrows, columns_id, data_list_static = super().prepare_static(data_list=data,causes=causes,effects=effects)        
         if self.verbose: print("Set lag:")
-        Xs, y, lag_order =  super().prepare_lag(data_list=data_list_static,effects=effects,lag=lag)
+        Xs, y, column_indexes =  super().prepare_lag(data_list=data_list_static,effects=effects,lag=base_lag,custom_lag=custom_lag)
         if self.verbose: print(f"{self.lag_order}")
         Xs, y, forced_relation, possible_relation = super().prepare_experts_knowladge(Xs=Xs,y=y,columns=columns_names,
                                                                                       effects=effects,relation=relation,
-                                                                                      lag_order=lag_order,
+                                                                                      column_indexes=column_indexes,
                                                                                       seed=seed,unused_data=unused_data)
         
         x_l = Xs.shape[1]
         constraint=RelationExists(relation_table=possible_relation,relation_list=forced_relation)  
         constraint2=RelationExists(relation_table=possible_relation,relation_list=forced_relation)
         
-        if hasattr(self.regularizer,'period'):
-            self.regularizer.period=lag_order
+        if hasattr(self.regularizer,'set_lag_orders'):
+            self.regularizer.set_lag_orders(column_indexes)
         
 
         #Auto learning rate
         if self.learning_rate is None:
-            self.learning_rate = 0.1/x_l
+            self.learning_rate = 0.5/x_l
         
         if self.batch_size is None:
             self.batch_size = Xs.shape[0]
@@ -404,6 +408,8 @@ class TFNeuralSparseConstaraintedMVGC(ComplexGrangerAnalisysModel):
             self.sparse = self._select_optimal_l1_param(X=Xs,y=y,
                                                         constraint=constraint,
                                                         callbacks=callbacks,seed=seed)
+            if self.verbose:print(f'L1 value: {self.sparse}')
+            
         self.regularizer.alpha = float(self.sparse)
         if self.verbose: print(f"Learning rate: {self.learning_rate}")
         #Base model
@@ -441,7 +447,7 @@ class TFNeuralSparseConstaraintedMVGC(ComplexGrangerAnalisysModel):
         possible_relation_add = possible_relation.copy()
         for nr,name in zip(columns_id,causes):
             if self.verbose: print(name)
-            possible_relation_add[:,[nr*lag_order+_ for _ in range(lag_order)]]=0
+            possible_relation_add[:,column_indexes[nr]:column_indexes[nr+1]]=0
             constraint2.update_relation_table(possible_relation_add)
     
             #Callback
@@ -468,9 +474,8 @@ class TFNeuralSparseConstaraintedMVGC(ComplexGrangerAnalisysModel):
             self.results.update_column(name, column_id=nr,
                                        base_model = modelall, ref_model = modelmissone,
                                        x = Xs,y = y,
-                                       lag_order = lag_order,
+                                       column_indexes = column_indexes,
                                        model_type=1)
             
-            possible_relation_add[:,[nr*lag_order+_ for _ in range(lag_order)]]=possible_relation[:,[nr*lag_order+_ for _ in range(lag_order)]]
-        
+            possible_relation_add[:,column_indexes[nr]:column_indexes[nr+1]]=possible_relation[:,column_indexes[nr]:column_indexes[nr+1]]
         
