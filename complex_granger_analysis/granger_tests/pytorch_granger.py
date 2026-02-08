@@ -276,7 +276,7 @@ class PTNeuralSparseConstaraintedMVGC(ComplexGrangerAnalisysModel):
         possible_relation_mod=possible_relation.copy()
         
         for nr,name in zip(columns_id,causes):
-            if self.verbose: print(name)
+            if self.verbose: print('\n',name)
             possible_relation_mod[:,column_indexes[nr]:column_indexes[nr+1]]=0
 
             if self.writer:

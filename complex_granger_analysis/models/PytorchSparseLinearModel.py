@@ -165,7 +165,7 @@ class SparseLinearModel(nn.Module):
             if self.writer:
                 self.writer.add_scalar('epoch_loss', epoch_loss, epoch)
             if verbose:
-                print(f"Epoch {epoch + 1}/{self.epochs} - Loss: {epoch_loss:.6f}")
+                print(f"Epoch {epoch + 1}/{self.epochs} - Loss: {epoch_loss:.6f}     ", end="\r")
 
             for callback in callbacks:
                 if hasattr(callback, 'on_epoch_end'):
