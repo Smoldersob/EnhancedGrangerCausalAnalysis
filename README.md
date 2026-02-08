@@ -2,9 +2,11 @@
 Library of causal analisys alorthims which was created as main subject of BSc thesis and further developted as part of MA thesis.  It implements various implementations of Granger Analisys algorithms with modifications.  It is also beening developed in a way that is supposed to allow easy customization and development
 
 # Installing
-It is recomended to clone repository or complex_granger_analysis folder to download repository. You can use:
+It is recomended to clone repository or to download repository and place complex_granger_analysis folder in your project directory. You can use bellow code to clone the repository:
 
 `git clone https://github.com/Smoldersob/complex_granger_analysis.git`
+
+
 
 # Using
 After importing/cloning you can access add library by importing it using import:
