@@ -11,48 +11,42 @@ class KerasCyclicL1Regularizer(Regularizer):
     Regularizer is dedicated for models, where inputs from one period are of simiular
     nature but are order by probability of effect (ex. autoregression, power series). 
     """
-    alpha=0
+    l1 = 0
 
     def __init__(self, coeffs=None, enable_cyclic=False):
         if coeffs is None:
-            # Domyślnie 20 wartości liniowo od 1 do 3
             coeffs = tf.linspace(1.0, 3.0, 20)
         self.coeffs = tf.convert_to_tensor(coeffs, dtype=tf.float32)
         self.enable_cyclic = bool(enable_cyclic)
-        self.lag_order=len(coeffs)
+        self.lag_order = len(coeffs)
+        self.indices = None
 
-
-    def set_lag_orders(self,lag_order):
-        self.indices=tf.convert_to_tensor(np.concat([np.arange(l) for l in np.diff(lag_order)]), dtype=tf.int32)
+    def set_lag_orders(self, lag_order):
+        self.indices = tf.constant(np.concatenate([np.arange(l) for l in np.diff(lag_order)]), dtype=tf.int32)
 
     def __call__(self, x):
-        x = tf.convert_to_tensor(x, dtype=tf.float32)
+        if self.l1==0 or self.l1 is None:
+            return tf.constant(0.0, dtype=tf.float32)
         abs_x = tf.abs(x)
 
-        # Suma |w| per zmienna wejściowa (oś wejściowa)
         if len(abs_x.shape) == 1:
-            # Np. bias: traktujemy każdy element jako osobne "wejście"
             weights_per_input = abs_x
         elif len(abs_x.shape) == 2:
-            # Dense kernel: (input_dim, output_dim) -> sum po output_dim
             weights_per_input = tf.reduce_sum(abs_x, axis=1)
         else:
-            raise ValueError(f"Nieobsługiwany kształt tensora wag: {abs_x.shape}")
+            raise ValueError(f"Unsupported weight tensor shape: {abs_x.shape}")
 
-        m = tf.shape(weights_per_input)[0]
-
-        if self.enable_cyclic:
+        if self.enable_cyclic and self.indices is not None:
             multipliers = tf.gather(self.coeffs, self.indices)
         else:
-            multipliers = tf.ones_like(weights_per_input)
+            multipliers = 1.0
 
-        reg = self.alpha*tf.reduce_sum(weights_per_input * multipliers)
-        return reg
+        return self.l1 * tf.reduce_sum(weights_per_input * multipliers)
 
     def get_config(self):
         # Umożliwia serializację / zapis modelu
         return {
-            'alpha': self.alpha,
+            'l1': self.l1,
             "coeffs": self.coeffs.numpy().tolist(),
             "enable_cyclic": self.enable_cyclic,
         }

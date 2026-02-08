@@ -26,90 +26,9 @@ from keras.regularizers import L1
 from keras.optimizers import Adam
 
 from .complex_granger import ComplexGrangerAnalisysModel
-from ..granger_analysis_results import RSS
+from ..granger_analysis_results import RSS        
 from ..regularizers.regularizers_keras import KerasCyclicL1Regularizer
-        
-
-class RelationExists(Constraint):
-    """
-    Constraint class enforcing specified causal relations on model parameters.
-
-    This constraint modifies the parameter tensor `w` to respect known or forced causal relations
-    between variables. It applies masks to enforce the absence or presence of relations based on a 
-    provided relation table and an optional list of forced relations with target sum values.
-
-    Parameters
-    ----------
-    relation_table : np.ndarray
-        A transpose of a binary matrix indicating allowed relations between variables.
-        Elements equal to 1 indicate allowed relations; 0 indicate forbidden relations.
-    relation_list : list of tuples, optional
-        Each tuple contains (i, Js, value), where:
-        - i (int): index of the effect variable,
-        - Js (list of int): indices of cause variables,
-        - value (float): target sum constraint for the coefficients corresponding to Js and i.
-        If provided, these forced relations are enforced during the constraint application.
-
-    Methods
-    -------
-    __call__(w)
-        Applies the constraint to the parameter tensor `w`, adjusting coefficients to enforce
-        the forced relations and zeroing out coefficients corresponding to forbidden relations.
-
-    Notes
-    -----
-    - The method uses tensor operations to create masks and adjust weights accordingly.
-    - Small epsilon (1e-8) is added in denominators to avoid division by zero.
-    - The constraint is designed to be used within optimization or training loops where `w` is updated iteratively.
-    """
-    def get_config(self):
-        return {'mask': self.mask.numpy()}
-    def __init__(self, relation_table, relation_list=None):
-        # Dynamic mask (can be updated externally)
-        self.zero_mask = tf.Variable(relation_table.T, dtype=tf.float32, trainable=False)
-
-        # Preprocess static forced relations
-        self.has_forced = relation_list is not None and len(relation_list) > 0
-        if self.has_forced:
-            
-            # Ensure forced_relations is always treated as a list
-            if isinstance(relation_list, tuple):
-                relation_list = [relation_list]
-            
-            # Flatten relation list
-            self.i_indices = tf.constant([i for i, _, _ in relation_list], dtype=tf.int32)
-            self.flat_js = tf.concat([tf.constant(js, dtype=tf.int32) for _, js, _ in relation_list], axis=0)
-            self.relation_ids = tf.repeat(tf.range(len(relation_list)), [len(js) for _, js, _ in relation_list])
-            self.values = tf.constant([value for _, _, value in relation_list], dtype=tf.float32)
-
-            # Precompute scatter indices and relation mask
-            self.scatter_indices = tf.stack([self.flat_js, tf.gather(self.i_indices, self.relation_ids)], axis=1)
-            self.relation_mask = tf.scatter_nd(self.scatter_indices, tf.ones_like(self.relation_ids, dtype=tf.float32), shape=relation_table.T.shape)
-    
-    def update_relation_table(self, relation_table):
-        self.zero_mask.assign(relation_table.T)
-        return
-
-    def __call__(self, w):
-        if self.has_forced:
-            # Select columns for each forced relation
-            w_selected = tf.gather(w, self.i_indices, axis=1)
-            mask_selected = tf.gather(self.relation_mask, self.i_indices, axis=1)
-            weighted_sums = tf.reduce_sum(w_selected * mask_selected, axis=0)
-
-            # Compute adjustment
-            under_target = tf.cast(weighted_sums < self.values, tf.float32)
-            adjustment = tf.expand_dims((tf.abs(weighted_sums - self.values) * under_target) / (weighted_sums + 1e-8), axis=0)
-            adjustment_values = tf.gather(tf.reshape(adjustment, [-1]), self.relation_ids)
-            
-            # Apply adjustment only to masked weights
-            adjustment_matrix = tf.scatter_nd(self.scatter_indices, adjustment_values, tf.shape(w))
-            w += tf.multiply(w, adjustment_matrix)
-
-        return tf.multiply(w, self.zero_mask)  # Reapply mask to enforce zeroing
-
-    def get_config(self):
-        return {'mask': self.zero_mask.numpy()}
+from ..models.MaskedDenseLayer import MaskedDense
 
 class TFNeuralSparseConstaraintedMVGC(ComplexGrangerAnalisysModel):
     """
@@ -158,6 +77,8 @@ class TFNeuralSparseConstaraintedMVGC(ComplexGrangerAnalisysModel):
         Training batch size.
     epochs : int
         Number of training epochs.
+    referece_epochs : int
+        Number of training epochs for reference models.
     sparse : float
         Sparsity regularization parameter.
     auto_sparse_iterations : int
@@ -193,9 +114,10 @@ class TFNeuralSparseConstaraintedMVGC(ComplexGrangerAnalisysModel):
             relative_referece_learning_rate:float = 0.05,
             batch_size:int = None,
             epochs:int = 1000,
+            referece_epochs:int = 1000,
             sparse:float = 0.0,
             auto_sparse_iterations:int = 20,
-            sparse_fit_epochs:int = 30,
+            sparse_fit_epochs:int = 100,
             writer = False,
             writer_outdir:str = "logs/fit/",
             optimizer = Adam(),
@@ -204,19 +126,25 @@ class TFNeuralSparseConstaraintedMVGC(ComplexGrangerAnalisysModel):
         super().__init__(auto_sparse_iterations = auto_sparse_iterations,
                          max_lag = max_lag, **kwargs)
         self.learning_rate = learning_rate
-        self.relative_referece_learning_rate = relative_referece_learning_rate
         self.batch_size = batch_size
         self.epochs = epochs
+        self.relative_referece_learning_rate = relative_referece_learning_rate
+        self.referece_epochs=referece_epochs
+
         self.writer = writer
         self.writer_outdir = writer_outdir
-        self.optimizer = optimizer
+        
         self.sparse=sparse
         self.sparse_fit_epochs = sparse_fit_epochs
+
+        self.optimizer = optimizer
+        self._base_optimizer_config = None
+        self._ref_optimizer_config = None
 
         self.verbose=False
 
 
-    def _select_optimal_l1_param(self, X, y, constraint=None, callbacks=[], seed=None):
+    def _select_optimal_l1_param(self, X, y, possible_relation, forced_relation, callbacks=[], seed=None):
         """
         Select optimal L1 regularization parameter for a tensorflow.keras model.
         (Should work like CV-Lasso).
@@ -243,26 +171,40 @@ class TFNeuralSparseConstaraintedMVGC(ComplexGrangerAnalisysModel):
 
         X_train, X_val, y_train, y_val, alphas, best_score, best_alpha = super().prepare_data_for_l1_fitting(X, y, seed)
 
-        for alpha in alphas:
-            self.regularizer.alpha = alpha
-            # Instantiate the model with L1 penalty and current alpha
-            model = Sequential([
-                Input(shape = (X.shape[1],)),
-                Normalization(mean = self.mean1, variance = self.var1, dtype='float32', name = 'NormX'),
-                Dense(y.shape[1], kernel_initializer = 'zeros',
-                  activation = "linear",
-                  kernel_constraint = constraint,
-                  bias_initializer = 'zeros',
-                  kernel_regularizer = self.regularizer),
-                Normalization(mean = self.mean2, variance = self.var2, dtype='float32', name = 'NormY')])
-            model.compile(loss="mean_squared_error", optimizer = copy.deepcopy(self.optimizer))
+        masked_dense = MaskedDense(
+            y.shape[1],
+            kernel_regularizer=self.regularizer,
+            use_bias=True,
+            kernel_initializer='zeros',
+            bias_initializer='zeros',
+            forced_relations=forced_relation
+        )
+
+        model = Sequential([
+            Input(shape=(X.shape[1],)),
+            Normalization(mean=self.mean1, variance=self.var1, dtype='float32', name='NormX'),
+            masked_dense,
+            Normalization(mean=self.mean2, variance=self.var2, dtype='float32', name='NormY')])
+    
+        cv_optimizer = self._create_or_reset_optimizer(self.learning_rate if self.learning_rate else 0.001, is_base=True)
+        masked_dense.update_mask(possible_relation.T.astype('float32'))
+        model.compile(loss="mean_squared_error", optimizer=cv_optimizer)
         
+        initial_weights = model.get_weights()
+        
+        for alpha in alphas:
+            self.regularizer.l1 = alpha
+            model.set_weights(initial_weights)
+            self._reset_optimizer_state(model=model)
+        
+            cv_callbacks = self._create_callbacks(callbacks, log_suffix=None)
+            
             # Fit model
             model.fit(x = X_train, y = y_train,
                     epochs = self.sparse_fit_epochs,
                     batch_size = self.batch_size,
                     verbose = self.verbose,
-                    callbacks = [copy.deepcopy(cb) for cb in callbacks])
+                    callbacks = cv_callbacks)
             
             # Evaluate on validation set
             score = np.mean(RSS(model, X_val, y_val))
@@ -271,6 +213,46 @@ class TFNeuralSparseConstaraintedMVGC(ComplexGrangerAnalisysModel):
                 best_score = score
                 best_alpha = float(alpha)
         return best_alpha
+
+    def _create_callbacks(self, callbacks_template, log_suffix=None):
+        """Create fresh callback instances from template list."""
+        new_callbacks = []
+        for cb in callbacks_template:
+            if isinstance(cb, EarlyStopping):
+                new_callbacks.append(EarlyStopping(
+                    monitor=cb.monitor,
+                    patience=cb.patience,
+                    start_from_epoch=cb.start_from_epoch,
+                    min_delta=cb.min_delta
+                ))
+            else:
+                new_callbacks.append(copy.deepcopy(cb))
+        
+        if self.writer and log_suffix:
+            log_dir = self.writer_outdir + log_suffix + "_" + datetime.datetime.now().strftime("%Y%m%d-%H%M%S")
+            new_callbacks.append(TensorBoard(log_dir=log_dir, histogram_freq=1))
+        
+        return new_callbacks
+
+    def _reset_optimizer_state(self, model):
+        """Reset optimizer internal state without changing learning rate."""
+
+        for var in model.optimizer.variables:
+            if not var.path.__contains__('learning_rate'):
+                var.assign(tf.zeros_like(var))
+            
+    def _create_or_reset_optimizer(self, learning_rate, is_base=True):
+        """Create optimizer instance or reset existing one with new learning rate."""
+        config_key = '_base_optimizer_config' if is_base else '_ref_optimizer_config'
+        
+        if getattr(self, config_key) is None:
+            opt_config = self.optimizer.get_config()
+            setattr(self, config_key, opt_config.copy())
+        
+        config = getattr(self, config_key).copy()
+        config['learning_rate'] = learning_rate
+        
+        return self.optimizer.__class__.from_config(config)
 
 
     def fit(
@@ -376,9 +358,7 @@ class TFNeuralSparseConstaraintedMVGC(ComplexGrangerAnalisysModel):
                                                                                       column_indexes=column_indexes,
                                                                                       seed=seed,unused_data=unused_data)
         
-        x_l = Xs.shape[1]
-        constraint=RelationExists(relation_table=possible_relation,relation_list=forced_relation)  
-        constraint2=RelationExists(relation_table=possible_relation,relation_list=forced_relation)
+        x_l = Xs.shape[1]  
         
         if hasattr(self.regularizer,'set_lag_orders'):
             self.regularizer.set_lag_orders(column_indexes)
@@ -388,15 +368,9 @@ class TFNeuralSparseConstaraintedMVGC(ComplexGrangerAnalisysModel):
         if self.learning_rate is None:
             self.learning_rate = 0.5/x_l
         
-        if self.batch_size is None:
+        if self.batch_size is not None and self.batch_size<=0:
             self.batch_size = Xs.shape[0]
 
-        #Callback
-        callbacks_base = [copy.deepcopy(cb) for cb in callbacks]
-        if self.writer:
-            log_dir = self.writer_outdir+"base_model_keras_"+datetime.datetime.now().strftime("%Y%m%d-%H%M%S")
-            callbacks_base.append(TensorBoard(log_dir=log_dir, histogram_freq=1))
-    
         #Normalization and denormalization parameters
         self.mean1 = Xs.mean(axis=0)
         self.mean2 = -y.mean(axis=0)/y.std(axis=0)
@@ -406,67 +380,84 @@ class TFNeuralSparseConstaraintedMVGC(ComplexGrangerAnalisysModel):
         #Sparsity control
         if self.sparse < 0:
             self.sparse = self._select_optimal_l1_param(X=Xs,y=y,
-                                                        constraint=constraint,
+                                                        possible_relation=possible_relation,
+                                                        forced_relation=forced_relation,
                                                         callbacks=callbacks,seed=seed)
             if self.verbose:print(f'L1 value: {self.sparse}')
             
-        self.regularizer.alpha = float(self.sparse)
+        if hasattr(self.regularizer,'l1'): self.regularizer.l1 = float(self.sparse)
         if self.verbose: print(f"Learning rate: {self.learning_rate}")
+        
+        # Fresh optimizer and callbacks
+        base_optimizer = self._create_or_reset_optimizer(self.learning_rate, is_base=True)
+        callbacks_base = self._create_callbacks(callbacks, log_suffix="base_model_keras")
+    
         #Base model
-        self.optimizer.__init__(self.learning_rate)
+        masked_dense_base = MaskedDense(
+            nrows,
+            kernel_regularizer=self.regularizer,
+            use_bias=True,
+            kernel_initializer='zeros',
+            bias_initializer='zeros',
+            forced_relations=forced_relation
+        )
+    
         modelall = Sequential([
             Input(shape = (Xs.shape[1],)),
             Normalization(mean = self.mean1, variance = self.var1, dtype='float32', name = 'NormX'),
-            Dense(nrows, kernel_initializer = 'zeros',
-                  activation = "linear",
-                  kernel_constraint = constraint,
-                  bias_initializer = 'zeros',
-                  kernel_regularizer = self.regularizer),
+            masked_dense_base,
             Normalization(mean = self.mean2, variance = self.var2, dtype='float32', name = 'NormY')])
-        modelall.compile(loss="mean_squared_error", optimizer = self.optimizer)
         
+        masked_dense_base.update_mask(possible_relation.T.astype('float32'))
+        
+        modelall.compile(loss="mean_squared_error", optimizer = base_optimizer)
+
         modelall.fit(x = Xs, y = y,
                     epochs = self.epochs,
                     batch_size = self.batch_size,
                     verbose = self.verbose,
                     callbacks = callbacks_base)
     
-        weights = modelall.get_weights().copy()
-        
+        base_weights = modelall.get_weights()
+
+        # Reference models optimizer and constaints
+        ref_lr = self.learning_rate * self.relative_referece_learning_rate
+    
         #Reference model
+        masked_dense_ref = MaskedDense(
+            nrows,
+            kernel_regularizer=self.regularizer,
+            use_bias=True,
+            forced_relations=forced_relation
+        )
+        
         modelmissone = Sequential([
                 Input(shape = (Xs.shape[1],)),
                 Normalization(mean = self.mean1, variance = self.var1, dtype='float32', name = 'NormX2'),
-                Dense(nrows,
-                      activation = "linear",
-                      kernel_constraint = constraint2,
-                      bias_initializer = 'zeros',
-                      kernel_regularizer = self.regularizer),
+                masked_dense_ref,
                 Normalization(mean = self.mean2, variance = self.var2, dtype='float32', name = 'NormY2')])
 
-        possible_relation_add = possible_relation.copy()
+        ref_optimizer = self._create_or_reset_optimizer(ref_lr, is_base=False)
+        modelmissone.compile(loss="mean_squared_error", optimizer=ref_optimizer)
+
+        possible_relation_working = possible_relation.copy().astype('float32')
+        
         for nr,name in zip(columns_id,causes):
             if self.verbose: print(name)
-            possible_relation_add[:,column_indexes[nr]:column_indexes[nr+1]]=0
-            constraint2.update_relation_table(possible_relation_add)
-    
-            #Callback
-            callbacks_ref = [copy.deepcopy(cb) for cb in callbacks]
-            if self.writer:
-                log_dir = self.writer_outdir+"reference_model_"+name+"_keras_"+datetime.datetime.now().strftime("%Y%m%d-%H%M%S")
-                callbacks_ref.append(TensorBoard(log_dir = log_dir, histogram_freq=1))
 
-            #Optimizer reset for reference model
-            self.optimizer.__init__(self.learning_rate*self.relative_referece_learning_rate)
+            possible_relation_working[:, column_indexes[nr]:column_indexes[nr+1]] = 0
+            if name!=causes[0]: self._reset_optimizer_state(modelmissone)
 
-            #Data lacking models
-            modelmissone.compile(loss = "mean_squared_error", optimizer = self.optimizer)
+            #Reset
             if self.verbose: print("Copying weights")
-            
-            modelmissone.set_weights(weights)
+            ref_weights=base_weights[:-1]
+            ref_weights.append(possible_relation_working.T)
+            modelmissone.set_weights(ref_weights)
 
+            callbacks_ref = self._create_callbacks(callbacks, log_suffix=f"reference_model_{name}_keras")
+            
             modelmissone.fit(x = Xs, y = y,
-                                epochs = self.epochs,
+                                epochs = self.referece_epochs,
                                 batch_size = self.batch_size,
                                 verbose = self.verbose,
                                 callbacks = callbacks_ref)
@@ -477,6 +468,5 @@ class TFNeuralSparseConstaraintedMVGC(ComplexGrangerAnalisysModel):
                                        column_indexes = column_indexes,
                                        model_type=1)
             
-            possible_relation_add[:,column_indexes[nr]:column_indexes[nr+1]]=possible_relation[:,column_indexes[nr]:column_indexes[nr+1]]
-
+            possible_relation_working[:, column_indexes[nr]:column_indexes[nr+1]] = possible_relation[:, column_indexes[nr]:column_indexes[nr+1]]
         

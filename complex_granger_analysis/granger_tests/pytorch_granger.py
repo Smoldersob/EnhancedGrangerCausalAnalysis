@@ -10,7 +10,7 @@ from torch.utils.tensorboard import SummaryWriter
 
 from .complex_granger import ComplexGrangerAnalisysModel
 from ..models.PytorchSparseLinearModel import SparseLinearModel,RelationExists
-from ..callbacks.callbacks import EarlyStopping
+from ..callbacks.callbacks import EarlyStopping,ProcentageChange
 from ..granger_analysis_results import RSS
 from ..regularizers.regularizers_pytorch import CyclicL1Regularizer
 
@@ -22,11 +22,12 @@ class PTNeuralSparseConstaraintedMVGC(ComplexGrangerAnalisysModel):
             max_lag:int = 20,
             learning_rate:float|None = None,
             relative_referece_learning_rate:float = 0.05,
-            batch_size:int = None,
+            batch_size:int = 32,
             epochs:int = 1000,
+            referece_epochs:int = 1000,
             sparse:float = 0.0,
             auto_sparse_iterations:int = 20,
-            sparse_fit_epochs:int = 30,
+            sparse_fit_epochs:int = 100,
             writer = None,
             writer_outdir:str = "logs/fit/",
             optimizer=optim.Adam,
@@ -42,6 +43,7 @@ class PTNeuralSparseConstaraintedMVGC(ComplexGrangerAnalisysModel):
         self.relative_referece_learning_rate = relative_referece_learning_rate
         self.batch_size = batch_size
         self.epochs = epochs
+        self.referece_epochs=referece_epochs
         
         self.sparse=sparse
         self.sparse_fit_epochs = sparse_fit_epochs
@@ -218,7 +220,7 @@ class PTNeuralSparseConstaraintedMVGC(ComplexGrangerAnalisysModel):
         if self.learning_rate is None:
             self.learning_rate = 0.5/x_l
         
-        if self.batch_size is None:
+        if self.batch_size<=0:
             self.batch_size = Xs.shape[0]
 
         #Writer
@@ -288,7 +290,7 @@ class PTNeuralSparseConstaraintedMVGC(ComplexGrangerAnalisysModel):
                                          constraint=constraint2,
                                          lasso = alfa,
                                          batch_size=self.batch_size,
-                                         epochs=self.epochs,
+                                         epochs=self.referece_epochs,
                                          x_norm_mean=self.mean1,
                                          x_norm_std=self.std1,
                                          y_norm_mean=self.mean2,
