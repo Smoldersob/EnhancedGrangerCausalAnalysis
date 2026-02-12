@@ -1,3 +1,5 @@
+
+
 import pandas as pd
 import numpy as np
 from typing import List, Dict
@@ -15,7 +17,8 @@ from sklearn.model_selection import train_test_split
 
 class ComplexGrangerAnalisysModel():
     
-    n_jobs=1
+    n_jobs=-1
+    static_test_maxlag=4
 
     def __init__(self,
                  auto_sparse_iterations:int,
@@ -120,7 +123,7 @@ class ComplexGrangerAnalisysModel():
                 if var in self.non_static:
                     results.append(0)
                 else:
-                    results.append(static_adfuller_order(data[var], self.max_lag))
+                    results.append(static_adfuller_order(data[var], maxlag=self.static_test_maxlag))
             static_orders=np.max([static_orders,results],axis=0)
         self.static_orders=static_orders
 

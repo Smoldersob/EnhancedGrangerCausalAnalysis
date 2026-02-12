@@ -49,6 +49,8 @@ def grangers_causation_matrix(data, causes=None, effects=None, test='ssr_chi2tes
         effects=data.columns.to_list()
         
     df = pd.DataFrame(np.zeros((len(effects), len(causes))), columns=causes, index=effects)
+    
+
     for c in causes:
         for r in effects:
             test_result = grangercausalitytests(data[[r, c]], maxlag=[lag_order], verbose=False)

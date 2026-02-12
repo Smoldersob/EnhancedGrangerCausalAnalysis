@@ -254,7 +254,6 @@ class TFNeuralSparseConstaraintedMVGC(ComplexGrangerAnalisysModel):
         
         return self.optimizer.__class__.from_config(config)
 
-
     def fit(
             self,
             data: pd.DataFrame|List[pd.DataFrame],
@@ -469,4 +468,5 @@ class TFNeuralSparseConstaraintedMVGC(ComplexGrangerAnalisysModel):
                                        model_type=1)
             
             possible_relation_working[:, column_indexes[nr]:column_indexes[nr+1]] = possible_relation[:, column_indexes[nr]:column_indexes[nr+1]]
+        
         

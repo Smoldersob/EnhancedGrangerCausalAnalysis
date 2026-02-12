@@ -170,7 +170,6 @@ class SparseLinearModel(nn.Module):
             for callback in callbacks:
                 if hasattr(callback, 'on_epoch_end'):
                     callback.on_epoch_end(self)
-        
         for callback in callbacks:
             if hasattr(callback, 'on_train_end'):
                 callback.on_train_end(self)

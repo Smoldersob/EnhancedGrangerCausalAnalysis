@@ -20,8 +20,8 @@ class PTNeuralSparseConstaraintedMVGC(ComplexGrangerAnalisysModel):
     def __init__(
             self,
             max_lag:int = 20,
-            learning_rate:float|None = None,
-            relative_referece_learning_rate:float = 0.05,
+            learning_rate:float|None = 0.001,
+            relative_referece_learning_rate:float = 0.5,
             batch_size:int = 32,
             epochs:int = 1000,
             referece_epochs:int = 1000,
@@ -215,10 +215,6 @@ class PTNeuralSparseConstaraintedMVGC(ComplexGrangerAnalisysModel):
 
         if hasattr(self.regularizer,'set_lag_orders'):
             self.regularizer.set_lag_orders(column_indexes)
-            
-        #Auto learning rate
-        if self.learning_rate is None:
-            self.learning_rate = 0.5/x_l
         
         if self.batch_size<=0:
             self.batch_size = Xs.shape[0]

@@ -2,7 +2,7 @@ import numpy as np
 import pandas as pd
 from statsmodels.tsa.stattools import adfuller, kpss
 
-def static_kpss_order(series: pd.Series) -> pd.Series:
+def static_kpss_order(series: pd.Series, maxlag: int = 3) -> pd.Series:
     """
     Iteratively differences a time series until it becomes stationary according to the KPSS test.
 
@@ -25,15 +25,22 @@ def static_kpss_order(series: pd.Series) -> pd.Series:
     series=series.copy().dropna().values
     if series.var()==0:
         return 0
-    i=0
-    adf_res=kpss(series, regression='ct')
-    while adf_res[1]>0.05:
-        series=np.roll(series,0,axis=0)[1:]-np.roll(series,1,axis=0)[1:]
+    i_best=0
+    p_best=np.inf
+    for i in range(maxlag+1):
         adf_res=kpss(series, regression='ct')
-        i=i+1
-    return i
+        if adf_res[1]<=0.05:
+            i_best=i
+            break
+        else:
+            if p_best>adf_res[1]:
+                i_best=i
+                p_best=adf_res[1]
+        series=np.roll(series,0,axis=0)[1:]-np.roll(series,1,axis=0)[1:]
+        
+    return i_best
 
-def static_adfuller_order(series: pd.Series, maxlag: int = 20) -> pd.Series:
+def static_adfuller_order(series: pd.Series, maxlag: int = 3) -> pd.Series:
     """
     Iteratively differences a time series until it becomes stationary according to the ADF test.
 
@@ -59,10 +66,18 @@ def static_adfuller_order(series: pd.Series, maxlag: int = 20) -> pd.Series:
     series=series.copy().dropna().values
     if series.var()==0:
         return 0
-    i=0
-    adf_res=adfuller(series,maxlag=maxlag)
-    while adf_res[1]>0.05:
-        series=np.roll(series,0,axis=0)[1:]-np.roll(series,1,axis=0)[1:]
+    
+    i_best=0
+    p_best=np.inf
+    for i in range(maxlag+1):
         adf_res=adfuller(series,maxlag=maxlag)
-        i=i+1
-    return i
+        if adf_res[1]<=0.05:
+            i_best=i
+            break
+        else:
+            if p_best>adf_res[1]:
+                i_best=i
+                p_best=adf_res[1]
+        series=np.roll(series,0,axis=0)[1:]-np.roll(series,1,axis=0)[1:]
+        
+    return i_best

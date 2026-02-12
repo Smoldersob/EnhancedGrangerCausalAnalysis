@@ -55,10 +55,10 @@ class GrangerAnalisysResults():
                 self.base_weights = base_model.linear.weight.data.cpu().numpy()
             case 1:
                 #Tensorflow model
-                max_coef=np.array([max(_) for _ in base_model.get_weights()[-2].transpose()[:,int(start):int(end)]])
-                min_coef=np.array([min(_) for _ in base_model.get_weights()[-2].transpose()[:,int(start):int(end)]])
-                self.ref_weights.update({column:ref_model.get_weights()[-2].transpose()})
-                self.base_weights = base_model.get_weights()[-2].transpose()
+                max_coef=np.array([max(_) for _ in base_model.get_weights()[-3].transpose()[:,int(start):int(end)]])
+                min_coef=np.array([min(_) for _ in base_model.get_weights()[-3].transpose()[:,int(start):int(end)]])
+                self.ref_weights.update({column:ref_model.get_weights()[-3].transpose()})
+                self.base_weights = base_model.get_weights()[-3].transpose()
             case _:
                 TypeError("Undefinef type of")
         self.sign.loc[:,column]=np.sign(max_coef+min_coef)
@@ -85,10 +85,10 @@ class GrangerAnalisysResults():
         else:
             sorted_arr = sort_rows_desc_abs(self.base_weights)
         
-        rows = sorted_arr.shape[0]  # Number of necessry rows
-        fig, axes = plt.subplots(rows, 1, figsize=(6, rows * 2))
+        rows = sorted_arr.shape[0]  # Liczba wierszy w tablicy
+        fig, axes = plt.subplots(rows, 1, figsize=(6, rows * 2))  # Tworzenie siatki wykresów
         if rows == 1:
-            axes = [axes]
+            axes = [axes]  # Upewnienie się, że axes zawsze jest iterowalnym obiektem
         
         if i is None or i>sorted_arr.shape[1] or i<0:
             i=sorted_arr.shape[1]

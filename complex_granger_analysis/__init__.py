@@ -22,4 +22,4 @@ if importlib.util.find_spec("torch") is not None:
     from .regularizers.regularizers_pytorch import CyclicL1Regularizer
     __all__.extend(['PTNeuralSparseConstaraintedMVGC','CyclicL1Regularizer'])
 
-__version__ = '1.0.0'
+__version__ = '1.2.0'
