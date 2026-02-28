@@ -20,7 +20,7 @@ else:
 
 from keras import Sequential
 from keras.layers import Dense,Input,Normalization
-from keras.callbacks import EarlyStopping,TensorBoard
+from keras.callbacks import EarlyStopping,TensorBoard, ReduceLROnPlateau
 from keras.constraints import Constraint
 from keras.regularizers import L1
 from keras.optimizers import Adam
@@ -262,7 +262,8 @@ class TFNeuralSparseConstaraintedMVGC(ComplexGrangerAnalisysModel):
             relation:dict = dict(),
             base_lag:int = None,
             custom_lag: Dict[str,List[int]] = {},
-            callbacks = [EarlyStopping(monitor = 'loss', patience = 15,start_from_epoch=1,min_delta=1e-8)],
+            callbacks = [EarlyStopping(monitor = 'loss', patience = 15,start_from_epoch=1,min_delta=1e-8),
+                         ReduceLROnPlateau(monitor = 'loss', patience = 7,min_delta=1e-8)],
             seed = None,
             unused_data = 0
         ):

@@ -63,7 +63,7 @@ class MultiTaskConstrainedLinearRegression(LinearModel, RegressorMixin):
         fit_intercept=True,
         copy_X=True,
         nonnegative=False,
-        ridge=0,
+        ridge=1e-12,
         lasso=0,
         tol=1e-15,
         learning_rate=1.0,
