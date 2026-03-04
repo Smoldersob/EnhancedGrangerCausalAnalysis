@@ -1,1 +1,1 @@
-from complex_granger_analysis import .
+from .complex_granger_analysis import *

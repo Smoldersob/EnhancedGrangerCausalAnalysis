@@ -15,7 +15,7 @@ After importing/cloning you can access add library by importing it using import:
 
 Or its parts using from:
 
-`from complex_granger_analysis.granger_tests import tensorflow_granger`
+`from complex_granger_analysis.complex_granger_analysis.granger_tests import tensorflow_granger`
 
 Since torch and tensorflow are not recomended to be used in one enviroment, parts that use tensorflow or torch will be automatically included or excluded dependend on available library.
 
@@ -27,7 +27,7 @@ Since torch and tensorflow are not recomended to be used in one enviroment, part
   
   data=pd.read_csv("example/PID_no_fault.csv",sep=";",index_col='Unnamed: 0')
   
-  GCANN=CGA.TFNeuralSparseConstaraintedMVGC()
+  GCANN=CGA.tests.TFNeuralSparseConstaraintedMVGC()
   GCANN.fit(data_df,causes=['u','f1','f2'],effects=['x1','x2','x3','x4'])
   causal_matrix=GCANN.results.result()
   causal_matrix.to_csv("PID_causal_relations")
