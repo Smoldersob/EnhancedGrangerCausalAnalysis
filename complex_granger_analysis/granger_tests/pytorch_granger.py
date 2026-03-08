@@ -8,13 +8,13 @@ from typing import List,Dict
 import torch.optim as optim
 from torch.utils.tensorboard import SummaryWriter
 
-from .complex_granger import ComplexGrangerAnalisysModel
+from .complex_granger import ComplexGrangerAnalysisModel
 from ..models.PytorchSparseLinearModel import SparseLinearModel,RelationExists
 from ..callbacks.callbacks import EarlyStopping,ProcentageChange
 from ..granger_analysis_results import RSS
 from ..regularizers.regularizers_pytorch import CyclicL1Regularizer
 
-class PTNeuralSparseConstaraintedMVGC(ComplexGrangerAnalisysModel):
+class PTNeuralSparseConstrainedMVGC(ComplexGrangerAnalysisModel):
     regularizer=CyclicL1Regularizer()
     
     def __init__(
@@ -178,7 +178,7 @@ class PTNeuralSparseConstaraintedMVGC(ComplexGrangerAnalisysModel):
 
         Examples
         --------
-        >>> model = NeuralSparseConstaraintedMVGC(max_lag=5, sparse=0.1, learning_rate=0.01, epochs=100)
+        >>> model = PTNeuralSparseConstrainedMVGC(max_lag=5, sparse=0.1, learning_rate=0.01, epochs=100)
         >>> model.fit(data=df, causes=['X1', 'X2'], effects=['Y'], lag=3, seed=42)
         >>> model.results.result()
         """

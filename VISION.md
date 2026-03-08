@@ -16,7 +16,6 @@ This vision document outlines the current strengths and weaknesses of the implem
 
 ## Weaknesses of the Current Implementation
 - **Lag Selection Limitations**: The current auto-selection method takes the maximum lag across criteria, which may be overly conservative and not optimal for all datasets. It lacks cross-validation or ensemble approaches.
-- **Error Handling and Robustness**: Some functions (e.g., `create_lagged_data`, `make_static`) have potential issues with array indexing and NaN handling, which could lead to incorrect results or crashes.
 - **Scalability**: Performance may degrade with very large datasets due to memory-intensive operations and lack of streaming or batch processing.
 - **Documentation and Testing**: Incomplete documentation for internal functions and limited unit tests, making maintenance and contribution challenging.
 - **Missing Data Support**: No built-in handling for missing values in time series, requiring preprocessing outside the library.
@@ -45,6 +44,7 @@ Based on the analysis of the codebase and identified weaknesses, the following e
 ### 4. Expanded Functionality
 - **Time Series Preprocessing**: Add built-in tools for detrending, deseasonalizing, and outlier detection.
 - **Model Interpretability**: Enhance visualization tools and add SHAP value integration for explaining causal relationships.
+- **Nonlinear Neural Network Methods**: Extend the existing neural network frameworks to explicitly model and test for nonlinear Granger causality. This could include architectures like LSTMs, MLPs with sparsity constraints, or attention-based models that capture complex, nonlinear dependencies. Relevant literature includes *Tank et al. 2018, “Neural Granger Causality for Time Series”* and later work on nonlinear extensions (e.g. LSTM Granger, *Bhardwaj et al. 2020, “Interpretable Neural Networks for Causality Detection”*), as well as kernel-based and recurrent architectures described in *Shojaie & Michailidis 2010* and *Marinazzo et al. 2008*.
 
 ### 5. Testing and Documentation
 - **Comprehensive Test Suite**: Develop unit tests, integration tests, and performance benchmarks covering all modules.

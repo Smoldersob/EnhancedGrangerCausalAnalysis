@@ -1,7 +1,7 @@
 import numpy as np
 import pandas as pd
 
-from ..utilits import static_adfuller_order
+from ..utilities import static_adfuller_order
 from ..lag_engine import auto_select_lag,make_static
 from statsmodels.tsa.stattools import grangercausalitytests
 

@@ -19,18 +19,16 @@ else:
     device_name = '/CPU:0'
 
 from keras import Sequential
-from keras.layers import Dense,Input,Normalization
+from keras.layers import Input,Normalization
 from keras.callbacks import EarlyStopping,TensorBoard, ReduceLROnPlateau
-from keras.constraints import Constraint
-from keras.regularizers import L1
 from keras.optimizers import Adam
 
-from .complex_granger import ComplexGrangerAnalisysModel
+from .complex_granger import ComplexGrangerAnalysisModel
 from ..granger_analysis_results import RSS        
 from ..regularizers.regularizers_keras import KerasCyclicL1Regularizer
 from ..models.MaskedDenseLayer import MaskedDense
 
-class TFNeuralSparseConstaraintedMVGC(ComplexGrangerAnalisysModel):
+class TFNeuralSparseConstrainedMVGC(ComplexGrangerAnalysisModel):
     """
     Neural network-based Sparse Constrained Multivariate Granger Causality (MVGC) model.
 
@@ -102,7 +100,7 @@ class TFNeuralSparseConstaraintedMVGC(ComplexGrangerAnalisysModel):
 
     Examples
     --------
-    >>> model = NeuralSparseConstaraintedMVGC(lag_max=15, learning_rate=0.001, epochs=500)
+    >>> model = TFNeuralSparseConstrainedMVGC(lag_max=15, learning_rate=0.001, epochs=500)
         >>> model.fit(data=df, causes=['X1', 'X2'], effects=['Y'], seed=42)
     """
     regularizer=KerasCyclicL1Regularizer()
@@ -327,7 +325,7 @@ class TFNeuralSparseConstaraintedMVGC(ComplexGrangerAnalisysModel):
 
         Examples
         --------
-        >>> model = NeuralSparseConstaraintedMVGC(max_lag=10, epochs=500, sparse=0.1)
+        >>> model = TFNeuralSparseConstrainedMVGC(max_lag=10, epochs=500, sparse=0.1)
         >>> model.fit(data=df, causes=['X1', 'X2'], effects=['Y'], seed=42)
         """
 

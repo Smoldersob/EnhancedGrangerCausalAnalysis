@@ -10,12 +10,12 @@ try:
 except:
     raise ImportWarning("No tensorflow found")
 
-from .complex_granger import ComplexGrangerAnalisysModel
+from .complex_granger import ComplexGrangerAnalysisModel
 from ..models.MultiTaskConstrainedLinearRegression import MultiTaskConstrainedLinearRegression as MTCLR
 from ..callbacks.callbacks import ProcentageChange
 from ..granger_analysis_results import RSS
 
-class SparseConstaraintedMVGC(ComplexGrangerAnalisysModel):
+class SparseConstrainedMVGC(ComplexGrangerAnalysisModel):
     """
     Sparse Constrained Multivariate Granger Causality (MVGC) model class.
 
@@ -71,7 +71,7 @@ class SparseConstaraintedMVGC(ComplexGrangerAnalisysModel):
 
     Examples
     --------
-    >>> model = SparseConstaraintedMVGC(max_lag=10, learning_rate=0.5, epochs=500, sparse=0.1)
+    >>> model = SparseConstrainedMVGC(max_lag=10, learning_rate=0.5, epochs=500, sparse=0.1)
     >>> model.fit(data=df, causes=['X1', 'X2'], effects=['Y'], lag=3, seed=42)
     >>> model.results.result()
     """
@@ -226,7 +226,7 @@ class SparseConstaraintedMVGC(ComplexGrangerAnalisysModel):
 
         Examples
         --------
-        >>> model = SparseConstaraintedMVGC(max_lag=5, sparse=0.1, learning_rate=0.01, epochs=100)
+        >>> model = SparseConstrainedMVGC(max_lag=5, sparse=0.1, learning_rate=0.01, epochs=100)
         >>> model.fit(data=df, causes=['X1', 'X2'], effects=['Y'], lag=3, seed=42)
         >>> model.results.result()
         """

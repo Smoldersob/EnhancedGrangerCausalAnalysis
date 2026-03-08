@@ -161,7 +161,7 @@ class MultiTaskConstrainedLinearRegression(LinearModel, RegressorMixin):
         
         cycling=1
         if self.cycle_indexes is not False:
-            positions=np.concat([np.arange(l) for l in np.diff(self.cycle_indexes)])
+            positions = np.concatenate([np.arange(l) for l in np.diff(self.cycle_indexes)])
             cycling=self.cycle[positions]
 
         while prev_epoch_loss<0 or (np.abs(prev_epoch_loss - epoch_loss) > self.tol):

@@ -5,17 +5,17 @@ import numpy as np
 from typing import List, Dict
 from joblib import Parallel, delayed
 
-from ..utilits import static_adfuller_order
+from ..utilities import static_adfuller_order
 from ..lag_engine import (
     auto_select_lag,
     create_lagged_data,
     make_static
 )
-from ..granger_analysis_results import GrangerAnalisysResults
+from ..granger_analysis_results import GrangerAnalysisResults
 
 from sklearn.model_selection import train_test_split
 
-class ComplexGrangerAnalisysModel():
+class ComplexGrangerAnalysisModel():
     
     n_jobs=-1
     static_test_maxlag=4
@@ -34,7 +34,7 @@ class ComplexGrangerAnalisysModel():
         self.max_lag = max_lag
         self.verbose = False
         self.non_static=non_static
-        self.results = GrangerAnalisysResults([],[])
+        self.results = GrangerAnalysisResults([],[])
 
     def _select_optimal_l1_param(self, X, y, constraint=None, callbacks=[], seed=None):
         pass
@@ -112,7 +112,7 @@ class ComplexGrangerAnalisysModel():
             data_list_common_columns.append(data[data_list[0].columns])
         
         nrows=len(effects)
-        self.results = GrangerAnalisysResults(effects = effects,causes = causes)
+        self.results = GrangerAnalysisResults(effects = effects,causes = causes)
         
         static_orders=[0 for i in range(len(columns_names))]
             
@@ -191,9 +191,10 @@ class ComplexGrangerAnalisysModel():
         results = Parallel(n_jobs=self.n_jobs)(
             delayed(create_lagged_data)(*task) for task in tasks
         )    
-        
-        Xs=np.concat(results,axis=0)
-        
+        # concat handles empty results gracefully
+        Xs = np.concatenate([r for r in results if r.size > 0], axis=0) if results else np.empty((0, 0))
+
+        # helper to align targets with lagged features
         def drop_unusable_ys(data, effects, order):
             return data[effects].iloc[order:].values
 
@@ -205,10 +206,10 @@ class ComplexGrangerAnalisysModel():
             delayed(drop_unusable_ys)(*task) for task in tasks2
         )    
         
-        y=np.concat(results2,axis=0)
+        y = np.concatenate([r for r in results2 if r.size > 0], axis=0) if results2 else np.empty((0, 0))
         
-        column_indexes=(max_lags-min_lags+1).cumsum(dtype=int)
-        column_indexes=np.concat([[0],column_indexes])
+        column_indexes = (max_lags - min_lags + 1).cumsum(dtype=int)
+        column_indexes = np.concatenate([[0], column_indexes])
         return Xs, y, column_indexes
     
     def prepare_experts_knowladge(

@@ -13,7 +13,7 @@ def F_test_value(error1,error2,lag,rang,n):
 def sort_rows_desc_abs(array):
     return np.array([row[np.argsort(-np.abs(row))] for row in array])
 
-class GrangerAnalisysResults():
+class GrangerAnalysisResults():
 
     def __init__(self,effects,causes):
         nrows=len(effects)

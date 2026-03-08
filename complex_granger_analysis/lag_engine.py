@@ -55,44 +55,90 @@ def auto_select_lag(data: pd.DataFrame,  min_lag: int = 1 , max_lag: int = 20,  
     else:
         return min(lags_metrics_df.idxmin(axis=0))
     
-def create_lagged_data(data: pd.DataFrame, min_lags: np.ndarray, max_lags: np.ndarray) -> tuple[pd.DataFrame, pd.DataFrame]:
+def create_lagged_data(data: pd.DataFrame, min_lags: np.ndarray, max_lags: np.ndarray) -> np.ndarray:
     """
-    Generates lagged features and aligned target variables for time-series modeling.
+    Generates lagged features for multivariate time-series data.
+
+    Each column of ``data`` is expanded into a sequence of delayed versions.
 
     Parameters
-    --------------
+    ----------
     data : pd.DataFrame
-        Input time series data (columns = features).
-    lag : int
-        Number of lag periods to create.
+        Input time series data (columns = variables).
+    min_lags : np.ndarray
+        Minimum lag to include for each variable (shape = n_columns).
+    max_lags : np.ndarray
+        Maximum lag to include for each variable (shape = n_columns).
 
-    Return
-    --------------
-    X : np.array
-        Lagged feature matrix with shape (n_samples, n_features * lag). 
+    Returns
+    -------
+    np.ndarray
+        Lagged feature matrix with shape ``(n_samples - max(max_lags), sum(max_lags -
+        min_lags + 1))``. Rows corresponding to insufficient history are removed.
 
-    Notes:
-    ------
-    - Drops initial rows with falsely values due to lagging.
-    - Columns in X are sorted hierarchically by signal name and lag value (ascending).
+    Notes
+    -----
+    - The caller is responsible for aligning target values (e.g. dropping the first
+      ``max(max_lags)`` rows of the original data).
+    - Any NaNs produced by differencing or shifting are removed by slicing; the
+      returned array should not contain NaNs.
     """
-    x=data.values.copy()
-    
-    X=np.zeros((x.shape[0],(max_lags-min_lags+1).sum(dtype=int)))
-    data_indexes=(max_lags-min_lags+1).cumsum(dtype=int)
-    data_indexes=np.concat([[0],data_indexes],dtype=int)
+    # convert to numpy arrays and validate
+    x = data.values.copy()
+    min_lags = np.asarray(min_lags, dtype=int)
+    max_lags = np.asarray(max_lags, dtype=int)
+    if min_lags.shape != max_lags.shape:
+        raise ValueError("min_lags and max_lags must have the same shape")
+    if np.any(min_lags < 0) or np.any(max_lags < 0):
+        raise ValueError("lag values must be non-negative")
+    if np.any(min_lags > max_lags):
+        raise ValueError("each min_lag must be <= corresponding max_lag")
 
-    for k in range(x.shape[1]):
-        X[:,data_indexes[k]:data_indexes[k+1]]=np.concat([np.roll(x[:,[k]],i,axis=0) for i in range(int(min_lags[k]),int(max_lags[k]+1))],axis=1)
-    X=X[max_lags.max():,:]
+    n_vars = x.shape[1]
+    total_cols = (max_lags - min_lags + 1).sum(dtype=int)
+    X = np.zeros((x.shape[0], total_cols), dtype=x.dtype)
+
+    data_indexes = (max_lags - min_lags + 1).cumsum(dtype=int)
+    data_indexes = np.concatenate([[0], data_indexes], dtype=int)
+
+    for k in range(n_vars):
+        lagged_list = []
+        for i in range(int(min_lags[k]), int(max_lags[k] + 1)):
+            # roll moves data down by i rows; pad front with nan
+            col = np.roll(x[:, [k]], i, axis=0)
+            if i > 0:
+                col[:i, 0] = np.nan
+            lagged_list.append(col)
+        X[:, data_indexes[k] : data_indexes[k + 1]] = np.concatenate(lagged_list, axis=1)
+
+    # drop rows that contain NaNs (first max_lags.max() rows)
+    valid_start = int(max_lags.max())
+    X = X[valid_start:, :]
     return X
 
-def make_static(data,order:int):
-    if order:
-        for i in range(0,order):
-            data=np.roll(data,0,axis=0)-np.roll(data,1,axis=0)
-        data=data.astype(np.float64)
-        data[:order]=np.nan
-        return data
-    else:
-        return data
+def make_static(data, order: int):
+    """Apply differencing to a univariate series to achieve stationarity.
+
+    The original implementation used ``np.roll`` incorrectly which produced
+    zero arrays and silently ignored the requested order.  This version
+    leverages pandas for clarity and correct handling of NaNs.
+
+    Parameters
+    ----------
+    data : array-like or pd.Series
+        Input time series.
+    order : int
+        Number of differences to apply.  ``order <= 0`` returns the input
+        unchanged.
+
+    Returns
+    -------
+    np.ndarray
+        Differenced series with ``order`` NaNs at the beginning.
+    """
+    if order <= 0:
+        return np.asarray(data)
+    s = pd.Series(data).astype(float)
+    for _ in range(order):
+        s = s.diff()
+    return s.values

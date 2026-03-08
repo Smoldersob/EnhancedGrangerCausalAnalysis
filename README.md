@@ -78,7 +78,7 @@ print(gc.results.result())
 complex_granger_analysis/
 ├── __init__.py
 ├── lag_engine.py           # lag selection & lagged-data builders
-├── utilits.py              # stationarity tests and transformations
+├── utilities.py            # stationarity tests and transformations
 ├── granger_analysis_results.py
 ├── granger_tests/           # core models (complex, tensorflow, pytorch,...)
 ├── models/                  # custom layers and linear models

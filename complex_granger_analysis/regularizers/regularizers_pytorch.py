@@ -22,7 +22,7 @@ class CyclicL1Regularizer(nn.Module):
         self.lag_order = 1
         
     def set_lag_orders(self,lag_order):
-        self.indices=np.concat([np.arange(l) for l in np.diff(lag_order)])
+        self.indices = np.concatenate([np.arange(l) for l in np.diff(lag_order)])
 
     def forward(self, param):
         if not self.training or param.numel() == 0:
