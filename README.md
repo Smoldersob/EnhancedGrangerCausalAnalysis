@@ -109,7 +109,8 @@ values of Y alone can achieve.  Extensions implemented in the code include:
    coefficients to zero or above a threshold.
 4. **Three‑value outputs** – infer effect direction (+1/0/−1) from coefficient
    signs.
-
+5. **Lag weighted lasso** - penalty dependent on lag value (with modifiable
+   penalty change vector)
 For more details, consult the original MA thesis and the inline documentation.
 
 ## Dependencies
