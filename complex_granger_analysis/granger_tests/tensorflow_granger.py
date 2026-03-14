@@ -3,7 +3,7 @@ import numpy as np
 import copy
 import random
 import datetime
-from typing import List, Dict
+from typing import List, Dict, Literal
 
 import tensorflow as tf
 from tensorflow import random as tfrandom 
@@ -258,7 +258,7 @@ class TFNeuralSparseConstrainedMVGC(ComplexGrangerAnalysisModel):
             causes:list = None,
             effects:list = None,
             relation:dict = dict(),
-            base_lag:int = None,
+            base_lag: int|List[int]|Literal['auto_common','auto_individual'] = 'auto_common',
             custom_lag: Dict[str,List[int]] = {},
             callbacks = [EarlyStopping(monitor = 'loss', patience = 15,start_from_epoch=1,min_delta=1e-8),
                          ReduceLROnPlateau(monitor = 'loss', patience = 7,min_delta=1e-8)],
@@ -285,11 +285,14 @@ class TFNeuralSparseConstrainedMVGC(ComplexGrangerAnalysisModel):
         relation : dict, optional
             Dictionary specifying known causal relations as keys (cause, effect) and values indicating relation type
             (e.g., 0 to forbid causality). Used to build constraints on model weights.
-        base_lag : int, optional
-            Number of lagged time steps to include. If None, lag order is selected automatically.
-        custom_lag : dict, optional
-            Dictionary of lag ranges for column given by key. If value consists of of list of 2 elements first they are
-            treated as lowest and largest lag used on column. If there is list with one value ist is treated  as largest lag.  
+        base_lag : int|List[int]|Literal['auto_common','auto_individual'], optional
+            The number of lagged time steps to include in the model if it is an integer.
+            If list, each element corresponds to a variable in `causes`.
+            If 'auto_common', the lag order is selected automatically for all variables.
+            If 'auto_individual', the lag order is selected automatically for each variable.
+        custom_lag : Dict[str,List[int]], optional
+            A dictionary specifying custom lag orders for specific variables. The keys are variable names,
+             and the values are lists of one (max lag) or two (min and max lag) integers. This overrides the `base_lag` settings for those variables.
         callbacks : list, optional
             List of Keras callback instances for training control (e.g., early stopping).
         seed : int, optional
@@ -349,7 +352,7 @@ class TFNeuralSparseConstrainedMVGC(ComplexGrangerAnalysisModel):
         
         nrows, columns_id, data_list_static = super().prepare_static(data_list=data,causes=causes,effects=effects)        
         if self.verbose: print("Set lag:")
-        Xs, y, column_indexes =  super().prepare_lag(data_list=data_list_static,effects=effects,lag=base_lag,custom_lag=custom_lag)
+        Xs, y, column_indexes =  super().prepare_lag(data_list=data_list_static,effects=effects,base_lag=base_lag,custom_lag=custom_lag)
         if self.verbose: print(f"{self.lag_order}")
         Xs, y, forced_relation, possible_relation = super().prepare_experts_knowladge(Xs=Xs,y=y,columns=columns_names,
                                                                                       effects=effects,relation=relation,

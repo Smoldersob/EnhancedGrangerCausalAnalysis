@@ -3,14 +3,14 @@ import numpy as np
 import copy
 import random
 import datetime
-from typing import List,Dict
+from typing import List,Dict,Literal
 
 import torch.optim as optim
 from torch.utils.tensorboard import SummaryWriter
 
 from .complex_granger import ComplexGrangerAnalysisModel
 from ..models.PytorchSparseLinearModel import SparseLinearModel,RelationExists
-from ..callbacks.callbacks import EarlyStopping,ProcentageChange
+from ..callbacks.callbacks import EarlyStopping
 from ..granger_analysis_results import RSS
 from ..regularizers.regularizers_pytorch import CyclicL1Regularizer
 
@@ -121,7 +121,7 @@ class PTNeuralSparseConstrainedMVGC(ComplexGrangerAnalysisModel):
             causes: list = None,
             effects: list = None,
             relation: dict = dict(),
-            base_lag:int = None,
+            base_lag:int|List[int]|Literal['auto_common','auto_individual'] = 'auto_common',
             custom_lag: Dict[str,List[int]] = {},
             callbacks=[EarlyStopping()],
             seed=None,
@@ -146,11 +146,14 @@ class PTNeuralSparseConstrainedMVGC(ComplexGrangerAnalysisModel):
         relation : dict, optional
             Dictionary specifying known causal relations between variables as keys (tuples of cause and effect) and values indicating
             the type of relation (e.g., 0 to enforce no causal effect). Used to constrain model coefficients accordingly.
-        base_lag : int, optional
-            Number of lagged time steps to include. If None, lag order is selected automatically.
-        custom_lag : dict, optional
-            Dictionary of lag ranges for column given by key. If value consists of of list of 2 elements first they are
-            treated as lowest and largest lag used on column. If there is list with one value ist is treated  as largest lag.  
+        base_lag : int|List[int]|Literal['auto_common','auto_individual'], optional
+            The number of lagged time steps to include in the model if it is an integer.
+            If list, each element corresponds to a variable in `causes`.
+            If 'auto_common', the lag order is selected automatically for all variables.
+            If 'auto_individual', the lag order is selected automatically for each variable.
+        custom_lag : Dict[str,List[int]], optional
+            A dictionary specifying custom lag orders for specific variables. The keys are variable names,
+             and the values are lists of one (max lag) or two (min and max lag) integers. This overrides the `base_lag` settings for those variables.
         callbacks : list, optional
             List of callback instances to be called during model training, e.g., for monitoring or early stopping.
         seed : int, optional
@@ -202,7 +205,7 @@ class PTNeuralSparseConstrainedMVGC(ComplexGrangerAnalysisModel):
         
         nrows, columns_id, data_list_static = super().prepare_static(data_list=data,causes=causes,effects=effects)        
         if self.verbose: print("Set lag:")
-        Xs, y, column_indexes =  super().prepare_lag(data_list=data_list_static,effects=effects,lag=base_lag,custom_lag=custom_lag)
+        Xs, y, column_indexes =  super().prepare_lag(data_list=data_list_static,effects=effects,base_lag=base_lag,custom_lag=custom_lag)
         if self.verbose: print(f"{self.lag_order}")
         Xs, y, forced_relation, possible_relation = super().prepare_experts_knowladge(Xs=Xs,y=y,columns=columns_names,
                                                                                       effects=effects,relation=relation,

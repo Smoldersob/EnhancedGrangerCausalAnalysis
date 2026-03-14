@@ -1,9 +1,9 @@
 from sklearn.linear_model._base import _preprocess_data,LinearModel
 from sklearn.base import RegressorMixin
-try:
+import importlib
+if importlib.util.find_spec("tensorflow") is not None:
     from tensorflow import summary
-except:
-    raise ImportWarning("No tensorflow found")
+
 from sklearn.utils.validation import (
     check_consistent_length,
     validate_data,
@@ -201,10 +201,17 @@ class MultiTaskConstrainedLinearRegression(LinearModel, RegressorMixin):
         
         
         if self.writer is not None and self.writer != False: 
-            with self.writer.as_default():
-                for step, loss in loss_history:
-                    summary.scalar('epoch_loss', loss, step=step)
-                self.writer.flush()  # Save to file
+            if importlib.util.find_spec("tensorflow") is not None:
+                with self.writer.as_default():
+                    for step, loss in loss_history:
+                        summary.scalar('epoch_loss', loss, step=step)
+                    self.writer.flush()  # Save to file
+            elif importlib.util.find_spec("tensorflow") is not None:
+                self.writer.add_scalar('epoch_loss', epoch_loss, step)
+            else:
+                print("WRITING TO TENSORBOARD UNAVAILABLE. PLEASE USE TENSORFLOW 2.0 OR HIGHER OR PYTORCH 1.2 OR HIGHER")
+                self.writer==False
+                
         
         for callback in callbacks:
             if hasattr(callback, 'on_train_end'):

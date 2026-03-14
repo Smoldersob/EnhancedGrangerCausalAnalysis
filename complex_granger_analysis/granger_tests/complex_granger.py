@@ -1,15 +1,14 @@
-
-
 import pandas as pd
 import numpy as np
-from typing import List, Dict
+from typing import List, Literal, Dict
 from joblib import Parallel, delayed
 
 from ..utilities import static_adfuller_order
 from ..lag_engine import (
     auto_select_lag,
     create_lagged_data,
-    make_static
+    make_static,
+    ARXLagSelector
 )
 from ..granger_analysis_results import GrangerAnalysisResults
 
@@ -26,6 +25,7 @@ class ComplexGrangerAnalysisModel():
                  non_static:List[str]=[],
                  use_zero_lag=False,
                  min_lag=1,
+                 LagSelectorClass=ARXLagSelector(max_lag=20, prune_lags=True),
                  **kwargs
                 ):
         self.zero_lag=use_zero_lag
@@ -34,6 +34,7 @@ class ComplexGrangerAnalysisModel():
         self.max_lag = max_lag
         self.verbose = False
         self.non_static=non_static
+        self.LagSelectorClass = LagSelectorClass
         self.results = GrangerAnalysisResults([],[])
 
     def _select_optimal_l1_param(self, X, y, constraint=None, callbacks=[], seed=None):
@@ -45,7 +46,7 @@ class ComplexGrangerAnalysisModel():
             causes: list = None,
             effects: list = None,
             relation: dict = dict(),
-            base_lag: int|List[int] = None,
+            base_lag: int|List[int]|Literal['auto_common','auto_individual'] = 'auto_common',
             custom_lag: Dict[str,List[int]] = {},
             callbacks=[],
             seed=None,
@@ -70,8 +71,15 @@ class ComplexGrangerAnalysisModel():
         relation : dict, optional
             Dictionary specifying known causal relations between variables as keys (tuples of cause and effect) and values indicating
             the type of relation (e.g., 0 to enforce no causal effect). Used to constrain model coefficients accordingly.
-        lag : int, optional
-            The number of lagged time steps to include in the model. If None, the lag order is selected automatically.
+        base_lag : int|List[int]|Literal['auto_common','auto_individual'], optional
+            The number of lagged time steps to include in the model if it is an integer.
+            If list, each element corresponds to a variable in `causes`.
+            If 'auto_common', the lag order is selected automatically for all variables.
+            If 'auto_individual', the lag order is selected automatically for each variable.
+        custom_lag : Dict[str,List[int]], optional
+            A dictionary specifying custom lag orders for specific variables. The keys are variable names,
+            and the values are lists of one (max lag) or two (min and max lag) integers.
+            This overrides the `base_lag` settings for those variables.
         callbacks : list, optional
             List of callback instances to be called during model training, e.g., for monitoring or early stopping.
         seed : int, optional
@@ -148,7 +156,7 @@ class ComplexGrangerAnalysisModel():
     def prepare_lag(self,
                 data_list: List[pd.DataFrame],
                 effects: list = None,
-                lag: int = None,
+                base_lag: int|List[int]|Literal['auto_common','auto_individual'] = 'auto_common',
                 custom_lag: Dict[str,List[int]] = {}
                 ):
         
@@ -159,7 +167,9 @@ class ComplexGrangerAnalysisModel():
         
         max_lags=np.ones(len(columns_names),dtype=int)
         
-        if lag is None:
+        if isinstance(base_lag, int) or (isinstance(base_lag, list) and all(isinstance(lag, int) for lag in base_lag) and len(base_lag) == len(columns_names)):
+            max_lags = max_lags*int(base_lag)
+        elif base_lag == 'auto_common' or base_lag is None:
             tasks = []
             for data in data_list:
                 tasks.append((data, self.min_lag, self.max_lag))
@@ -168,8 +178,20 @@ class ComplexGrangerAnalysisModel():
                 delayed(auto_select_lag)(*task) for task in tasks
             )
             max_lags = max_lags*int(np.max(results))
+        elif base_lag == 'auto_individual':
+            self.LagSelectorClass.max_lag = self.max_lag
+            self.LagSelectorClass.n_jobs = self.n_jobs
+            self.LagSelectorClass.target_indices = [columns_names.index(effect) for effect in effects]
+            tasks = []
+            for data in data_list:
+                tasks.append((self.LagSelectorClass, data))
+            
+            results = Parallel(n_jobs=self.n_jobs)(
+                delayed(ARXLagSelector.fit)(*task) for task in tasks
+            )
+            max_lags = np.max([np.max(result[1], axis=0) for result in results], axis=0)
         else:
-            max_lags = max_lags*int(lag)
+            raise ValueError("base_lag has to be int, 'auto_common' or 'auto_individual'")
 
         for i,name in enumerate(columns_names):
             if custom_lag.__contains__(name):
