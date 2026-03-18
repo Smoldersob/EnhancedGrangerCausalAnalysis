@@ -258,7 +258,7 @@ class TFNeuralSparseConstrainedMVGC(ComplexGrangerAnalysisModel):
             causes:list = None,
             effects:list = None,
             relation:dict = dict(),
-            base_lag: int|List[int]|Literal['auto_common','auto_individual'] = 'auto_common',
+            base_lag: int|List[int]|Literal['auto_common','auto_per_input','auto_individual'] = 'auto_common',
             custom_lag: Dict[str,List[int]] = {},
             callbacks = [EarlyStopping(monitor = 'loss', patience = 15,start_from_epoch=1,min_delta=1e-8),
                          ReduceLROnPlateau(monitor = 'loss', patience = 7,min_delta=1e-8)],
@@ -285,10 +285,11 @@ class TFNeuralSparseConstrainedMVGC(ComplexGrangerAnalysisModel):
         relation : dict, optional
             Dictionary specifying known causal relations as keys (cause, effect) and values indicating relation type
             (e.g., 0 to forbid causality). Used to build constraints on model weights.
-        base_lag : int|List[int]|Literal['auto_common','auto_individual'], optional
+        base_lag : int|List[int]|Literal['auto_common','auto_per_input','auto_individual'], optional
             The number of lagged time steps to include in the model if it is an integer.
             If list, each element corresponds to a variable in `causes`.
             If 'auto_common', the lag order is selected automatically for all variables.
+            If 'auto_per_input', the lag order is selected automatically for each input variable.
             If 'auto_individual', the lag order is selected automatically for each variable.
         custom_lag : Dict[str,List[int]], optional
             A dictionary specifying custom lag orders for specific variables. The keys are variable names,

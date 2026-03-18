@@ -657,4 +657,103 @@ class ARXLagSelector:
             For each predictor j, maximum lag used across all targets i.
         """
         return pred_lag_matrix.max(axis=0)
-    
+
+    @staticmethod
+    def build_weight_mask(pred_lag_matrix: np.ndarray,
+                          use_lag_zero: bool = False):
+        """
+        Build a binary mask for linear regression weights A in a model:
+
+            Y = A @ X_lagged + B
+
+        Columns of X_lagged are constructed by concatenating, for each
+        predictor j:
+
+            - optionally lag 0 (current value) if use_lag_zero=True,
+            - all lags 1..max_lag_j, where max_lag_j is the maximum selected
+              lag for predictor j across all targets.
+
+        IMPORTANT
+        ---------
+        pred_lag_matrix[i, j] is interpreted as a *maximum lag* for target i
+        and predictor j:
+            - pred_lag_matrix[i, j] = L > 0  means: allow lags 1..L of
+              predictor j when predicting target i.
+            - pred_lag_matrix[i, j] = 0      means: predictor j is not used
+              for target i (no lagged values).
+
+        Parameters
+        ----------
+        pred_lag_matrix : ndarray of shape (n_targets, n_features)
+            pred_lag_matrix[i, j] = maximum lag of feature j used to predict
+            target i (0 means feature j is not used for target i).
+        use_lag_zero : bool, default False
+            If True, allocate one extra column per predictor for lag=0
+            (current value) and set mask[:, col_lag0_j] = 1 for all targets.
+
+        Returns
+        -------
+        mask : ndarray of shape (n_targets, total_lag_features)
+            Binary mask for A:
+            - mask[i, k] = 1 if weight A[i, k] is allowed to be optimized,
+              0 if it should be fixed to zero.
+            - Columns are ordered as blocks per predictor j:
+              if use_lag_zero is True:
+                  [lag0_j] + [lag1_j, ..., lag_max_j]
+              otherwise:
+                  [lag1_j, ..., lag_max_j]
+        max_lags_per_pred : ndarray of shape (n_features,)
+            max_lags_per_pred[j] = max selected lag for predictor j
+            across all targets (can be 0).
+        col_offsets : ndarray of shape (n_features,)
+            col_offsets[j] = starting column index of predictor j block
+            in the mask and in the corresponding X_lagged design matrix.
+            Note: if use_lag_zero is True, col_offsets[j] points to lag0_j.
+        """
+        pred_lag_matrix = np.asarray(pred_lag_matrix, dtype=int)
+        n_targets, n_features = pred_lag_matrix.shape
+
+        # Maximum lag per predictor (column-wise)
+        max_lags_per_pred = pred_lag_matrix.max(axis=0)  # shape (n_features,)
+
+        # Column offsets and total number of columns
+        col_offsets = np.zeros(n_features, dtype=int)
+        total_cols = 0
+        for j in range(n_features):
+            col_offsets[j] = total_cols
+            # number of columns for predictor j:
+            # lag0 (if used) + lags 1..max_lag_j
+            n_cols_j = max_lags_per_pred[j]
+            if use_lag_zero:
+                n_cols_j += 1
+            total_cols += n_cols_j
+
+        # Initialize mask
+        mask = np.zeros((n_targets, total_cols), dtype=int)
+
+        for j in range(n_features):
+            start_col = col_offsets[j]
+            max_L_j = max_lags_per_pred[j]
+
+            # Optional lag0 column: always allowed for all targets
+            if use_lag_zero:
+                col_lag0 = start_col
+                mask[:, col_lag0] = 1  # all targets can use x_t^{(j)}
+
+            if max_L_j <= 0:
+                continue  # no positive lags for this predictor in any target
+
+            # Columns for lags 1..max_L_j
+            # If use_lag_zero=True, lag1 starts at start_col+1,
+            # otherwise lag1 starts at start_col.
+            base = start_col + (1 if use_lag_zero else 0)
+
+            for i in range(n_targets):
+                L = pred_lag_matrix[i, j]
+                if L <= 0:
+                    continue  # predictor j not used for target i (for lags >0)
+                L_eff = min(L, max_L_j)
+                # Set mask 1 for lags 1..L_eff (local indices 0..L_eff-1 in this block)
+                mask[i, base:base + L_eff] = 1
+
+        return mask, max_lags_per_pred, col_offsets

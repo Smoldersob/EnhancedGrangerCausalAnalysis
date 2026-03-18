@@ -46,7 +46,7 @@ class ComplexGrangerAnalysisModel():
             causes: list = None,
             effects: list = None,
             relation: dict = dict(),
-            base_lag: int|List[int]|Literal['auto_common','auto_individual'] = 'auto_common',
+            base_lag: int|List[int]|Literal['auto_common','auto_per_input','auto_individual'] = 'auto_common',
             custom_lag: Dict[str,List[int]] = {},
             callbacks=[],
             seed=None,
@@ -71,10 +71,11 @@ class ComplexGrangerAnalysisModel():
         relation : dict, optional
             Dictionary specifying known causal relations between variables as keys (tuples of cause and effect) and values indicating
             the type of relation (e.g., 0 to enforce no causal effect). Used to constrain model coefficients accordingly.
-        base_lag : int|List[int]|Literal['auto_common','auto_individual'], optional
+        base_lag : int|List[int]|Literal['auto_common','auto_per_input','auto_individual'], optional
             The number of lagged time steps to include in the model if it is an integer.
             If list, each element corresponds to a variable in `causes`.
             If 'auto_common', the lag order is selected automatically for all variables.
+            If 'auto_per_input', the lag order is selected automatically for each input variable.
             If 'auto_individual', the lag order is selected automatically for each variable.
         custom_lag : Dict[str,List[int]], optional
             A dictionary specifying custom lag orders for specific variables. The keys are variable names,
@@ -178,7 +179,7 @@ class ComplexGrangerAnalysisModel():
                 delayed(auto_select_lag)(*task) for task in tasks
             )
             max_lags = max_lags*int(np.max(results))
-        elif base_lag == 'auto_individual':
+        elif (base_lag == 'auto_per_input') or (base_lag == 'auto_individual'):
             self.LagSelectorClass.max_lag = self.max_lag
             self.LagSelectorClass.n_jobs = self.n_jobs
             self.LagSelectorClass.target_indices = [columns_names.index(effect) for effect in effects]
@@ -189,7 +190,10 @@ class ComplexGrangerAnalysisModel():
             results = Parallel(n_jobs=self.n_jobs)(
                 delayed(ARXLagSelector.fit)(*task) for task in tasks
             )
-            max_lags = np.max([np.max(result[1], axis=0) for result in results], axis=0)
+            if base_lag == 'auto_individual':
+                self.initial_mask,max_lags,_=self.LagSelectorClass.build_weight_mask(np.max([result[1] for result in results], axis=0), use_lag_zero=self.zero_lag)
+            else:
+                max_lags = np.max([np.max(result[1], axis=0) for result in results], axis=0)
         else:
             raise ValueError("base_lag has to be int, 'auto_common' or 'auto_individual'")
 
@@ -256,7 +260,7 @@ class ComplexGrangerAnalysisModel():
         nrows=len(effects)
         x_l = Xs.shape[1]
         
-        possible_relation=np.ones((nrows,x_l))
+        possible_relation=self.initial_mask if hasattr(self,'initial_mask') else np.ones((nrows,x_l),dtype=int)
         forced_relation=[]
         for c1,c2 in relation.keys():
             if c2 in effects:
