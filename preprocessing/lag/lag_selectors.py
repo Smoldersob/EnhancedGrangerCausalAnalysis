@@ -184,9 +184,11 @@ class BaseLagSelector(ABC):
         - pred_lag_matrix[i, j] = 0 means: predictor j is not used for target i.
 
         If use_lag_zero is True, an additional lag0 column is allocated per
-        predictor j, and the subclass may override this method or post-process
-        the mask to enforce per-target rules for lag0 (e.g. disallow lag0 for
-        autoregression i==j, allow for external predictors).
+        predictor j. The lag0 column is:
+        - FORBIDDEN (0) for autoregression (i == j): the target cannot be
+          on both sides of the equation without bias.
+        - ALLOWED (1) for external predictors (i != j): the current unlagged
+          value of the predictor can contribute to the target.
 
         Parameters
         ----------
@@ -215,11 +217,15 @@ class BaseLagSelector(ABC):
             if max_L_j <= 0:
                 continue
 
-            # Optional lag0 column: by default we allow it for all targets,
-            # subclasses may refine this behavior if needed.
+            # Optional lag0 column: allowed for external predictors,
+            # but forbidden for autoregression (i == j).
             if self.use_lag_zero:
                 col_lag0 = start_col
-                mask[:, col_lag0] = 1
+                # Allow lag0 only for non-autoregressive terms (external predictors)
+                for i in range(n_targets):
+                    if i != j:
+                        # External predictor: lag0 is allowed
+                        mask[i, col_lag0] = 1
                 base = start_col + 1
             else:
                 base = start_col

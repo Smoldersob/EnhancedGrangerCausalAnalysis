@@ -258,8 +258,13 @@ class LagEngine:
         # Ensure  mask has correct dimensions
         total_cols = int((max_lags - min_lags + 1).sum())
         if self.mask_ is None:
-            # No selector and no overrides triggered rebuild - create trivial all-ones mask.
-            self.mask_ = np.ones((n_vars, total_cols), dtype=int)
+            # No selector and no overrides triggered rebuild.
+            # Build mask properly to handle autoregression with use_lag_zero.
+            pred_lag_matrix = np.zeros((n_vars, n_vars), dtype=int)
+            for i in range(n_vars):
+                for j in range(n_vars):
+                    pred_lag_matrix[i, j] = max_lags[j]
+            self.mask_ = self._rebuild_mask(pred_lag_matrix, min_lags, max_lags)
         elif self.mask_.shape[1] != total_cols:
             # Safety net: if dimensions stil disagree after overrides
             # (should not happen with correct _apply_overrides, but
@@ -609,9 +614,12 @@ class LagEngine:
                     )
                 self.mask_ = self._rebuild_mask(plm, min_lags, max_lags)
             else:
-                # No selector was used - build a trivial all-ones mask.
-                total_cols = int((max_lags - min_lags + 1).sum())
-                self.mask_ = np.ones((n_vars, total_cols), dtype=int)
+                # No selector was used - build mask with proper autoregression handling.
+                pred_lag_matrix = np.zeros((n_vars, n_vars), dtype=int)
+                for i in range(n_vars):
+                    for j in range(n_vars):
+                        pred_lag_matrix[i, j] = max_lags[j]
+                self.mask_ = self._rebuild_mask(pred_lag_matrix, min_lags, max_lags)
 
         # ==============================================================
         #  Per-pair mask restrictions implementation
@@ -666,6 +674,11 @@ class LagEngine:
         contiguous block of ``max_lags[j] - min_lags[j] + 1`` columns
         ordered from ``min_lags[j]`` to ``max_lags[j]``.
 
+        When ``use_lag_zero`` is True (and ``min_lags[j] == 0``), the first
+        column of each block is the lag0 (current) value. For autoregression
+        (i == j), this column is set to 0 (forbidden); for external predictors
+        (i != j), it is set to 1 (allowed).
+
         Parameters
         ----------
         pred_lag_matrix : ndarray of shape (n_targets, n_features)
@@ -705,17 +718,36 @@ class LagEngine:
                 if L <= 0:
                     continue
 
-                # Enable lags max(min_lags[j], 1_if_no_zero) .. L
-                # within the block that spans min_lags[j] .. max_lags[j].
-                lag_lo = mn_j          # first lag present in the block
-                lag_hi = min(L, int(max_lags[j]))  # last allowed lag
+                # When use_lag_zero is True and min_lags[j] == 0,
+                # the block starts with lag0 (current value).
+                # For autoregression (i == j), lag0 must be forbidden.
+                # For external predictors (i != j), lag0 is allowed.
+                if self.config.use_lag_zero and mn_j == 0:
+                    # First column in block is lag0
+                    if i != j:
+                        # External predictor: allow lag0
+                        mask[i, blk_start] = 1
+                    # For i == j (autoregression), lag0 stays 0 (forbidden)
 
-                if lag_hi < lag_lo:
-                    continue
+                    # Enable lagged terms (lag1, lag2, ..., lagL)
+                    lag_lo = max(1, mn_j)  # start from lag1 at minimum
+                    lag_hi = min(L, int(max_lags[j]))
+                    
+                    if lag_hi >= lag_lo:
+                        rel_lo = lag_lo - mn_j
+                        rel_hi = lag_hi - mn_j + 1
+                        mask[i, blk_start + rel_lo : blk_start + rel_hi] = 1
+                else:
+                    # Standard case (use_lag_zero=False or min_lags[j] > 0)
+                    lag_lo = mn_j
+                    lag_hi = min(L, int(max_lags[j]))
 
-                rel_lo = lag_lo - mn_j
-                rel_hi = lag_hi - mn_j + 1  # exclusive
-                mask[i, blk_start + rel_lo : blk_start + rel_hi] = 1
+                    if lag_hi < lag_lo:
+                        continue
+
+                    rel_lo = lag_lo - mn_j
+                    rel_hi = lag_hi - mn_j + 1
+                    mask[i, blk_start + rel_lo : blk_start + rel_hi] = 1
 
         return mask
 
