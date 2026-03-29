@@ -1,4 +1,9 @@
-#form .simple_granger import  
-#form .multitask_granger import  MultiGranger
+from .multitask_granger import MultiTaskGrangerAPI, MultitaskGrangerOutput
+from .simple_granger import SimpleGrangerAPI, SimpleGrangerOutput
 
-#__all__ = ['']
+__all__ = [
+	"MultiTaskGrangerAPI",
+	"MultitaskGrangerOutput",
+	"SimpleGrangerAPI",
+	"SimpleGrangerOutput",
+]
