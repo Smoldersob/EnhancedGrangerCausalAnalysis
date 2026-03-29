@@ -35,14 +35,13 @@ class BaseGrangerModel(ABC):
         self.scaler: Optional[Scaler] = scaler
         self.regularizer: Optional[Regularizer] = regularizer
         self.constraint: Optional[Constraint] = constraint
-        self._weights: List[NDArray[np.float64]] = []
         self._fitted: bool = False
 
     @abstractmethod
     def initialize(
         self, 
         data: NDArray[np.float64], 
-        lags: int, 
+        lags: Optional[int] = None,
         **kwargs
     ) -> None:
         """
@@ -52,7 +51,7 @@ class BaseGrangerModel(ABC):
         
         Args:
             data: Time series data array of shape (n_samples, n_features)
-            lags: Number of lags for Granger causality test
+            lags: Optional lag hint from preprocessing (not required by backend models)
             **kwargs: Additional initialization parameters
         """
         pass
@@ -72,6 +71,19 @@ class BaseGrangerModel(ABC):
         pass
 
     @abstractmethod
+    def predict(self, X: NDArray[np.float64]) -> NDArray[np.float64]:
+        """
+        Generate predictions using fitted model parameters.
+
+        Args:
+            X: Input feature matrix of shape (n_samples, n_features)
+
+        Returns:
+            Predicted values array of shape (n_samples, n_outputs)
+        """
+        pass
+
+    @abstractmethod
     def set_weights(self, weights: Union[NDArray[np.float64], List[NDArray[np.float64]]]) -> None:
         """
         Set model weights with optional constraint enforcement.
@@ -80,7 +92,8 @@ class BaseGrangerModel(ABC):
             weights: Model weights array or list of weight matrices
         """
         pass
-
+    
+    @abstractmethod
     def get_weights(self) -> List[NDArray[np.float64]]:
         """
         Get fitted model weights.
@@ -88,7 +101,17 @@ class BaseGrangerModel(ABC):
         Returns:
             List of weight matrices for each lag
         """
-        return self._weights
+        pass
+
+    @abstractmethod
+    def omit_variables(self, variable_indices: List[int]) -> None:
+        """
+        Omit specified variables from the model (e.g., for testing).
+        
+        Args:
+            variable_indices: List of variable indices to omit
+        """
+        pass
 
     def get_backend(self) -> str:
         """
@@ -110,24 +133,3 @@ class BaseGrangerModel(ABC):
     def set_constraint(self, constraint: Constraint) -> None:
         """Dynamically set constraint component."""
         self.constraint = constraint
-
-    @abstractmethod
-    def hyperoptimize(
-        self,
-        reg_param_grid: Dict[str, List[Any]],
-        n_trials: int = 50
-    ) -> Dict[str, Any]:
-        """
-        Hyperparameter optimization for regularization parameters.
-        
-        Args:
-            reg_param_grid: Dictionary of regularization parameter grids
-            n_trials: Number of optimization trials
-            
-        Returns:
-            Dictionary with optimization results:
-                - 'best_params': Best regularization parameters
-                - 'best_score': Best optimization score
-                - 'trial_results': All trial results
-        """
-        pass

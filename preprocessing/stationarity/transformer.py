@@ -5,6 +5,11 @@ from typing import Dict, List, Optional, Sequence
 
 import pandas as pd
 
+from ...core.exceptions import (
+    StationarityNotFittedError,
+    StationarityTestError,
+)
+from ...utilities.validation import validate_dataframe_list
 from .tests import apply_differencing, static_adfuller_order, static_kpss_order
 
 
@@ -33,9 +38,9 @@ class StationarityTransformer:
         dropna: bool = True,
     ) -> None:
         if max_differencing_order < 0:
-            raise ValueError("max_differencing_order must be >= 0")
+            raise StationarityTestError("max_differencing_order must be >= 0")
         if test_name not in {"adf", "kpss"}:
-            raise ValueError("test_name must be one of: 'adf', 'kpss'")
+            raise StationarityTestError("test_name must be one of: 'adf', 'kpss'")
 
         self.max_differencing_order = int(max_differencing_order)
         self.test_name = test_name
@@ -48,20 +53,13 @@ class StationarityTransformer:
         self.fit_result_: Optional[StationarityFitResult] = None
 
     def _validate_data_list(self, data_list: Sequence[pd.DataFrame]) -> List[pd.DataFrame]:
-        if not data_list:
-            raise ValueError("data_list must contain at least one DataFrame")
-
-        first_columns = list(data_list[0].columns)
-        validated = []
-        for idx, data in enumerate(data_list):
-            if not isinstance(data, pd.DataFrame):
-                raise TypeError(f"Element at index {idx} is not a pandas DataFrame")
-            missing = [col for col in first_columns if col not in data.columns]
-            if missing:
-                raise ValueError(
-                    f"DataFrame at index {idx} does not contain all required columns: {missing}"
-                )
-            validated.append(data[first_columns].copy())
+        validated, _ = validate_dataframe_list(
+            data_list,
+            require_same_columns=True,
+            require_same_shape=True,
+            allow_superset_columns=True,
+            copy=True,
+        )
         return validated
 
     def _stationarity_order(self, series: pd.Series) -> int:
@@ -102,7 +100,9 @@ class StationarityTransformer:
     def transform(self, data_list: Sequence[pd.DataFrame]) -> List[pd.DataFrame]:
         """Apply fitted differencing orders to every dataset."""
         if not self.differencing_orders_:
-            raise RuntimeError("Transformer is not fitted. Call fit_stationarity first.")
+            raise StationarityNotFittedError(
+                "Transformer is not fitted. Call fit_stationarity first."
+            )
 
         data_list_common_columns = self._validate_data_list(data_list)
         transformed_data = []

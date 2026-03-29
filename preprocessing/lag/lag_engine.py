@@ -10,7 +10,18 @@ import numpy as np
 import pandas as pd
 from joblib import Parallel, delayed
 from .lag_selectors import BaseLagSelector, LagSelectionResult
+from ...core.exceptions import (
+    ColumnMismatchError,
+    EmptyDataError,
+    LagConfigurationError,
+    LagPreparationError,
+)
 from ...core.lag_config import LagConfiguration
+from ...utilities.validation import (
+    validate_columns_present,
+    validate_dataframe_list,
+    validate_lag_bounds,
+)
 
 # ===========================================================================
 # Free functions for parallel workers
@@ -47,12 +58,7 @@ def _create_lagged_data(
     min_lags = np.asarray(min_lags, dtype=int)
     max_lags = np.asarray(max_lags, dtype=int)
 
-    if min_lags.shape != max_lags.shape:
-        raise ValueError("min_lags and max_lags must have the same shape")
-    if np.any(min_lags < 0) or np.any(max_lags < 0):
-        raise ValueError("Lag values must be non-negative")
-    if np.any(min_lags > max_lags):
-        raise ValueError("Each min_lag must be <= corresponding max_lag")
+    validate_lag_bounds(min_lags, max_lags)
 
     n_rows, n_vars = x.shape
     total_cols = int((max_lags - min_lags + 1).sum())
@@ -234,16 +240,13 @@ class LagEngine:
         """
 
         # Validation
-        if not data_list:
-            raise ValueError("data_list must contain at least one DataFrame")
-
-        columns = data_list[0].columns.tolist()
-        for i, df in enumerate(data_list[1:], start=1):
-            if df.columns.tolist() != columns:
-                raise ValueError(
-                    f"DataFrame at index {i} has columns "
-                    f"{df.columns.tolist()}, expected {columns}"
-                )
+        data_list, columns = validate_dataframe_list(
+            data_list,
+            require_same_columns=True,
+            require_same_shape=True,
+            allow_superset_columns=False,
+            copy=False,
+        )
 
         n_vars = len(columns)
 
@@ -332,6 +335,7 @@ class LagEngine:
             self.selector.n_jobs = self.n_jobs
 
         # Set target indices on the selector
+        validate_columns_present(columns, effects, context="effects")
         target_indices = [columns.index(e) for e in effects]
         self.selector.target_indices = target_indices
 
@@ -413,7 +417,7 @@ class LagEngine:
                 min_lags[idx] = int(lags[0])
                 max_lags[idx] = int(lags[1])
             else:
-                raise ValueError(
+                raise LagConfigurationError(
                     f"custom_lags['{name}'] must have 1 (max_lag,) or "
                     f"2 (min_lag, max_lag) elements, got {len(lags)}"
                 )
@@ -539,7 +543,7 @@ class LagEngine:
                 min_lags[idx] = int(lags[0])
                 max_lags[idx] = int(lags[1])
             else:
-                raise ValueError(
+                raise LagConfigurationError(
                     f"custom_lags['{name}'] must have 1 (max_lag,) or "
                     f"2 (min_lag, max_lag) elements, got {len(lags)}"
                 )
@@ -577,7 +581,7 @@ class LagEngine:
                     pair_min = int(lags[0])
                     pair_max = int(lags[1])
                 else:
-                    raise ValueError(
+                    raise LagConfigurationError(
                         f"custom_pair_lags[{(target_name, pred_name)!r}] "
                         f"must have 1 or 2 elements, got {len(lags)}"
                     )
@@ -834,7 +838,7 @@ class LagEngine:
             If called before :meth:`prepare`.
         """
         if self.lag_order_ is None:
-            raise RuntimeError(
+            raise LagPreparationError(
                 "get_feature_names() requires a fitted engine; "
                 "call prepare() first."
             )
@@ -868,7 +872,7 @@ class LagEngine:
             If called before :meth:`prepare`.
         """
         if self.lag_order_ is None:
-            raise RuntimeError("Call prepare() first.")
+            raise LagPreparationError("Call prepare() first.")
 
         rows = []
         for k, col in enumerate(columns):

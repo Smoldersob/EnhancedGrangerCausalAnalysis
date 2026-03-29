@@ -12,12 +12,14 @@ from typing import Optional, Tuple
 import numpy as np
 from numpy.typing import NDArray
 
+from ...core.exceptions import DataShapeError, InvalidFeatureRangeError, ScalerNotFittedError
+
 
 def _as_2d_float64(data: NDArray[np.float64]) -> NDArray[np.float64]:
 	"""Return a float64 2D array copy suitable for numerical scaling."""
 	arr = np.asarray(data, dtype=np.float64)
 	if arr.ndim != 2:
-		raise ValueError(
+		raise DataShapeError(
 			f"Expected 2D array of shape (n_samples, n_features), got ndim={arr.ndim}"
 		)
 	return arr.copy()
@@ -30,7 +32,7 @@ class _BaseScaler:
 
 	def _ensure_fitted(self) -> None:
 		if not self._fitted:
-			raise RuntimeError("Scaler is not fitted. Call fit_transform first.")
+			raise ScalerNotFittedError("Scaler is not fitted. Call fit_transform first.")
 
 
 class StandardScaler(_BaseScaler):
@@ -66,7 +68,7 @@ class MinMaxScaler(_BaseScaler):
 	def __init__(self, feature_range: Tuple[float, float] = (0.0, 1.0), eps: float = 1e-12):
 		lo, hi = feature_range
 		if hi <= lo:
-			raise ValueError("feature_range must satisfy max > min")
+			raise InvalidFeatureRangeError("feature_range must satisfy max > min")
 		self.feature_range = (float(lo), float(hi))
 		self.eps = float(eps)
 		self.data_min_: Optional[NDArray[np.float64]] = None

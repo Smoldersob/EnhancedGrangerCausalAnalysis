@@ -1,4 +1,5 @@
 import sys
+import traceback
 from pathlib import Path
 
 # Allow running this file directly from its nested location, e.g.:
@@ -66,7 +67,7 @@ def test_lag_zero_selector_autoregression():
                 all_correct = False
     
     print(f"\n✅ SUKCES" if all_correct else "❌ FAIL - Lag0 nie jest prawidłowo obsługiwane dla autoregresji")
-    return all_correct
+    assert all_correct
 
 
 def test_lag_zero_engine_without_selector():
@@ -124,7 +125,7 @@ def test_lag_zero_engine_without_selector():
                 all_correct = False
     
     print(f"\n✅ SUKCES" if all_correct else "❌ FAIL - Lag0 nie jest prawidłowo obsługiwane")
-    return all_correct
+    assert all_correct
 
 
 def test_lag_zero_engine_with_selector():
@@ -192,7 +193,7 @@ def test_lag_zero_engine_with_selector():
     
     result = dim_check and all_correct
     print(f"\n✅ SUKCES" if result else "❌ FAIL")
-    return result
+    assert result
 
 
 def test_lag_zero_disabled():
@@ -218,18 +219,12 @@ def test_lag_zero_disabled():
     print(f"Col_offsets: {result.col_offsets}")
     print(f"Maska shape: {result.mask.shape}")
     
-    # Sprawdzenie: col_offsets powinny pokazywać, że nie ma lag0
-    min_expected_col = 0
-    for j in range(d):
-        if result.max_lags_per_pred[j] > 0:
-            expected_width = result.max_lags_per_pred[j]  # No lag0
-            if j > 0:
-                actual_width = result.col_offsets[j] - result.col_offsets[j-1]
-            else:
-                actual_width = result.col_offsets[j]
-    
+    # Sprawdzenie: gdy use_lag_zero=False liczba kolumn maski
+    # musi być sumą maksymalnych lagów na predyktor.
+    expected_cols = int(result.max_lags_per_pred.sum())
+    assert result.mask.shape[1] == expected_cols
+
     print(f"\n✅ SUKCES - use_lag_zero=False pracuje prawidłowo")
-    return True
 
 
 def test_mask_consistency_across_segments():
@@ -278,7 +273,7 @@ def test_mask_consistency_across_segments():
                 all_correct = False
     
     print(f"\n✅ SUKCES" if all_correct else "❌ FAIL")
-    return all_correct
+    assert all_correct
 
 
 def test_custom_pair_lags_with_lag_zero():
@@ -335,8 +330,8 @@ def test_custom_pair_lags_with_lag_zero():
         matches = False
     
     print(f"  Czy prawidłowe: {matches}")
-    print(f"\n✅ SUKCES" if matches else "⚠️  WARNING - struktura nieco inna, ale to może być OK")
-    return True  # Usually pass - to jest bardziej informacyjny test
+    print(f"\n✅ SUKCES" if matches else "❌ FAIL")
+    assert matches
 
 
 # ===========================================================================
@@ -347,28 +342,32 @@ if __name__ == "__main__":
     print("\n" + "="*80)
     print("SERIA TESTÓW DLA MECHANIZMU LAG_ZERO")
     print("="*80)
-    
-    results = []
-    
-    results.append(("Test 1: Lag0 w selektorze", test_lag_zero_selector_autoregression()))
-    results.append(("Test 2: Lag0 w LagEngine bez selektora", test_lag_zero_engine_without_selector()))
-    results.append(("Test 3: Lag0 w LagEngine z selektorem", test_lag_zero_engine_with_selector()))
-    results.append(("Test 4: use_lag_zero=False", test_lag_zero_disabled()))
-    results.append(("Test 5: Spójność dla wielokrotnych segmentów", test_mask_consistency_across_segments()))
-    results.append(("Test 6: custom_pair_lags z lag_zero", test_custom_pair_lags_with_lag_zero()))
-    
-    # Podsumowanie
-    print("\n" + "="*80)
-    print("PODSUMOWANIE TESTÓW")
-    print("="*80)
-    
-    for test_name, result in results:
-        status = "✅ PASS" if result else "❌ FAIL"
-        print(f"{status} - {test_name}")
-    
-    passed = sum(1 for _, r in results if r)
-    total = len(results)
-    
-    print(f"\nWynik: {passed}/{total} testów przeszło")
+
+    tests = [
+        test_lag_zero_selector_autoregression,
+        test_lag_zero_engine_without_selector,
+        test_lag_zero_engine_with_selector,
+        test_lag_zero_disabled,
+        test_mask_consistency_across_segments,
+        test_custom_pair_lags_with_lag_zero,
+    ]
+
+    passed = 0
+    failed = 0
+
+    for test_fn in tests:
+        name = test_fn.__name__
+        try:
+            test_fn()
+            print(f"PASS: {name}")
+            passed += 1
+        except Exception as exc:
+            print(f"FAIL: {name} -> {exc}")
+            traceback.print_exc(limit=1)
+            failed += 1
+
+    total = len(tests)
+    print("-" * 80)
+    print(f"Summary: {passed}/{total} passed, {failed}/{total} failed")
     print("="*80 + "\n")
 
