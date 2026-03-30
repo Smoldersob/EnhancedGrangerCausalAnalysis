@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import importlib
+import os
+import re
 from typing import Any, Dict, Optional
 
 import numpy as np
@@ -29,8 +31,32 @@ class TorchTensorBoardCallback(Callback):
 		self.flush_secs = flush_secs
 		self.track_weight_histograms = track_weight_histograms
 		self.histogram_every_n_epochs = histogram_every_n_epochs
+		self._run_name: Optional[str] = None
 
 		self._writer: Optional[Any] = None
+
+	@staticmethod
+	def _sanitize_segment(name: str) -> str:
+		return re.sub(r"[^a-zA-Z0-9_.-]+", "_", str(name)).strip("_") or "run"
+
+	def set_run_name(self, run_name: str) -> None:
+		"""Set run name and update log_dir before writer initialization."""
+		if self._writer is not None:
+			raise RuntimeError("Cannot change run_name after writer was initialized")
+		self._run_name = run_name
+		self.log_dir = os.path.join(self.log_dir, self._sanitize_segment(run_name))
+
+	def clone_for_run(self, run_name: str) -> "TorchTensorBoardCallback":
+		"""Return a fresh callback instance bound to a run-specific subdirectory."""
+		clone = TorchTensorBoardCallback(
+			log_dir=self.log_dir,
+			log_every_n_epochs=self.log_every_n_epochs,
+			flush_secs=self.flush_secs,
+			track_weight_histograms=self.track_weight_histograms,
+			histogram_every_n_epochs=self.histogram_every_n_epochs,
+		)
+		clone.set_run_name(run_name)
+		return clone
 
 	def _ensure_writer(self) -> None:
 		"""Lazily initialize SummaryWriter from torch utilities."""

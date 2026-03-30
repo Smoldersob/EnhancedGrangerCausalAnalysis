@@ -1,5 +1,5 @@
 from dataclasses import dataclass, field
-from typing import Optional, Literal
+from typing import Any, Dict, Optional, Literal
 
 @dataclass
 class TrainingConfig:
@@ -20,9 +20,14 @@ class TrainingConfig:
     
     # Validation
     validation_split: float = 0.0
+
+    # Optional hyperoptimization setup.
+    # None -> disabled
+    # 'model' -> delegate to model.hyperoptimize(...)
+    # 'regularization' -> grid search over regularizer params
+    hiperoptimalization_state: Optional[Literal['model', 'regularization']] = None
+    hiperoptimalization_conf: Dict[str, Any] = field(default_factory=dict)
     
-    # Constraint timing
-    constraint_enforcement: Literal['post_batch', 'post_epoch'] = 'post_batch'
     
     def get_restricted_lr(self) -> float:
         """Learning rate dla fine-tuningu restricted models"""
@@ -51,3 +56,7 @@ class HiperparametesFineTuningConfig:
     
     n_trials: int = 20  # only for random search
     param_grid: dict = field(default_factory=dict)  # Only for grid search
+
+    # Unified hyperoptimization keys used by orchestrator.
+    hiperoptimalization_state: Optional[Literal['model', 'regularization']] = None
+    hiperoptimalization_conf: Dict[str, Any] = field(default_factory=dict)

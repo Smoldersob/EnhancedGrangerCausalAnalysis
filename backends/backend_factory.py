@@ -4,9 +4,21 @@ import importlib.util
 from typing import Dict, List, Optional
 
 from .base_backend import BackendStrategy
-from .pytorch_backend import PyTorchBackendStrategy
-from .scikit_backend import ScikitBackendStrategy
-from .tensorflow_backend import TensorFlowBackendStrategy
+
+try:
+	from .tensorflow_backend import TensorFlowBackendStrategy
+except Exception:  # pragma: no cover - optional backend module
+	TensorFlowBackendStrategy = None  # type: ignore[assignment]
+
+try:
+	from .pytorch_backend import PyTorchBackendStrategy
+except Exception:  # pragma: no cover - optional backend module
+	PyTorchBackendStrategy = None  # type: ignore[assignment]
+
+try:
+	from .scikit_backend import ScikitBackendStrategy
+except Exception:  # pragma: no cover - optional backend module
+	ScikitBackendStrategy = None  # type: ignore[assignment]
 
 
 class BackendFactory:
@@ -22,7 +34,7 @@ class BackendFactory:
 
 	# Registry of known strategies (name -> class) enabled by optional dependencies.
 	_BACKEND_REGISTRY: Dict[str, type] = {}
-	if importlib.util.find_spec("tensorflow") is not None:
+	if importlib.util.find_spec("tensorflow") is not None and TensorFlowBackendStrategy is not None:
 		_BACKEND_REGISTRY.update(
 			{
 				"tensorflow": TensorFlowBackendStrategy,
@@ -30,14 +42,14 @@ class BackendFactory:
 				"keras": TensorFlowBackendStrategy,
 			}
 		)
-	if importlib.util.find_spec("torch") is not None:
+	if importlib.util.find_spec("torch") is not None and PyTorchBackendStrategy is not None:
 		_BACKEND_REGISTRY.update(
 			{
 				"pytorch": PyTorchBackendStrategy,
 				"torch": PyTorchBackendStrategy,
 			}
 		)
-	if importlib.util.find_spec("sklearn") is not None:
+	if importlib.util.find_spec("sklearn") is not None and ScikitBackendStrategy is not None:
 		_BACKEND_REGISTRY.update(
 			{
 				"sklearn": ScikitBackendStrategy,

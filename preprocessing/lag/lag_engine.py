@@ -11,8 +11,6 @@ import pandas as pd
 from joblib import Parallel, delayed
 from .lag_selectors import BaseLagSelector, LagSelectionResult
 from ...core.exceptions import (
-    ColumnMismatchError,
-    EmptyDataError,
     LagConfigurationError,
     LagPreparationError,
 )
@@ -54,7 +52,8 @@ def _create_lagged_data(
         Lagged feature matrix.  The caller is responsible for aligning
         target values by dropping the first ``max(max_lags)`` rows.
     """
-    x = data.values.copy()
+    # Use float dtype because shifted leading rows are filled with NaN.
+    x = np.asarray(data.values, dtype=np.float64)
     min_lags = np.asarray(min_lags, dtype=int)
     max_lags = np.asarray(max_lags, dtype=int)
 
@@ -200,6 +199,7 @@ class LagEngine:
         self.lag_order_: Optional[Dict[str, np.ndarray]] = None
         self.selection_result_: Optional[LagSelectionResult] = None
         self.mask_: Optional[np.ndarray] = None
+        self._aggregated_ar_lags: Optional[np.ndarray] = None
 
     # ------------------------------------------------------------------
     # Public API
@@ -258,7 +258,7 @@ class LagEngine:
             min_lags, max_lags, columns, effects
         )
 
-        # Ensure  mask has correct dimensions
+        # Ensure mask has correct dimensions
         total_cols = int((max_lags - min_lags + 1).sum())
         if self.mask_ is None:
             # No selector and no overrides triggered rebuild.
@@ -269,11 +269,14 @@ class LagEngine:
                     pred_lag_matrix[i, j] = max_lags[j]
             self.mask_ = self._rebuild_mask(pred_lag_matrix, min_lags, max_lags)
         elif self.mask_.shape[1] != total_cols:
-            # Safety net: if dimensions stil disagree after overrides
+            # Safety net: if dimensions still disagree after overrides
             # (should not happen with correct _apply_overrides, but
             # guards against future regressions).
-            warnings.warn(f"Mask has {self.mask_.shape[1]} columns but expected {total_cols} after applying overrides.  Rebuilding mask with correct dimensions.",
-                          stacklevel=2)
+            warnings.warn(
+                f"Mask has {self.mask_.shape[1]} columns but expected {total_cols} "
+                "after applying overrides. Rebuilding mask with correct dimensions.",
+                stacklevel=2,
+            )
             if self._pred_lag_matrix is not None:
                 self.mask_ = self._rebuild_mask(
                     self._pred_lag_matrix, min_lags, max_lags
@@ -346,7 +349,9 @@ class LagEngine:
         )
 
         # Aggregate across segments (take element-wise maximum)
-        self.selection_result_ = results[0]  # keep first as reference
+        self._aggregated_ar_lags = np.max(
+            [r.ar_lags for r in results], axis=0
+        ).astype(int)
 
         if hasattr(results[0], "pred_lag_matrix"):
             # Per-pair selector (IC / CV) — aggregate pred_lag_matrix
@@ -370,6 +375,21 @@ class LagEngine:
             self._pred_lag_matrix, min_lags, max_lags
         )
 
+        # Preserve the selector baseline result as-is.
+        # It must not be overwritten by custom_lags/custom_pair_lags.
+        block_widths = (max_lags - min_lags + 1).astype(int)
+        col_offsets = np.zeros(len(block_widths), dtype=int)
+        if len(block_widths) > 1:
+            col_offsets[1:] = np.cumsum(block_widths[:-1], dtype=int)
+
+        self.selection_result_ = LagSelectionResult(
+            ar_lags=self._aggregated_ar_lags.copy(),
+            pred_lag_matrix=self._pred_lag_matrix.copy(),
+            max_lags_per_pred=max_lags.copy(),
+            col_offsets=col_offsets,
+            mask=self.mask_.copy(),
+        )
+
         return min_lags, max_lags
 
     def _apply_overrides(
@@ -380,28 +400,38 @@ class LagEngine:
         effects: List[str],
     ) -> Tuple[np.ndarray, np.ndarray]:
         """
-        Apply ``custom_lags`` and ``custom_pair_lags`` from configuration.
+        Apply custom lag overrides on top of selector/fixed-lag results.
 
-        Per-variable overrides are applied first, then per-pair overrides
-        (which adjust the mask if available).
-
-        Parameters
-        ----------
-        min_lags, max_lags : ndarray of shape (n_vars,)
-            Current lag bounds.
-        columns : list of str
-            Column names.
-        effects : list of str
-            Target column names.
-
-        Returns
-        -------
-        min_lags, max_lags : ndarray of shape (n_vars,)
-            Updated lag bounds.
+        Rules implemented:
+        - selector output is the baseline,
+        - variable overrides resize predictor blocks and preserve overlap,
+        - when variable overrides expand blocks, new columns are filled with 1,
+        - pair overrides are local (target, predictor) edits,
+        - if pair overrides need larger blocks, extra columns are first added as 0,
+          then only the requested pair-range is set to 1.
         """
+        has_custom_lags = bool(self.config.custom_lags)
+        has_custom_pairs = bool(self.config.custom_pair_lags)
+
+        if not has_custom_lags and not has_custom_pairs:
+            return min_lags, max_lags
+
+        min_lags = np.asarray(min_lags, dtype=int)
+        max_lags = np.asarray(max_lags, dtype=int)
+        old_min = min_lags.copy()
+        old_max = max_lags.copy()
+
         col_to_idx = {name: i for i, name in enumerate(columns)}
 
-        # per-variable overrides
+        if self.mask_ is None:
+            if self._pred_lag_matrix is not None:
+                self.mask_ = self._rebuild_mask(self._pred_lag_matrix, min_lags, max_lags)
+            else:
+                n_vars = len(columns)
+                total_cols = int((max_lags - min_lags + 1).sum())
+                self.mask_ = np.ones((n_vars, total_cols), dtype=int)
+
+        # 1) Variable overrides (custom_lags)
         for name, lags in self.config.custom_lags.items():
             if name not in col_to_idx:
                 warnings.warn(
@@ -422,218 +452,80 @@ class LagEngine:
                     f"2 (min_lag, max_lag) elements, got {len(lags)}"
                 )
 
-        # per-pair overrides
-        # These only affect the mask (if available) — they narrow or widen
-        # the lag window for a specific (target, predictor) pair.
-        if self.config.custom_pair_lags and self.mask_ is not None:
-            for (target_name, pred_name), lags in (
-                self.config.custom_pair_lags.items()
-            ):
-                if target_name not in col_to_idx:
-                    warnings.warn(
-                        f"custom_pair_lags target '{target_name}' "
-                        f"not in columns; skipping.",
-                        stacklevel=2,
-                    )
-                    continue
-                if pred_name not in col_to_idx:
-                    warnings.warn(
-                        f"custom_pair_lags predictor '{pred_name}' "
-                        f"not in columns; skipping.",
-                        stacklevel=2,
-                    )
-                    continue
+        min_lags = np.minimum(min_lags, max_lags)
 
-                t_idx = col_to_idx[target_name]
-                p_idx = col_to_idx[pred_name]
+        # Resize mask after variable overrides.
+        # Preserve overlap, fill newly created variable-range columns with 1.
+        self.mask_ = self._remap_mask(
+            self.mask_,
+            old_min=old_min,
+            old_max=old_max,
+            new_min=min_lags,
+            new_max=max_lags,
+            fill_new=1,
+            align="overlap",
+        )
 
-                pair_min = int(lags[0]) if len(lags) >= 2 else int(min_lags[p_idx])
-                pair_max = int(lags[-1])
+        var_min = min_lags.copy()
+        var_max = max_lags.copy()
 
-                # Ensure the global max_lag for this predictor covers the
-                # pair-level requirement.
-                if pair_max > max_lags[p_idx]:
-                    max_lags[p_idx] = pair_max
-
-                # Update the mask for this (target, predictor) pair.
-                # The mask layout follows col_index offsets.
-                col_index = np.concatenate(
-                    [[0], (max_lags - min_lags + 1).cumsum(dtype=int)]
-                )
-                block_start = int(col_index[p_idx])
-                block_end = int(col_index[p_idx + 1])
-                block_len = block_end - block_start
-
-                # Zero out the pair's block and re-enable the valid range
-                if t_idx < self.mask_.shape[0]:
-                    self.mask_[t_idx, block_start:block_end] = 0
-                    # lags in the block are ordered min_lag .. max_lag
-                    rel_start = max(0, pair_min - int(min_lags[p_idx]))
-                    rel_end = min(block_len, pair_max - int(min_lags[p_idx]) + 1)
-                    self.mask_[t_idx, block_start + rel_start:block_start + rel_end] = 1
-        
-        elif self.config.custom_pair_lags and self.mask_ is None:
-            warnings.warn(
-                "custom_pair_lags provided but no mask is available "
-                "(no selector was used).  Per-pair overrides are ignored "
-                "when operating in fixed-lag mode.",
-                stacklevel=2,
-            )
-
-        return min_lags, max_lags
-    
-    def _apply_overrides(
-        self,
-        min_lags: np.ndarray,
-        max_lags: np.ndarray,
-        columns: List[str],
-        effects: List[str],
-    ) -> Tuple[np.ndarray, np.ndarray]:
-        """
-        Apply ``custom_lags`` and ``custom_pair_lags`` from configuration.
-
-        The method works in three passes:
-
-        1. **Collect** all changes to ``min_lags`` / ``max_lags`` from both
-           ``custom_lags`` (per-variable) and ``custom_pair_lags``
-           (per-pair).  At this stage the mask is **not** touched.
-        2. **Rebuild** the mask from scratch using the final
-           ``min_lags`` / ``max_lags`` (via :meth:`_rebuild_mask`).
-        3. **Apply per-pair restrictions** on the freshly built mask so
-           that only the requested lag window is enabled for each
-           ``(target, predictor)`` pair.
-
-        Parameters
-        ----------
-        min_lags, max_lags : ndarray of shape (n_vars,)
-            Current lag bounds (from Phase 1).
-        columns : list of str
-            Column names.
-        effects : list of str
-            Target column names.
-
-        Returns
-        -------
-        min_lags, max_lags : ndarray of shape (n_vars,)
-            Updated lag bounds.
-        """
-        has_custom_lags = bool(self.config.custom_lags)
-        has_custom_pairs = bool(self.config.custom_pair_lags)
-
-        if not has_custom_lags and not has_custom_pairs:
-            return min_lags, max_lags
-
-        col_to_idx = {name: i for i, name in enumerate(columns)}
-        needs_mask_rebuild = False
-
-        # per-variable overrides  (custom_lags)
-        for name, lags in self.config.custom_lags.items():
-            if name not in col_to_idx:
+        # 2) Pair overrides (custom_pair_lags)
+        pair_overrides: List[Tuple[int, int, int, int]] = []
+        for (target_name, pred_name), lags in self.config.custom_pair_lags.items():
+            if target_name not in col_to_idx:
                 warnings.warn(
-                    f"custom_lags key '{name}' not found in columns; "
-                    f"skipping.",
+                    f"custom_pair_lags target '{target_name}' not in columns; skipping.",
+                    stacklevel=2,
+                )
+                continue
+            if pred_name not in col_to_idx:
+                warnings.warn(
+                    f"custom_pair_lags predictor '{pred_name}' not in columns; skipping.",
                     stacklevel=2,
                 )
                 continue
 
-            idx = col_to_idx[name]
+            t_idx = col_to_idx[target_name]
+            p_idx = col_to_idx[pred_name]
+
             if len(lags) == 1:
-                max_lags[idx] = int(lags[0])
+                pair_min = int(min_lags[p_idx])
+                pair_max = int(lags[0])
             elif len(lags) == 2:
-                min_lags[idx] = int(lags[0])
-                max_lags[idx] = int(lags[1])
+                pair_min = int(lags[0])
+                pair_max = int(lags[1])
             else:
                 raise LagConfigurationError(
-                    f"custom_lags['{name}'] must have 1 (max_lag,) or "
-                    f"2 (min_lag, max_lag) elements, got {len(lags)}"
+                    f"custom_pair_lags[{(target_name, pred_name)!r}] must have 1 or 2 elements, got {len(lags)}"
                 )
-            needs_mask_rebuild = True
 
-        # per-pair overrides — update min/max lags only
-        _pair_overrides: List[Tuple[int, int, int, int]] = []  # (t, p, lo, hi)
+            if pair_max > max_lags[p_idx]:
+                max_lags[p_idx] = pair_max
+            if pair_min < min_lags[p_idx]:
+                min_lags[p_idx] = pair_min
 
-        if has_custom_pairs:
-            for (target_name, pred_name), lags in (
-                self.config.custom_pair_lags.items()
-            ):
-                if target_name not in col_to_idx:
-                    warnings.warn(
-                        f"custom_pair_lags target '{target_name}' "
-                        f"not in columns; skipping.",
-                        stacklevel=2,
-                    )
-                    continue
-                if pred_name not in col_to_idx:
-                    warnings.warn(
-                        f"custom_pair_lags predictor '{pred_name}' "
-                        f"not in columns; skipping.",
-                        stacklevel=2,
-                    )
-                    continue
+            pair_overrides.append((t_idx, p_idx, pair_min, pair_max))
 
-                t_idx = col_to_idx[target_name]
-                p_idx = col_to_idx[pred_name]
+        min_lags = np.minimum(min_lags, max_lags)
 
-                if len(lags) == 1:
-                    pair_min = int(min_lags[p_idx])
-                    pair_max = int(lags[0])
-                elif len(lags) == 2:
-                    pair_min = int(lags[0])
-                    pair_max = int(lags[1])
-                else:
-                    raise LagConfigurationError(
-                        f"custom_pair_lags[{(target_name, pred_name)!r}] "
-                        f"must have 1 or 2 elements, got {len(lags)}"
-                    )
+        # If pair overrides expanded global ranges, add those new columns as zeros.
+        self.mask_ = self._remap_mask(
+            self.mask_,
+            old_min=var_min,
+            old_max=var_max,
+            new_min=min_lags,
+            new_max=max_lags,
+            fill_new=0,
+            align="left",
+        )
 
-                # Widen the global bounds if the pair requires it
-                if pair_max > max_lags[p_idx]:
-                    max_lags[p_idx] = pair_max
-                    needs_mask_rebuild = True
-                if pair_min < min_lags[p_idx]:
-                    min_lags[p_idx] = pair_min
-                    needs_mask_rebuild = True
-
-                _pair_overrides.append((t_idx, p_idx, pair_min, pair_max))
-
-        # ==============================================================
-        # Rebuild mask with final min/max lags
-        # ==============================================================
-        # The mask must be (re)built whenever:
-        #   - min_lags / max_lags changed (needs_mask_rebuild), OR
-        #   - pair overrides exist but the mask doesn't yet (no-selector
-        #     mode where _determine_lags didn't create one).
-        needs_mask_for_pairs = bool(_pair_overrides) and self.mask_ is None
-
-        if (needs_mask_rebuild or needs_mask_for_pairs):
-            n_vars = len(columns)
-            if self._pred_lag_matrix is not None:
-                # Update pred_lag_matrix columns to match new max_lags.
-                plm = self._pred_lag_matrix.copy()
-                for j in range(plm.shape[1]):
-                    plm[:, j] = np.where(
-                        plm[:, j] > 0,
-                        np.minimum(plm[:, j], int(max_lags[j])),
-                        plm[:, j],
-                    )
-                self.mask_ = self._rebuild_mask(plm, min_lags, max_lags)
-            else:
-                # No selector was used - build mask with proper autoregression handling.
-                pred_lag_matrix = np.zeros((n_vars, n_vars), dtype=int)
-                for i in range(n_vars):
-                    for j in range(n_vars):
-                        pred_lag_matrix[i, j] = max_lags[j]
-                self.mask_ = self._rebuild_mask(pred_lag_matrix, min_lags, max_lags)
-
-        # ==============================================================
-        #  Per-pair mask restrictions implementation
-        # ==============================================================
-        if _pair_overrides and self.mask_ is not None:
+        # Local pair edits: zero block then set only requested lag window to 1.
+        if pair_overrides:
             col_index = np.concatenate(
                 [[0], (max_lags - min_lags + 1).cumsum(dtype=int)]
             )
 
-            for t_idx, p_idx, pair_min, pair_max in _pair_overrides:
+            for t_idx, p_idx, pair_min, pair_max in pair_overrides:
                 block_start = int(col_index[p_idx])
                 block_end = int(col_index[p_idx + 1])
                 block_len = block_end - block_start
@@ -641,25 +533,75 @@ class LagEngine:
                 if t_idx >= self.mask_.shape[0]:
                     continue
 
-                # Zero out the entire block for this
                 self.mask_[t_idx, block_start:block_end] = 0
 
-                # Re-enable only the requested sub-range.
-                # Columns in the block correspond to lags
-                # min_lags[p_idx] .. max_lags[p_idx] (left to right).
                 global_min = int(min_lags[p_idx])
                 rel_start = max(0, pair_min - global_min)
                 rel_end = min(block_len, pair_max - global_min + 1)
-                self.mask_[
-                    t_idx,
-                    block_start + rel_start : block_start + rel_end,
-                ] = 1
+                self.mask_[t_idx, block_start + rel_start:block_start + rel_end] = 1
 
-        min_lags = np.minimum(min_lags, max_lags)
+                if self._pred_lag_matrix is not None:
+                    self._pred_lag_matrix[t_idx, p_idx] = max(
+                        int(self._pred_lag_matrix[t_idx, p_idx]),
+                        int(pair_max),
+                    )
 
         return min_lags, max_lags
 
-    
+    @staticmethod
+    def _remap_mask(
+        mask: np.ndarray,
+        old_min: np.ndarray,
+        old_max: np.ndarray,
+        new_min: np.ndarray,
+        new_max: np.ndarray,
+        fill_new: int,
+        align: str = "overlap",
+    ) -> np.ndarray:
+        """Remap predictor blocks while preserving overlap values."""
+        old_min = np.asarray(old_min, dtype=int)
+        old_max = np.asarray(old_max, dtype=int)
+        new_min = np.asarray(new_min, dtype=int)
+        new_max = np.asarray(new_max, dtype=int)
+
+        n_targets = int(mask.shape[0])
+        old_offsets = np.concatenate([[0], (old_max - old_min + 1).cumsum(dtype=int)])
+        new_offsets = np.concatenate([[0], (new_max - new_min + 1).cumsum(dtype=int)])
+
+        out = np.full((n_targets, int(new_offsets[-1])), int(fill_new), dtype=mask.dtype)
+
+        for j in range(len(old_min)):
+            old_start = int(old_offsets[j])
+            new_start = int(new_offsets[j])
+
+            old_w = int(old_max[j] - old_min[j] + 1)
+            new_w = int(new_max[j] - new_min[j] + 1)
+            copy_w = min(old_w, new_w)
+            if copy_w <= 0:
+                continue
+
+            if align == "right":
+                old_slice = slice(old_start + (old_w - copy_w), old_start + old_w)
+                new_slice = slice(new_start + (new_w - copy_w), new_start + new_w)
+            elif align == "left":
+                old_slice = slice(old_start, old_start + copy_w)
+                new_slice = slice(new_start, new_start + copy_w)
+            else:
+                overlap_lo = max(int(old_min[j]), int(new_min[j]))
+                overlap_hi = min(int(old_max[j]), int(new_max[j]))
+                if overlap_hi < overlap_lo:
+                    continue
+                old_rel_lo = overlap_lo - int(old_min[j])
+                old_rel_hi = overlap_hi - int(old_min[j]) + 1
+                new_rel_lo = overlap_lo - int(new_min[j])
+                new_rel_hi = overlap_hi - int(new_min[j]) + 1
+                old_slice = slice(old_start + old_rel_lo, old_start + old_rel_hi)
+                new_slice = slice(new_start + new_rel_lo, new_start + new_rel_hi)
+
+            out[:, new_slice] = mask[:, old_slice]
+
+        return out
+
     def _rebuild_mask(
         self,
         pred_lag_matrix: np.ndarray,

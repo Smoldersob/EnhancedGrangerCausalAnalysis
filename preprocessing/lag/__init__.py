@@ -1,4 +1,4 @@
-# from . import lag_selectors as lag_selectors
-# from .lag_engine import LagEngine
+from . import lag_selectors as lag_selectors
+from .lag_engine import LagEngine, LagConfiguration, LagSelectionResult
 
-# __all__ = ['lag_selectors','LagEngine']
+__all__ = ['lag_selectors', 'LagEngine', 'LagConfiguration', 'LagSelectionResult']

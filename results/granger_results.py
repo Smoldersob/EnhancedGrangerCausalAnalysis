@@ -66,6 +66,25 @@ class GrangerAnalysisResults:
 		)
 
 	@staticmethod
+	def _coerce_output_feature_weights(
+		weights: NDArray[np.float64],
+		n_outputs: int,
+		n_features: int,
+	) -> NDArray[np.float64]:
+		"""Coerce explicit weights into shape (n_outputs, n_features)."""
+		arr = np.asarray(weights, dtype=np.float64)
+		if arr.ndim != 2:
+			raise ValueError(f"Expected 2D weights matrix, got shape {arr.shape}")
+		if arr.shape == (n_outputs, n_features):
+			return arr
+		if arr.shape == (n_features, n_outputs):
+			return arr.T
+		raise ValueError(
+			f"Cannot infer explicit weights orientation from shape {arr.shape}; "
+			f"expected {(n_outputs, n_features)} or {(n_features, n_outputs)}"
+		)
+
+	@staticmethod
 	def _sign_from_block(weight_block: NDArray[np.float64]) -> NDArray[np.float64]:
 		"""
 		Compute sign per output using coefficient with maximum absolute value.
@@ -85,11 +104,15 @@ class GrangerAnalysisResults:
 		self,
 		cause: str,
 		cause_index: int,
-		base_model: object,
-		reference_model: object,
+		base_model: Optional[object],
+		reference_model: Optional[object],
 		X: NDArray[np.float64],
 		y: NDArray[np.float64],
 		col_offsets: NDArray[np.int_],
+		base_predictions: Optional[NDArray[np.float64]] = None,
+		reference_predictions: Optional[NDArray[np.float64]] = None,
+		base_weights: Optional[NDArray[np.float64]] = None,
+		reference_weights: Optional[NDArray[np.float64]] = None,
 	) -> None:
 		"""Update all matrices and snapshots for one tested cause variable."""
 		if cause not in self.causes:
@@ -102,14 +125,36 @@ class GrangerAnalysisResults:
 		n_outputs = y_true.shape[1]
 		n_features = X_arr.shape[1]
 
-		base_pred = ensure_2d(np.asarray(base_model.predict(X_arr), dtype=np.float64))
-		ref_pred = ensure_2d(np.asarray(reference_model.predict(X_arr), dtype=np.float64))
+		if base_predictions is not None:
+			base_pred = ensure_2d(np.asarray(base_predictions, dtype=np.float64))
+		else:
+			if base_model is None:
+				raise ValueError("Provide either base_model or base_predictions")
+			base_pred = ensure_2d(np.asarray(base_model.predict(X_arr), dtype=np.float64))
 
-		base_weights = self._extract_output_feature_weights(base_model, n_outputs=n_outputs, n_features=n_features)
-		ref_weights = self._extract_output_feature_weights(reference_model, n_outputs=n_outputs, n_features=n_features)
+		if reference_predictions is not None:
+			ref_pred = ensure_2d(np.asarray(reference_predictions, dtype=np.float64))
+		else:
+			if reference_model is None:
+				raise ValueError("Provide either reference_model or reference_predictions")
+			ref_pred = ensure_2d(np.asarray(reference_model.predict(X_arr), dtype=np.float64))
 
-		self.base_snapshot = ModelSnapshot(predictions=base_pred, weights=base_weights)
-		self.reference_snapshots[cause] = ModelSnapshot(predictions=ref_pred, weights=ref_weights)
+		if base_weights is not None:
+			base_w = self._coerce_output_feature_weights(base_weights, n_outputs=n_outputs, n_features=n_features)
+		else:
+			if base_model is None:
+				raise ValueError("Provide either base_model or base_weights")
+			base_w = self._extract_output_feature_weights(base_model, n_outputs=n_outputs, n_features=n_features)
+
+		if reference_weights is not None:
+			ref_w = self._coerce_output_feature_weights(reference_weights, n_outputs=n_outputs, n_features=n_features)
+		else:
+			if reference_model is None:
+				raise ValueError("Provide either reference_model or reference_weights")
+			ref_w = self._extract_output_feature_weights(reference_model, n_outputs=n_outputs, n_features=n_features)
+
+		self.base_snapshot = ModelSnapshot(predictions=base_pred, weights=base_w)
+		self.reference_snapshots[cause] = ModelSnapshot(predictions=ref_pred, weights=ref_w)
 
 		start = int(col_offsets[cause_index])
 		end = int(col_offsets[cause_index + 1])
@@ -128,7 +173,7 @@ class GrangerAnalysisResults:
 		self.matrices.f_test.set_column(cause, f_values)
 		self.matrices.p_value.set_column(cause, p_values)
 
-		sign_values = self._sign_from_block(base_weights[:, start:end])
+		sign_values = self._sign_from_block(base_w[:, start:end])
 		self.matrices.sign.set_column(cause, sign_values)
 
 	def result(self, threshold: float = 0.01, with_sign: bool = False) -> pd.DataFrame:
