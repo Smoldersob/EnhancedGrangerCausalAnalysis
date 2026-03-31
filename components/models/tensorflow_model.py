@@ -51,6 +51,8 @@ class TensorFlowGrangerModel(BaseGrangerModel):
 
 		self.optimizer = optimizer
 		self.loss = loss
+		self._optimizer_spec = optimizer
+		self._loss_spec = loss
 		self.callbacks = callbacks or []
 		self.epochs = epochs
 		self.batch_size = batch_size
@@ -96,6 +98,47 @@ class TensorFlowGrangerModel(BaseGrangerModel):
 				raise ConstraintConfigurationError(
 					"All callbacks must inherit from tf.keras.callbacks.Callback"
 				)
+
+	def _build_optimizer(self) -> Any:
+		"""Create a fresh Keras optimizer instance from optimizer spec."""
+		keras_optimizer = tf.keras.optimizers.Optimizer
+
+		spec = self._optimizer_spec
+		if isinstance(spec, str) or isinstance(spec, dict):
+			return tf.keras.optimizers.get(spec)
+
+		if isinstance(spec, type) and issubclass(spec, keras_optimizer):
+			return spec()
+
+		if isinstance(spec, keras_optimizer):
+			return spec.__class__.from_config(spec.get_config())
+
+		if callable(spec):
+			candidate = spec()
+			if isinstance(candidate, keras_optimizer):
+				return candidate
+			raise ConstraintConfigurationError(
+				"optimizer callable must return tf.keras.optimizers.Optimizer"
+			)
+
+		raise ConstraintConfigurationError(
+			"optimizer must be string, keras optimizer, keras optimizer class, dict, or callable"
+		)
+
+	def _build_loss(self) -> Any:
+		"""Resolve loss spec to Keras-compatible loss object/callable."""
+		return tf.keras.losses.get(self._loss_spec)
+
+	def _reset_optimizer_state(self) -> None:
+		"""Reset optimizer internal state without recompiling the model."""
+		if self.model is None or getattr(self.model, "optimizer", None) is None:
+			return
+
+		optimizer = self.model.optimizer
+		# Keras optimizers expose state variables (iteration + slots).
+		# Zeroing them is much cheaper than re-compiling the full model graph.
+		for var in optimizer.variables:
+			var.assign(tf.zeros_like(var))
 
 	def initialize(
 		self,
@@ -158,7 +201,7 @@ class TensorFlowGrangerModel(BaseGrangerModel):
 			],
 			name="tensorflow_granger_model",
 		)
-		self.model.compile(optimizer=self.optimizer, loss=self.loss)
+		self.model.compile(optimizer=self._build_optimizer(), loss=self._build_loss())
 
 		self._variable_control_layer = variable_control_layer
 		self._coefficient_layer = coefficient_layer
@@ -173,6 +216,9 @@ class TensorFlowGrangerModel(BaseGrangerModel):
 		"""Fit model and return a minimal result dictionary aligned with BaseGrangerModel."""
 		if self.model is None or self._X_train is None or self._y_train is None:
 			raise ModelNotFittedError("Model is not initialized. Call initialize(...) first.")
+
+		# Reset optimizer state between fits without costly re-compile.
+		self._reset_optimizer_state()
 
 		try:
 			self._history = self.model.fit(

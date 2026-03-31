@@ -124,6 +124,36 @@ class PyTorchGrangerModel(BaseGrangerModel):
 			"optimizer must be string, optimizer class, or callable"
 		)
 
+	def _build_optimizer(self) -> Any:
+		"""Create a fresh optimizer instance (state reset)."""
+		if self._coefficient_layer is None:
+			raise ModelNotFittedError(
+				"Model layers are not initialized. Call initialize(...) first."
+			)
+
+		params = self._coefficient_layer.parameters()
+		provider = self.optimizer_cls
+
+		if isinstance(provider, type) and issubclass(provider, torch.optim.Optimizer):
+			return provider(params, lr=self.learning_rate)
+
+		if callable(provider):
+			try:
+				opt = provider(params, lr=self.learning_rate)
+			except TypeError:
+				opt = provider(params)
+
+			if isinstance(opt, torch.optim.Optimizer):
+				return opt
+
+			raise ConstraintConfigurationError(
+				"optimizer callable must return torch.optim.Optimizer"
+			)
+
+		raise ConstraintConfigurationError(
+			"Unable to build optimizer from provided optimizer specification"
+		)
+
 	def _resolve_loss(self, loss: Optional[Union[str, Any]]) -> Any:
 		"""Resolve loss spec to callable loss function."""
 		if loss is None:
@@ -231,10 +261,7 @@ class PyTorchGrangerModel(BaseGrangerModel):
 		self._variable_control_layer = variable_control_layer
 		self._coefficient_layer = coefficient_layer
 		try:
-			self._optimizer = self.optimizer_cls(
-				self._coefficient_layer.parameters(),
-				lr=self.learning_rate,
-			)
+			self._optimizer = self._build_optimizer()
 		except Exception as exc:
 			raise TrainingError(f"Failed to initialize optimizer: {exc}") from exc
 
@@ -274,8 +301,11 @@ class PyTorchGrangerModel(BaseGrangerModel):
 		"""Fit model using a PyTorch training loop and return standardized results."""
 		if self.model is None or self._X_train is None or self._y_train is None:
 			raise ModelNotFittedError("Model is not initialized. Call initialize(...) first.")
-		if self._optimizer is None or self._coefficient_layer is None:
-			raise ModelNotFittedError("Optimizer/layers are not initialized. Call initialize(...) first.")
+		if self._coefficient_layer is None:
+			raise ModelNotFittedError("Layers are not initialized. Call initialize(...) first.")
+
+		# Always recreate optimizer to reset internal moments/state for each new fit.
+		self._optimizer = self._build_optimizer()
 
 		X_tensor = torch.tensor(self._X_train, dtype=torch.float32, device=self.device)
 		y_tensor = torch.tensor(self._y_train, dtype=torch.float32, device=self.device)

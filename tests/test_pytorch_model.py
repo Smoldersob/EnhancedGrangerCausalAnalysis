@@ -198,6 +198,35 @@ def test_pytorch_model_tensorboard_callback_writes_event_files():
         assert len(event_files) > 0
 
 
+def test_pytorch_optimizer_resets_between_fit_calls():
+    _require_torch()
+
+    rng = np.random.default_rng(29)
+    X = rng.normal(size=(36, 4)).astype(np.float64)
+    y = rng.normal(size=(36, 1)).astype(np.float64)
+
+    model = PyTorchGrangerModel(
+        optimizer="adam",
+        learning_rate=0.01,
+        epochs=2,
+        batch_size=12,
+        verbose=0,
+        device="cpu",
+    )
+    model.initialize(X, lags=1, targets=y)
+
+    model.fit()
+    opt_first = model._optimizer  # pylint: disable=protected-access
+    assert opt_first is not None
+
+    model.fit()
+    opt_second = model._optimizer  # pylint: disable=protected-access
+    assert opt_second is not None
+
+    # Each fit() should start from a fresh optimizer state object.
+    assert opt_second is not opt_first
+
+
 if __name__ == "__main__":
     tests = [
         test_pytorch_model_initialize_fit_and_omit_variables,
@@ -207,6 +236,7 @@ if __name__ == "__main__":
         test_pytorch_model_callbacks_can_stop_training_early,
         test_pytorch_model_reduce_lr_and_early_stopping_callbacks,
         test_pytorch_model_tensorboard_callback_writes_event_files,
+        test_pytorch_optimizer_resets_between_fit_calls,
     ]
 
     print("\n" + "=" * 80)

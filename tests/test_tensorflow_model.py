@@ -158,6 +158,61 @@ def test_tensorflow_model_accepts_keras_l1_regularizer():
     assert regularizer.get_params()["l1"] == 1e-3
 
 
+def test_tensorflow_model_accepts_optimizer_instance_and_resets_between_fit_calls():
+    _require_tensorflow()
+
+    import tensorflow as tf
+
+    rng = np.random.default_rng(79)
+    X = rng.normal(size=(30, 4)).astype(np.float64)
+    y = rng.normal(size=(30, 1)).astype(np.float64)
+
+    opt_instance = tf.keras.optimizers.Adam(learning_rate=1e-2)
+    model = TensorFlowGrangerModel(
+        optimizer=opt_instance,
+        loss="mse",
+        epochs=2,
+        batch_size=10,
+        verbose=0,
+    )
+    model.initialize(X, lags=1, targets=y)
+
+    model.fit()
+    opt = model.model.optimizer  # pylint: disable=protected-access
+    assert opt is not None
+    iter_after_first = int(opt.iterations.numpy())
+    assert iter_after_first > 0
+
+    model.fit()
+    iter_after_second = int(model.model.optimizer.iterations.numpy())  # pylint: disable=protected-access
+
+    # Optimizer should be reset before each fit, so final iterations should
+    # match one training run (not accumulate across runs).
+    assert iter_after_second == iter_after_first
+
+
+def test_tensorflow_model_accepts_optimizer_class():
+    _require_tensorflow()
+
+    import tensorflow as tf
+
+    rng = np.random.default_rng(81)
+    X = rng.normal(size=(24, 3)).astype(np.float64)
+    y = rng.normal(size=(24, 1)).astype(np.float64)
+
+    model = TensorFlowGrangerModel(
+        optimizer=tf.keras.optimizers.SGD,
+        loss="mse",
+        epochs=2,
+        batch_size=8,
+        verbose=0,
+    )
+    model.initialize(X, lags=1, targets=y)
+    out = model.fit()
+
+    assert "history" in out
+
+
 def test_tensorflow_model_accepts_lag_dependent_l1_regularizer():
     _require_tensorflow()
 
@@ -258,6 +313,8 @@ if __name__ == "__main__":
         test_tensorflow_model_hyperoptimize_returns_message,
         test_tensorflow_model_accepts_keras_callbacks,
         test_tensorflow_model_accepts_keras_l1_regularizer,
+        test_tensorflow_model_accepts_optimizer_instance_and_resets_between_fit_calls,
+        test_tensorflow_model_accepts_optimizer_class,
         test_tensorflow_model_accepts_lag_dependent_l1_regularizer,
         test_keras_lag_dependent_regularizer_set_lag_layout_after_init,
         test_tensorflow_constraint_processes_user_relations_and_mask,

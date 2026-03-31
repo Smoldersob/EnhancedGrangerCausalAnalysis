@@ -1,0 +1,12 @@
+{
+  "output_dir": "./results",
+  "ground_truth_path": "./ground_truth.csv",
+  "group_config_path": "./group_config.json",
+  "threshold": 0.01,
+  "data": {
+    "csv_paths": [
+      "./data.csv"
+    ],
+    "index_col": 0
+  }
+}

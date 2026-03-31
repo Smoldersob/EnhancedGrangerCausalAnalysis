@@ -1,0 +1,33 @@
+{
+  "base_config": {
+    "backend": "pytorch",
+    "x_scaler": "standard",
+    "y_scaler": "standard",
+    "causes": ["x1", "x2"],
+    "effects": ["y"],
+    "tested_causes": ["x1", "x2"],
+    "lag_config": {
+      "max_lag": 8,
+      "use_lag_zero": false
+    },
+    "model_config": {
+      "epochs": 50,
+      "batch_size": 32,
+      "optimizer": "adam",
+      "learning_rate": 0.001
+    }
+  },
+  "sweep": {
+    "param_names": [
+      "model_config.optimizer",
+      "model_config.learning_rate",
+      "model_config.epochs",
+      "lag_config.max_lag"
+    ],
+    "cases": [
+      ["adam", 0.001, 50, 8],
+      ["adam", 0.0005, 100, 10],
+      ["sgd", 0.01, 80, 12]
+    ]
+  }
+}

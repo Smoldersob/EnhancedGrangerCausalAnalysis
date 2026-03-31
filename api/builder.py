@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from typing import Any, Dict, Mapping, Optional, Sequence, Tuple
+from pathlib import Path
 
 import pandas as pd
 
@@ -8,6 +9,7 @@ from ..core.exceptions import DataValidationError
 from ..core.lag_config import LagConfiguration
 from ..core.outputs import MultitaskGrangerOutput
 from ..preprocessing.stationarity import StationarityTransformer
+from .config_loader import BuilderConfigLoader
 from .orchestrator import MultiTaskGrangerAPI
 
 
@@ -154,6 +156,11 @@ class MultitaskGrangerBuilder:
 					self._fit_kwargs[key] = value
 
 		return self
+
+	def from_file(self, path: str | Path) -> "MultitaskGrangerBuilder":
+		"""Load builder state from a JSON/YAML config file."""
+		cfg = BuilderConfigLoader.load_file(path)
+		return self.from_config(cfg)
 
 	def fit(self) -> MultitaskGrangerOutput:
 		if self._data is None:
