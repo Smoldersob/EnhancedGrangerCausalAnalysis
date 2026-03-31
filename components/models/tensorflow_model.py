@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import importlib
+import os
 from importlib.util import find_spec
 from typing import Any, Dict, List, Optional, Union
 
@@ -17,6 +18,19 @@ from ...core.exceptions import (
 
 if find_spec("tensorflow") is not None:
 	tf = importlib.import_module("tensorflow")
+
+	_force_cpu_env = os.getenv("CGA_TF_FORCE_CPU", "").strip().lower()
+	_use_gpu_env = os.getenv("CGA_TF_USE_GPU", "").strip().lower()
+	_is_wsl = bool(os.getenv("WSL_DISTRO_NAME"))
+	_force_cpu = _force_cpu_env in {"1", "true", "yes", "on"}
+	_explicit_use_gpu = _use_gpu_env in {"1", "true", "yes", "on"}
+	_prefer_cpu = _force_cpu or (_is_wsl and not _explicit_use_gpu)
+
+	if _prefer_cpu:
+		try:
+			tf.config.set_visible_devices([], "GPU")
+		except Exception:
+			pass
 else:  # pragma: no cover - runtime dependency check
 	tf = None
 
@@ -54,6 +68,7 @@ class TensorFlowGrangerModel(BaseGrangerModel):
 		self._optimizer_spec = optimizer
 		self._loss_spec = loss
 		self.callbacks = callbacks or []
+
 		self.epochs = epochs
 		self.batch_size = batch_size
 		self.verbose = verbose
@@ -230,7 +245,15 @@ class TensorFlowGrangerModel(BaseGrangerModel):
 				verbose=self.verbose,
 			)
 		except Exception as exc:  # pragma: no cover - backend runtime errors
-			raise TrainingError(f"TensorFlow training failed: {exc}") from exc
+			if self._is_gpu_dnn_init_error(exc):
+				raise TrainingError(
+					"TensorFlow GPU runtime failed during DNN initialization. "
+					"Run in stable CPU mode by setting CGA_TF_FORCE_CPU=1 "
+					"or (on WSL) leave CGA_TF_USE_GPU unset. "
+					f"Original error: {exc}"
+				) from exc
+			else:
+				raise TrainingError(f"TensorFlow training failed: {exc}") from exc
 
 		self._fitted = True
 		forecasts = self.model.predict(self._X_train, verbose=0)
@@ -248,6 +271,15 @@ class TensorFlowGrangerModel(BaseGrangerModel):
 			"forecasts": forecasts,
 			"history": self._history.history if self._history is not None else {},
 		}
+
+	@staticmethod
+	def _is_gpu_dnn_init_error(exc: Exception) -> bool:
+		msg = str(exc).lower()
+		return (
+			"dnn library initialization failed" in msg
+			or "cudnn_status_not_initialized" in msg
+			or "failedpreconditionerror" in msg and "cuda" in msg
+		)
 
 	def predict(self, X: NDArray[np.float64]) -> NDArray[np.float64]:
 		"""Generate predictions from fitted TensorFlow model."""

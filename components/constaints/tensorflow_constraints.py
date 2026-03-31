@@ -88,8 +88,6 @@ class TensorFlowMaskAndMinAbsSumConstraint(
 			current_sum = tf.reduce_sum(tf.abs(selected))
 			min_sum = tf.cast(rule["min_abs_sum"], target_dtype)
 			deficit = tf.maximum(tf.cast(0.0, target_dtype), min_sum - current_sum)
-			if tf.equal(deficit, 0.0):
-				continue
 
 			n_sel = tf.cast(tf.size(selected), target_dtype)
 			delta = deficit / n_sel

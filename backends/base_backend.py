@@ -57,3 +57,11 @@ class BackendStrategy(ABC):
 		constraint: Optional[Any],
 	) -> None:
 		pass
+
+	def resolve_callbacks(self, callbacks: Optional[List[Any]]) -> Optional[List[Any]]:
+		"""Resolve callback specs to backend-native callback objects."""
+		return callbacks
+
+	def resolve_optimizer(self, optimizer: Any) -> Any:
+		"""Resolve optimizer spec to backend-native optimizer object/class."""
+		return optimizer

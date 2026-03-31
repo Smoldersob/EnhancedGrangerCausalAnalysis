@@ -155,15 +155,23 @@ def _build_callbacks_for_run(callbacks: Optional[Sequence[Any]], run_name: str) 
 	return [_clone_callback_for_run(cb, run_name) for cb in callbacks]
 
 
-def _set_model_callbacks(model: Any, callbacks: Optional[List[Any]]) -> None:
+def _set_model_callbacks(model: Any, callbacks: Optional[List[Any]], strategy: Optional[Any] = None) -> None:
 	"""Set callbacks on an already created model and validate when model supports it."""
 	if not hasattr(model, "callbacks"):
 		return
 
-	setattr(model, "callbacks", callbacks or [])
+	resolved_callbacks = callbacks
+	if strategy is not None and hasattr(strategy, "resolve_callbacks"):
+		resolved_callbacks = strategy.resolve_callbacks(callbacks)
+
+	setattr(model, "callbacks", resolved_callbacks or [])
 	validate = getattr(model, "_validate_callbacks", None)
 	if callable(validate):
 		validate()
+
+	validate_tf = getattr(model, "_validate_keras_components", None)
+	if callable(validate_tf):
+		validate_tf()
 
 
 class MultiTaskGrangerAPI:
@@ -418,6 +426,7 @@ class MultiTaskGrangerAPI:
 			_set_model_callbacks(
 				reference_model,
 				_build_callbacks_for_run(callbacks_template, f"reference_cause_{cause_name}"),
+				strategy,
 			)
 
 			reference_model.initialize(X_backend_scaled, targets=y_backend_scaled)

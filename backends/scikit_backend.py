@@ -5,6 +5,7 @@ from typing import Any, Dict, List, Optional
 from numpy.typing import NDArray
 
 from .base_backend import BackendStrategy
+from .np_object_loader import NumpyObjectLoader
 
 
 class ScikitBackendStrategy(BackendStrategy):
@@ -12,6 +13,7 @@ class ScikitBackendStrategy(BackendStrategy):
 
 	def __init__(self) -> None:
 		self._sklearn = None
+		self._object_loader = NumpyObjectLoader()
 		if self.is_available():
 			import sklearn  # noqa: F401
 			self._sklearn = sklearn
@@ -33,13 +35,15 @@ class ScikitBackendStrategy(BackendStrategy):
 		**config,
 	):
 		from ..components.models.scikit_model import ScikitConstrainedGrangerModel
+		callbacks_resolved = self.resolve_callbacks(config.get("callbacks", None))
+		_ = self.resolve_optimizer(config.get("optimizer", None))
 
 		return ScikitConstrainedGrangerModel(
 			backend="sklearn",
 			scaler=scaler,
 			regularizer=regularizer,
 			constraint=constraint,
-			callbacks=config.get("callbacks", None),
+			callbacks=callbacks_resolved,
 			fit_intercept=config.get("fit_intercept", True),
 			learning_rate=config.get("learning_rate", 1.0),
 			max_iter=config.get("max_iter", 1000),
@@ -47,6 +51,12 @@ class ScikitBackendStrategy(BackendStrategy):
 			batch_size=config.get("batch_size", None),
 			verbose=config.get("verbose", 0),
 		)
+
+	def resolve_callbacks(self, callbacks: Optional[List[Any]]) -> Optional[List[Any]]:
+		return self._object_loader.resolve_callbacks(callbacks)
+
+	def resolve_optimizer(self, optimizer: Any) -> Any:
+		return self._object_loader.resolve_optimizer(optimizer)
 
 	def build_constraint_from_relations(
 		self,

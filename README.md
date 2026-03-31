@@ -1,150 +1,233 @@
-# Complex Granger Analysis Library
+# Complex Granger Analysis
 
-A data‑driven toolset for automatically generating fault‑symptom relations from
-process signals using Granger causality. The project originated in a BSc/MA thesis
-focused on industrial fault diagnosis and offers a flexible Python implementation
-with multiple backends (scikit‑learn, TensorFlow, PyTorch, Statsmodels).
+Complex Granger Analysis is a modular library for Granger-causality workflows on
+multivariate time series. The current implementation focuses on a unified API,
+backend flexibility, reproducible preprocessing, and result containers that are
+easy to post-process in research and engineering pipelines.
 
-> **Motivation.** Fault diagnosis in complex industrial plants is often based on
-> expert knowledge and manual signal inspection. This library automates the
-> extraction of causal relations between faults and symptoms, enabling rapid
-> construction of diagnostic matrices and the incorporation of expert constraints.
-> The core algorithm selects time lags automatically, detects direct effects,
-> suppresses spurious links and reuses intermediate results to cut analysis time.
-> It also returns the **sign** of a dependency (signal increase/decrease due to a
-> fault) and allows users to inject prior knowledge via causal constraints.
+Current package version: `2.0.0`
 
-## Key Features
+## What The Library Provides Today
 
-- **Automatic lag selection** using VAR information criteria and extendable with
-  cross‑validation strategies.
-- **Granger‑based causality inference** with support for multivariate, sparse,
-  multitask and physics‑informed variants.
-- **Sign information** (positive/negative effect) alongside p‑values and F‑tests.
-- **Expert knowledge integration**: force or forbid specific causal links during
-  model fitting.
-- **Multiple framework backends** (sklearn, TF, PyTorch, Statsmodels) under a
-  unified interface.
-- **Stationarity preprocessing** (ADF/KPSS differencing) and user‑specified
-  non‑stationary variables.
-- **Sparsity via L1 regularization** to reduce false positives.
-- **Parallel computation** with joblib for faster analysis on multicore systems.
-- **Modular architecture** – models, regularizers, lag engine, callbacks and
-  utilities are decoupled for easy extension.
+- Multitask Granger analysis through `MultitaskGrangerBuilder` and `MultiTaskGrangerAPI`.
+- Pair-wise statsmodels analysis through `SimpleGrangerAPI`.
+- Backend abstraction for `pytorch`, `tensorflow`, and `scikit-learn`.
+- Automatic lag selection with information criteria and configurable lag masks.
+- Fine-grained lag overrides per predictor and per `(target, predictor)` pair.
+- Stationarity preprocessing (ADF/KPSS differencing) on one or many datasets.
+- Scalers for X/y data (`standard`, `minmax`, `robust`, `maxabs`, `identity`).
+- Constraint creation from relation dictionaries and backend-specific enforcement.
+- Regularization support including `l1` and lag-dependent L1 variants.
+- Callback support with run-level cloning for base/reference/hyperopt loops.
+- Structured outputs with p-values, F-test statistics, errors, and sign matrices.
+- Config-driven experiment sweeps via JSON/YAML and script automation.
+
+## Motivation
+
+Granger causality is a statistical hypothesis test used to determine whether one time series helps predict another. This library was built to support scalable, reproducible Granger causality workflows across multiple backends:
+
+- **Multi-framework flexibility**: TensorFlow, PyTorch, and scikit-learn backends allow users to choose the right tool for their data and constraints.
+- **Automated preprocessing**: Stationarity testing, lag selection, and data scaling are integrated into a configurable pipeline.
+- **Fine-grained control**: Override lag orders per pair, apply backend-specific constraints and regularization, and track reference models for each tested cause.
+- **Research-friendly outputs**: Structured result containers with p-values, F-test statistics, and weight snapshots support post-processing and visualization.
+
+For implementation details on orchestration strategies and model reuse patterns,
+see [orchestrator reference loop design](memories/repo/orchestrator_reference_loop.md).
+
+## Current Architecture
+
+```
+complex_granger_analysis/
+├── api/                 # builder, orchestrator, simple API, config loader
+├── backends/            # backend factory + TF/Torch/Sklearn strategies
+├── components/          # models, regularizers, constraints, initializers
+├── core/                # configs, protocols, exceptions, output dataclasses
+├── preprocessing/       # lag engine/selectors, stationarity, scaling
+├── results/             # causality matrices and statistics
+├── scripts/             # config-driven group test runner
+└── tests/               # unit tests for major modules
+```
+
+**For deep dives into architectural patterns and design decisions, see architecture notes in [memories/repo/](memories/repo/):**
+- [Reference loop orchestration pattern](memories/repo/orchestrator_reference_loop.md) – how models are reused across cause iterations
+- [Lag layout in regularizers](memories/repo/regularizers_lag_layout.md) – lag-dependent L1 regularizer structure and weight mapping
 
 ## Installation
 
-### From source
+Install dependencies from one of the requirement files.
 
 ```bash
 git clone https://github.com/Smoldersob/complex_granger_analysis.git
 cd complex_granger_analysis
-pip install -e .
+pip install -r requirements.txt
 ```
 
-> TensorFlow and PyTorch are optional; install them separately if you plan to
-> use the corresponding backends:
+Backend-specific options:
 
 ```bash
-pip install tensorflow    # or torch
+pip install -r requirements-torch.txt
+# or
+pip install -r requirements-tensorflow.txt
 ```
 
-### From PyPI (future)
+Notes:
+- PyTorch and TensorFlow are optional but recommended for neural backends.
+- `SimpleGrangerAPI` requires `statsmodels`.
 
-This package is expected to land on PyPI; install with `pip install
-complex_granger_analysis` once available.
-
-## Quick Start
+## Quick Start (Builder API)
 
 ```python
-import complex_granger_analysis as cga
 import pandas as pd
 
-# load sample process data
-data = pd.read_csv('example/PID_no_fault.csv', sep=';', index_col=0)
+from complex_granger_analysis.api import MultitaskGrangerBuilder
+from complex_granger_analysis.core.lag_config import LagConfiguration
 
-# choose a model (TF backend shown here)
-gc = cga.granger_tests.tensorflow_granger.TFNeuralSparseConstrainedMVGC()
-# fit with explicit causes/effects or let the library infer them
-gc.fit(data, causes=['u','f1','f2'], effects=['x1','x2','x3','x4'])
+df = pd.read_csv("example/PID_no_fault.csv", sep=";", index_col=0)
 
-# retrieve binary causality matrix (threshold 0.01 by default)
-print(gc.results.result())
+output = (
+    MultitaskGrangerBuilder(backend="pytorch")
+    .data(df)
+    .variables(
+        causes=["u", "f1", "f2"],
+        effects=["x1", "x2", "x3", "x4"],
+        tested_causes=["u", "f1", "f2"],
+    )
+    .lag(lag_config=LagConfiguration(max_lag=12, use_lag_zero=False))
+    .scaling(x_scaler="standard", y_scaler="standard")
+    .model(model_config={"epochs": 100, "batch_size": 32, "learning_rate": 1e-3})
+    .fit()
+)
+
+causality = output.results.result(threshold=0.01, with_sign=False)
+print(causality)
 ```
 
-## Library Layout
+## Quick Start (Simple Pair-wise API)
 
+```python
+import pandas as pd
+
+from complex_granger_analysis.api import SimpleGrangerAPI
+
+df = pd.read_csv("example/PID_no_fault.csv", sep=";", index_col=0)
+
+simple_output = SimpleGrangerAPI().fit(
+    data=df,
+    causes=["u", "f1", "f2"],
+    effects=["x1", "x2", "x3", "x4"],
+    lag_max=20,
+    threshold=0.01,
+)
+
+print(simple_output.causality_matrix.data)
+print(simple_output.p_value)
+print(simple_output.sign)
 ```
-complex_granger_analysis/
-├── __init__.py
-├── lag_engine.py           # lag selection & lagged-data builders
-├── utilities.py            # stationarity tests and transformations
-├── granger_analysis_results.py
-├── granger_tests/           # core models (complex, tensorflow, pytorch,...)
-├── models/                  # custom layers and linear models
-├── regularizers/            # framework‑specific regularizers
-└── callbacks/               # training/event callbacks
+
+## Config-Driven Runs
+
+Load builder configuration from JSON/YAML:
+
+```python
+from complex_granger_analysis.api import BuilderConfigLoader, MultitaskGrangerBuilder
+
+config = BuilderConfigLoader.load_file("path/to/config.json")
+output = MultitaskGrangerBuilder().from_config(config).data(df).fit()
 ```
 
-## Usage Examples
-
-See the `example/` directory for Jupyter notebooks and CSV files.  Typical
-workflows include:
-
-- computing causality matrices for fault‑symptom analysis,
-- adding expert constraints to force/forbid relations,
-- evaluating models on synthetic and real datasets (TEP, LiU‑ICE).
-
-## Theoretical Background
-
-The algorithm builds on Granger’s definition of causality: a time series X
-`Granger-causes` Y if past values of X improve predictions of Y beyond what past
-values of Y alone can achieve.  Extensions implemented in the code include:
-
-1. **Multivariate and multitask tests** – single matrix regression handling all
-   variables simultaneously.
-2. **Sparse Granger** – ℓ₁ regularization to promote sparsity and reduce
-   false positives.
-3. **Physics‑informed constraints** – embed expert knowledge by forcing sums of
-   coefficients to zero or above a threshold.
-4. **Three‑value outputs** – infer effect direction (+1/0/−1) from coefficient
-   signs.
-5. **Lag weighted lasso** - penalty dependent on lag value (with modifiable
-   penalty change vector)
-For more details, consult the original MA thesis and the inline documentation.
-
-## Dependencies
-
-- Python ≥ 3.8
-- numpy, pandas, scikit-learn, statsmodels
-- Optional: tensorflow, torch
-
-## Testing (to be added)
+Run sweep experiments from script config:
 
 ```bash
-pytest complex_granger_analysis/granger_tests -v
+python scripts/run_group_causality_tests.py \
+  --config scripts/run_group_causality_tests.config.json
+```
+
+This script reads:
+- dataset paths
+- group config with sweep cases
+- ground truth matrix
+
+and writes per-case outputs plus a summary table with metrics.
+
+**Note on model orchestration:** The library reuses a single reference model instance across cause iterations with re-initialization between runs. This pattern is documented in [orchestrator reference loop design](memories/repo/orchestrator_reference_loop.md).
+
+## Supported Backends
+
+- `pytorch` / `torch`
+- `tensorflow` / `tf` / `keras`
+- `sklearn` / `scikit` / `scikit-learn`
+
+When backend is not specified, the preferred order is:
+1. PyTorch
+2. TensorFlow
+3. scikit-learn
+
+## TensorFlow GPU/CPU Management
+
+The library automatically manages TensorFlow device placement with WSL-aware defaults:
+
+**Default behavior:**
+- On **WSL**: Uses CPU-only mode for stability (CUDA/cuDNN can be unstable in WSL)
+- On **native Linux/Mac with GPU**: Auto-detects and enables GPU with dynamic memory growth
+- On **systems without GPU**: Automatically falls back to CPU
+
+**Explicit control via environment variables:**
+
+```bash
+# Force CPU-only mode (most stable option)
+export CGA_TF_FORCE_CPU=1
+python your_script.py
+
+# Enable GPU on WSL (if your CUDA setup is stable)
+export CGA_TF_USE_GPU=1
+python your_script.py
+```
+
+**Troubleshooting GPU issues:**
+
+If you encounter `CUDNN_STATUS_NOT_INITIALIZED` errors, run with CPU mode:
+```bash
+CGA_TF_FORCE_CPU=1 python your_script.py
+```
+
+For detailed GPU policy, troubleshooting matrix, device mode states, and testing guidance,
+see [GPU/CPU management notes in memories](memories/repo/tensorflow_gpu_policy.md).
+
+## Regularization and Lag-Dependent Weights
+
+The library supports lag-dependent L1 regularization through `LagDependentL1` regularizers (available for TensorFlow, PyTorch, and NumPy backends). These regularizers apply different penalty weights to different lag positions within each predictor.
+
+**For details on lag layout, weight mapping, and the `set_lag_layout()` API:**
+see [lag layout in regularizers documentation](memories/repo/regularizers_lag_layout.md).
+
+## Result Objects
+
+`MultitaskGrangerOutput` exposes:
+- `results`: `GrangerAnalysisResults`
+- `base_model`
+- `reference_models`
+- `stationarity_transformer`
+- `lag_engine`
+- `X_scaler`, `y_scaler`
+
+`GrangerAnalysisResults` exposes:
+- `result(threshold=0.01, with_sign=False)`
+- `p_value`, `F_test`, `base_error`, `ref_error`, `sign`
+- snapshots of base/reference predictions and weights
+
+## Testing
+
+Run the test suite from repository root:
+
+```bash
+pytest tests -v
 ```
 
 ## Contributing
 
-Contributions are welcome!  See [CONTRIBUTING.md](CONTRIBUTING.md) for
-coding standards and pull‑request guidelines.  Please file issues for bugs or
-feature requests.
+Contributions are welcome. See [CONTRIBUTING.md](CONTRIBUTING.md) for
+development and pull request guidelines.
 
-## License
+## Project Direction
 
-MIT License – see [LICENSE](LICENSE).
-
-## References & Further Reading
-
-The approach and implementations are described in Janek’s thesis *"Automatic
-generation of faults–symptoms relations based on process data"*. Key topics
-include Granger causality, fault diagnosis, and physics-informed sparse
-inference.
-
-For background and datasets, consult the Tennessee Eastman Process (TEP) and
-LiU‑ICE benchmark publications.
-
----
-
-See also [VISION.md](./VISION.md) for the project roadmap and future plans.
+See [VISION.md](VISION.md) for roadmap details and planned enhancements.

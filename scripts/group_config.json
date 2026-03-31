@@ -1,6 +1,6 @@
 {
   "base_config": {
-    "backend": "pytorch",
+    "backend": "tensorflow",
     "x_scaler": "standard",
     "y_scaler": "standard",
     "causes": ["x1", "x2"],
@@ -9,6 +9,42 @@
     "lag_config": {
       "max_lag": 8,
       "use_lag_zero": false
+    },
+    "lag_selector": {
+      "type": "ic",
+      "use_bic": true
+    },
+    "relations": [
+      {
+        "effect": "y",
+        "cause": "x2",
+        "zero": true
+      },
+      {
+        "effect": "y",
+        "cause": "x1",
+        "min_abs_sum": 0.05
+      }
+    ],
+    "callbacks": [
+      {
+        "type": "early_stopping",
+        "monitor": "loss",
+        "patience": 10,
+        "min_delta": 0.0,
+        "restore_best_weights": true
+      },
+      {
+        "type": "reduce_lr_on_plateau",
+        "monitor": "loss",
+        "factor": 0.5,
+        "patience": 5,
+        "min_lr": 1e-06
+      }
+    ],
+    "regularizer": {
+      "type": "l1",
+      "l1": 0.001
     },
     "model_config": {
       "epochs": 50,
@@ -25,9 +61,9 @@
       "lag_config.max_lag"
     ],
     "cases": [
-      ["adam", 0.001, 50, 8],
-      ["adam", 0.0005, 100, 10],
-      ["sgd", 0.01, 80, 12]
+      ["adam", 0.001, 5, 8],
+      ["adam", 0.0005, 5, 10],
+      ["adam", 0.0002, 5, 12]
     ]
   }
 }

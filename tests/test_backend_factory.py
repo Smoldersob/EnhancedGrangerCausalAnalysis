@@ -98,6 +98,30 @@ def test_backend_factory_build_model_tensorflow():
     assert model.get_backend() == "tensorflow"
 
 
+def test_backend_factory_build_model_tensorflow_with_object_specs():
+    if find_spec("tensorflow") is None:
+        raise SkipTest("TensorFlow is not installed")
+
+    BackendFactory.reset_cache()
+    strategy = BackendFactory.get_strategy("tensorflow")
+
+    model = strategy.build_model(
+        n_features=8,
+        n_outputs=1,
+        regularizer=None,
+        constraint=None,
+        scaler=None,
+        optimizer={"type": "adam", "learning_rate": 0.001},
+        callbacks=[{"type": "early_stopping", "monitor": "loss", "patience": 2}],
+        epochs=2,
+    )
+
+    assert model is not None
+    assert model.get_backend() == "tensorflow"
+    assert isinstance(model.callbacks, list)
+    assert len(model.callbacks) == 1
+
+
 def test_backend_factory_build_model_pytorch():
     if find_spec("torch") is None:
         raise SkipTest("PyTorch is not installed")
@@ -117,6 +141,30 @@ def test_backend_factory_build_model_pytorch():
 
     assert model is not None
     assert model.get_backend() == "pytorch"
+
+
+def test_backend_factory_build_model_pytorch_with_object_specs():
+    if find_spec("torch") is None:
+        raise SkipTest("PyTorch is not installed")
+
+    BackendFactory.reset_cache()
+    strategy = BackendFactory.get_strategy("pytorch")
+
+    model = strategy.build_model(
+        n_features=6,
+        n_outputs=2,
+        regularizer=None,
+        constraint=None,
+        scaler=None,
+        optimizer={"type": "adam", "weight_decay": 0.0},
+        callbacks=[{"type": "early_stopping", "patience": 2}],
+        epochs=2,
+    )
+
+    assert model is not None
+    assert model.get_backend() == "pytorch"
+    assert isinstance(model.callbacks, list)
+    assert len(model.callbacks) == 1
 
 
 def test_backend_factory_build_model_sklearn():
@@ -192,7 +240,9 @@ if __name__ == "__main__":
         test_backend_factory_sklearn_strategy,
         test_backend_factory_get_preferred_backend,
         test_backend_factory_build_model_tensorflow,
+        test_backend_factory_build_model_tensorflow_with_object_specs,
         test_backend_factory_build_model_pytorch,
+        test_backend_factory_build_model_pytorch_with_object_specs,
         test_backend_factory_build_model_sklearn,
         test_backend_factory_constraint_from_relations_tensorflow,
         test_backend_factory_regularizer_from_spec,

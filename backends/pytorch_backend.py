@@ -5,6 +5,7 @@ from typing import Any, Dict, List, Optional
 from numpy.typing import NDArray
 
 from .base_backend import BackendStrategy
+from .torch_object_loader import TorchObjectLoader
 
 
 class PyTorchBackendStrategy(BackendStrategy):
@@ -12,9 +13,11 @@ class PyTorchBackendStrategy(BackendStrategy):
 
 	def __init__(self) -> None:
 		self._torch = None
+		self._object_loader: Optional[TorchObjectLoader] = None
 		if self.is_available():
 			import torch
 			self._torch = torch
+			self._object_loader = TorchObjectLoader(torch)
 
 	def is_available(self) -> bool:
 		try:
@@ -33,21 +36,33 @@ class PyTorchBackendStrategy(BackendStrategy):
 		**config,
 	):
 		from ..components.models.pytorch_model import PyTorchGrangerModel
+		callbacks_resolved = self.resolve_callbacks(config.get("callbacks", None))
+		optimizer_resolved = self.resolve_optimizer(config.get("optimizer", "adam"))
 
 		return PyTorchGrangerModel(
 			backend="pytorch",
 			scaler=scaler,
 			regularizer=regularizer,
 			constraint=constraint,
-			optimizer=config.get("optimizer", "adam"),
+			optimizer=optimizer_resolved,
 			loss=config.get("loss", None),
-			callbacks=config.get("callbacks", None),
+			callbacks=callbacks_resolved,
 			learning_rate=config.get("learning_rate", 0.001),
 			epochs=config.get("epochs", 100),
 			batch_size=config.get("batch_size", 32),
 			verbose=config.get("verbose", 0),
 			device=config.get("device", None),
 		)
+
+	def resolve_callbacks(self, callbacks: Optional[List[Any]]) -> Optional[List[Any]]:
+		if self._object_loader is None:
+			return callbacks
+		return self._object_loader.resolve_callbacks(callbacks)
+
+	def resolve_optimizer(self, optimizer: Any) -> Any:
+		if self._object_loader is None:
+			return optimizer
+		return self._object_loader.resolve_optimizer(optimizer)
 
 	def build_constraint_from_relations(
 		self,
