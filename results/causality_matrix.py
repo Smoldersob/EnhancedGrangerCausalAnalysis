@@ -7,6 +7,8 @@ import numpy as np
 import pandas as pd
 from numpy.typing import NDArray
 
+from ..core.exceptions import CausalityMatrixError
+
 
 @dataclass
 class CausalityMatrix:
@@ -39,7 +41,7 @@ class CausalityMatrix:
 	def set_column(self, cause: str, values: NDArray[np.float64]) -> None:
 		arr = np.asarray(values, dtype=np.float64)
 		if arr.shape[0] != self.data.shape[0]:
-			raise ValueError(
+			raise CausalityMatrixError(
 				f"Column vector length mismatch for cause '{cause}': {arr.shape[0]} vs {self.data.shape[0]}"
 			)
 		self.data.loc[:, cause] = arr

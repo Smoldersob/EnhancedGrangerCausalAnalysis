@@ -4,6 +4,7 @@ from numpy import log
 from abc import ABC, abstractmethod
 from joblib import Parallel, delayed
 from typing import Optional, Sequence, Tuple
+import warnings
 from ...core.lag_config import LagSelectionResult
 
 import pandas as pd
@@ -36,7 +37,7 @@ class BaseLagSelector(ABC):
     """
 
     def __init__(self,
-                 max_lag: int,
+                 max_lag: int|None=None,
                  center: bool = True,
                  use_lag_zero: bool = False,
                  target_indices: Optional[Sequence[int]] = None):
@@ -64,6 +65,9 @@ class BaseLagSelector(ABC):
             Lag selection result containing AR lags, per-pair lags,
             per-predictor maxima, column offsets, and mask.
         """
+        if self.max_lag is None:
+            self.max_lag = 10  # Default value if not specified
+            warnings.warn("max_lag not specified; defaulting to max_lag=10.")
         X_proc = self._preprocess(X)
         T, D = X_proc.shape
 
@@ -277,10 +281,13 @@ class ICLagSelector(BaseLagSelector):
     """
 
     def __init__(self,
-                 max_lag: int,
+                 max_lag: int | None = None,
                  center: bool = True,
                  use_lag_zero: bool = False,
                  use_bic: bool = False,
+                 delta_min_ic: Optional[float] = 2.0,
+                 prune_lags: bool = True,
+                 delta_prune_ic: float = 2.0,
                  n_jobs: int = -1,
                  target_indices: Optional[Sequence[int]] = None):
         super().__init__(max_lag=max_lag,
@@ -288,6 +295,9 @@ class ICLagSelector(BaseLagSelector):
                          use_lag_zero=use_lag_zero,
                          target_indices=target_indices)
         self.use_bic = use_bic
+        self.delta_min_ic = delta_min_ic
+        self.prune_lags = prune_lags
+        self.delta_prune_ic = delta_prune_ic
         self.n_jobs = n_jobs
 
     # -- scoring --------------------------------------------------------
@@ -318,6 +328,24 @@ class ICLagSelector(BaseLagSelector):
             return k * log(n) + n * log(sigma2)
         else:
             return 2 * k + n * log(sigma2)
+
+    def _score_linear(self, y: np.ndarray, X: np.ndarray) -> float:
+        """Unified score hook used by selection and pruning."""
+        return self._ic_score_linear(y, X)
+
+    def _passes_delta_min(self, score: float, best_score: float) -> bool:
+        """
+        Check whether score improvement passes the configured minimum threshold.
+
+        If delta_min_ic is None, any strict improvement is accepted.
+        """
+        if self.delta_min_ic is None:
+            return score < best_score
+        return score < best_score - self.delta_min_ic
+
+    def _is_prune_candidate(self, candidate_score: float, current_score: float) -> bool:
+        """Check if removing a lag is acceptable under IC pruning tolerance."""
+        return candidate_score <= current_score + self.delta_prune_ic
 
     def _design_matrix_arx(self,
                            X: np.ndarray,
@@ -376,19 +404,101 @@ class ICLagSelector(BaseLagSelector):
                 continue
 
             best_lag = 0
-            best_score = np.inf
+            best_score = best_ar_score
             for lag in range(0, self.max_lag + 1):
                 y, Phi = self._design_matrix_arx(
                     X, target_idx, best_ar_lag, lag, pred_idx
                 )
-                score = self._ic_score_linear(y, Phi)
-                if score < best_score:
+                score = self._score_linear(y, Phi)
+                if self._passes_delta_min(score, best_score):
                     best_score = score
                     best_lag = lag
 
             best_pred_lags[pred_idx] = best_lag
 
         return best_ar_lag, best_pred_lags
+
+    def _build_design_for_target(self,
+                                 X: np.ndarray,
+                                 target_idx: int,
+                                 active_pairs: list[tuple[int, int]]) -> Tuple[np.ndarray, np.ndarray]:
+        """Build a multivariate design matrix from active (predictor, lag) pairs."""
+        T, D = X.shape
+        if not active_pairs:
+            y = X[:, target_idx]
+            Phi = np.empty((len(y), 0), dtype=float)
+            return y, Phi
+
+        max_l = max(l for _, l in active_pairs)
+        n_rows = T - max_l
+        y = X[max_l:, target_idx]
+        Phi = np.empty((n_rows, len(active_pairs)), dtype=float)
+
+        for k, (j, lag) in enumerate(active_pairs):
+            Phi[:, k] = X[max_l - lag:T - lag, j]
+
+        return y, Phi
+
+    def _prune_lags_for_target(self,
+                               X: np.ndarray,
+                               target_idx: int,
+                               ar_lag: int,
+                               pred_lags: np.ndarray) -> Tuple[int, np.ndarray]:
+        """
+        Backward pruning for one target.
+
+        Starts from selected per-predictor maximum lags and iteratively removes
+        one active lag at a time if the score deterioration stays within the
+        configured pruning tolerance.
+        """
+        T, D = X.shape
+
+        active: list[tuple[int, int]] = []
+        for j in range(D):
+            lag = int(pred_lags[j])
+            if lag > 0:
+                active.append((j, lag))
+
+        if ar_lag > 0 and int(pred_lags[target_idx]) == 0:
+            active.append((target_idx, int(ar_lag)))
+
+        if not active:
+            return ar_lag, pred_lags
+
+        y_full, Phi_full = self._build_design_for_target(X, target_idx, active)
+        full_score = self._score_linear(y_full, Phi_full)
+
+        improved = True
+        while improved and len(active) > 0:
+            improved = False
+            best_candidate_score = full_score
+            best_to_remove = None
+
+            for idx_to_remove in range(len(active)):
+                candidate = active[:idx_to_remove] + active[idx_to_remove + 1:]
+                y_c, Phi_c = self._build_design_for_target(X, target_idx, candidate)
+                score_c = self._score_linear(y_c, Phi_c)
+
+                if self._is_prune_candidate(score_c, full_score):
+                    if best_to_remove is None or score_c < best_candidate_score:
+                        best_candidate_score = score_c
+                        best_to_remove = idx_to_remove
+
+            if best_to_remove is not None:
+                active.pop(best_to_remove)
+                full_score = best_candidate_score
+                improved = True
+
+        new_pred_lags = np.zeros_like(pred_lags)
+        new_ar_lag = 0
+        for j, lag in active:
+            if j == target_idx:
+                new_ar_lag = lag
+                new_pred_lags[j] = lag
+            else:
+                new_pred_lags[j] = lag
+
+        return new_ar_lag, new_pred_lags
 
     def _select_lags(self,
                      X: np.ndarray,
@@ -411,6 +521,21 @@ class ICLagSelector(BaseLagSelector):
             # store AR lag on diagonal as maximum lag for self-prediction
             best_pred_lags[i] = best_ar_lag
             pred_lag_matrix[i, :] = best_pred_lags
+
+        if self.prune_lags:
+            new_ar = ar_lags.copy()
+            new_pred = pred_lag_matrix.copy()
+            for i in targets:
+                ar_i, pred_i = self._prune_lags_for_target(
+                    X,
+                    target_idx=i,
+                    ar_lag=ar_lags[i],
+                    pred_lags=pred_lag_matrix[i, :]
+                )
+                new_ar[i] = ar_i
+                new_pred[i, :] = pred_i
+            ar_lags[:] = new_ar
+            pred_lag_matrix[:, :] = new_pred
 
 
 # ======================================================================
@@ -444,21 +569,29 @@ class CVLagSelector(ICLagSelector):
     """
 
     def __init__(self,
-                 max_lag: int,
+                 max_lag: int | None = None,
                  center: bool = True,
                  use_lag_zero: bool = False,
                  cv_folds: int = 5,
                  cv_metric: str = "mse",
+                 delta_min_rel_cv: Optional[float] = None,
+                 prune_lags: bool = False,
+                 delta_prune_rel_cv: float = 0.02,
                  n_jobs: int = -1,
                  target_indices: Optional[Sequence[int]] = None):
         super().__init__(max_lag=max_lag,
                          center=center,
                          use_lag_zero=use_lag_zero,
                          use_bic=False,
+                         delta_min_ic=None,
+                         prune_lags=prune_lags,
+                         delta_prune_ic=2.0,
                          n_jobs=n_jobs,
                          target_indices=target_indices)
         self.cv_folds = cv_folds
         self.cv_metric = cv_metric
+        self.delta_min_rel_cv = delta_min_rel_cv
+        self.delta_prune_rel_cv = delta_prune_rel_cv
 
     def _cv_score_linear(self, y: np.ndarray, X: np.ndarray) -> float:
         """
@@ -514,6 +647,24 @@ class CVLagSelector(ICLagSelector):
 
         return float(np.mean(errors))
 
+    def _score_linear(self, y: np.ndarray, X: np.ndarray) -> float:
+        """Unified score hook used by selection and pruning."""
+        return self._cv_score_linear(y, X)
+
+    def _passes_delta_min(self, score: float, best_score: float) -> bool:
+        """
+        Check whether score improvement passes the configured CV threshold.
+
+        If delta_min_rel_cv is None, any strict improvement is accepted.
+        """
+        if self.delta_min_rel_cv is None:
+            return score < best_score
+        return score < best_score * (1 - self.delta_min_rel_cv)
+
+    def _is_prune_candidate(self, candidate_score: float, current_score: float) -> bool:
+        """Check if removing a lag is acceptable under CV pruning tolerance."""
+        return candidate_score <= current_score * (1 + self.delta_prune_rel_cv)
+
     def _evaluate_target(self, X: np.ndarray, target_idx: int) -> Tuple[int, np.ndarray]:
         """
         Select AR lag and max lags per predictor for a single target
@@ -538,13 +689,13 @@ class CVLagSelector(ICLagSelector):
                 continue
 
             best_lag = 0
-            best_score = np.inf
+            best_score = best_ar_score
             for lag in range(0, self.max_lag + 1):
                 y, Phi = self._design_matrix_arx(
                     X, target_idx, best_ar_lag, lag, pred_idx
                 )
-                score = self._cv_score_linear(y, Phi)
-                if score < best_score:
+                score = self._score_linear(y, Phi)
+                if self._passes_delta_min(score, best_score):
                     best_score = score
                     best_lag = lag
 
@@ -591,7 +742,7 @@ class VARLagSelector(BaseLagSelector):
     """
 
     def __init__(self,
-                 max_lag: int,
+                 max_lag: int | None = None,
                  center: bool = True,
                  use_lag_zero: bool = False,
                  min_lag: int = 1,

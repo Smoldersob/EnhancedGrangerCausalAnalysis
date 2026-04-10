@@ -23,13 +23,14 @@ def _difference_once(values: np.ndarray) -> np.ndarray:
 	return np.diff(values)
 
 
-def static_adfuller_order(series: pd.Series, maxlag: int = 5, alpha: float = 0.05) -> int:
+def static_adfuller_order(series: pd.Series, max_differencing_order: int = 5, maxlag: int|None = None, alpha: float = 0.05) -> int:
 	"""Return the differencing order that best satisfies ADF stationarity.
 
 	Strategy:
-	- Check orders from 0 to ``maxlag``.
+	- Check orders from 0 to ``max_differencing_order``.
 	- Return first order with p-value <= ``alpha``.
 	- If none is stationary, return order with the smallest p-value.
+	Maxlag is set to max_differencing_order to avoid overfitting on small samples.
 	"""
 	values = _as_clean_float_array(series)
 	if _is_constant(values):
@@ -38,12 +39,12 @@ def static_adfuller_order(series: pd.Series, maxlag: int = 5, alpha: float = 0.0
 	best_order = 0
 	best_p = np.inf
 
-	for order in range(maxlag + 1):
+	for order in range(max_differencing_order + 1):
 		if values.size < 4 or _is_constant(values):
 			break
 
 		try:
-			p_value = float(adfuller(values, autolag="AIC")[1])
+			p_value = float(adfuller(values, autolag="AIC", maxlag=maxlag)[1])
 		except Exception:
 			p_value = 1.0
 
@@ -59,13 +60,14 @@ def static_adfuller_order(series: pd.Series, maxlag: int = 5, alpha: float = 0.0
 	return best_order
 
 
-def static_kpss_order(series: pd.Series, maxlag: int = 5, alpha: float = 0.05) -> int:
+def static_kpss_order(series: pd.Series, max_differencing_order: int = 5, maxlag: int|None = None, alpha: float = 0.05) -> int:
 	"""Return the differencing order that best satisfies KPSS stationarity.
 
 	Strategy:
-	- Check orders from 0 to ``maxlag``.
+	- Check orders from 0 to ``max_differencing_order``.
 	- Return first order with p-value >= ``alpha``.
 	- If none is stationary, return order with the largest p-value.
+	Maxlag is set to max_differencing_order to avoid overfitting on small samples.
 	"""
 	values = _as_clean_float_array(series)
 	if _is_constant(values):
@@ -74,14 +76,14 @@ def static_kpss_order(series: pd.Series, maxlag: int = 5, alpha: float = 0.05) -
 	best_order = 0
 	best_p = -np.inf
 
-	for order in range(maxlag + 1):
+	for order in range(max_differencing_order + 1):
 		if values.size < 4 or _is_constant(values):
 			break
 
 		try:
 			with warnings.catch_warnings():
 				warnings.simplefilter("ignore", category=InterpolationWarning)
-				p_value = float(kpss(values, regression="ct", nlags="auto")[1])
+				p_value = float(kpss(values, regression="ct", nlags=maxlag if maxlag is not None else "auto")[1])
 		except Exception:
 			p_value = 0.0
 

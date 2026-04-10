@@ -22,3 +22,6 @@ if importlib.util.find_spec("sklearn") is not None:
 	from .scikit_backend import ScikitBackendStrategy
 
 	__all__.append("ScikitBackendStrategy")
+
+from . import callbacks, models, constraints, regularizers
+__all__.extend(["callbacks", "models", "constraints", "regularizers"])

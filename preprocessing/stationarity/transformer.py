@@ -66,12 +66,12 @@ class StationarityTransformer:
         if self.test_name == "kpss":
             return static_kpss_order(
                 series=series,
-                maxlag=self.max_differencing_order,
+                max_differencing_order=self.max_differencing_order,
                 alpha=self.alpha,
             )
         return static_adfuller_order(
             series=series,
-            maxlag=self.max_differencing_order,
+            max_differencing_order=self.max_differencing_order,
             alpha=self.alpha,
         )
 

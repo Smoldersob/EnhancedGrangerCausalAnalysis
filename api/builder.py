@@ -20,9 +20,16 @@ class MultitaskGrangerBuilder:
 	The builder stores configuration step by step and executes analysis via fit().
 	"""
 
-	def __init__(self, backend: Optional[str] = None) -> None:
+	def __init__(
+		self,
+		backend: Optional[str] = None,
+		stationarity_transformer: Any = None,
+		reuse_data: bool = False,
+	) -> None:
 		self._backend: Optional[str] = backend
 		self._data: Optional[pd.DataFrame | Sequence[pd.DataFrame]] = None
+		self._stationarity_transformer: Any = stationarity_transformer or StationarityTransformer()
+		self._reuse_data: bool = bool(reuse_data)
 
 		self._fit_kwargs: Dict[str, Any] = {
 			"causes": None,
@@ -31,7 +38,6 @@ class MultitaskGrangerBuilder:
 			"relations": None,
 			"lag_config": None,
 			"lag_selector": None,
-			"stationarity_transformer": None,
 			"backend_sample_fraction": 1.0,
 			"backend_max_samples": None,
 			"x_scaler": "standard",
@@ -43,6 +49,7 @@ class MultitaskGrangerBuilder:
 			"hiperoptimalization_conf": None,
 			"initializer": None,
 			"model_config": None,
+			"prepared_data": None,
 		}
 
 	def backend(self, backend_name: Optional[str]) -> "MultitaskGrangerBuilder":
@@ -82,15 +89,19 @@ class MultitaskGrangerBuilder:
 
 	def stationarity(
 		self,
-		transformer: Optional[StationarityTransformer] = None,
+		transformer: Any = None,
 	) -> "MultitaskGrangerBuilder":
-		self._fit_kwargs["stationarity_transformer"] = transformer
+		self._stationarity_transformer = transformer or StationarityTransformer()
+		return self
+
+	def reuse_data(self, value: bool = True) -> "MultitaskGrangerBuilder":
+		self._reuse_data = bool(value)
 		return self
 
 	def scaling(
 		self,
-		x_scaler: Optional[str] = "standard",
-		y_scaler: Optional[str] = "standard",
+		x_scaler: Optional[Any] = "standard",
+		y_scaler: Optional[Any] = "standard",
 	) -> "MultitaskGrangerBuilder":
 		self._fit_kwargs["x_scaler"] = x_scaler
 		self._fit_kwargs["y_scaler"] = y_scaler
@@ -131,6 +142,10 @@ class MultitaskGrangerBuilder:
 		self._fit_kwargs["initializer"] = initializer
 		return self
 
+	def prepared_data(self, prepared_data: Optional[Any]) -> "MultitaskGrangerBuilder":
+		self._fit_kwargs["prepared_data"] = prepared_data
+		return self
+
 	def model(self, model_config: Optional[Dict[str, Any]] = None) -> "MultitaskGrangerBuilder":
 		self._fit_kwargs["model_config"] = dict(model_config) if model_config is not None else None
 		return self
@@ -139,6 +154,12 @@ class MultitaskGrangerBuilder:
 		"""Load builder state from a config mapping using orchestrator fit keys."""
 		if "backend" in config:
 			self._backend = config.get("backend")
+
+		if "reuse_data" in config:
+			self._reuse_data = bool(config.get("reuse_data"))
+
+		if "stationarity_transformer" in config:
+			self._stationarity_transformer = config.get("stationarity_transformer") or StationarityTransformer()
 
 		if "data" in config:
 			self._data = config.get("data")
@@ -166,15 +187,20 @@ class MultitaskGrangerBuilder:
 		if self._data is None:
 			raise DataValidationError("Builder requires data(...) before fit()")
 
-		api = MultiTaskGrangerAPI(backend=self._backend)
+		try:
+			api = MultiTaskGrangerAPI(
+				backend=self._backend,
+				stationarity_transformer=self._stationarity_transformer,
+				reuse_data=self._reuse_data,
+			)
+		except TypeError:
+			api = MultiTaskGrangerAPI(backend=self._backend)
+			if hasattr(api, "_stationarity_transformer"):
+				setattr(api, "_stationarity_transformer", self._stationarity_transformer)
+			if hasattr(api, "_reuse_data"):
+				setattr(api, "_reuse_data", self._reuse_data)
 		return api.fit(self._data, **self._fit_kwargs)
 
 	def run(self) -> MultitaskGrangerOutput:
 		"""Alias for fit()."""
 		return self.fit()
-
-
-GrangerAnalysisBuilder = MultitaskGrangerBuilder
-
-
-__all__ = ["MultitaskGrangerBuilder", "GrangerAnalysisBuilder"]

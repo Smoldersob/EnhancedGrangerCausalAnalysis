@@ -6,13 +6,14 @@ from typing import Any, Dict, List, Optional
 from numpy.typing import NDArray
 
 from .base_backend import BackendStrategy
-from .tf_object_loader import TensorFlowObjectLoader
+from .object_loaders.tf_object_loader import TensorFlowObjectLoader
 
 
 class TensorFlowBackendStrategy(BackendStrategy):
 	"""Strategy for TensorFlow/Keras backend."""
 
-	def __init__(self) -> None:
+	def __init__(self, loading_verbose: bool = False) -> None:
+		super().__init__(loading_verbose=loading_verbose)
 		self._tf = None
 		self._keras = None
 		self._object_loader: Optional[TensorFlowObjectLoader] = None
@@ -22,7 +23,7 @@ class TensorFlowBackendStrategy(BackendStrategy):
 			self._configure_tensorflow_runtime(tf)
 			self._tf = tf
 			self._keras = tf.keras
-			self._object_loader = TensorFlowObjectLoader(tf)
+			self._object_loader = TensorFlowObjectLoader(tf, loading_verbose=loading_verbose)
 
 	def _configure_tensorflow_runtime(self, tf_module: Any) -> None:
 		"""Configure TensorFlow runtime device policy.
@@ -84,20 +85,29 @@ class TensorFlowBackendStrategy(BackendStrategy):
 		n_outputs: int,
 		regularizer: Optional[Any] = None,
 		constraint: Optional[Any] = None,
-		scaler: Optional[Any] = None,
 		**config,
 	):
-		from ..components.models.tensorflow_model import TensorFlowGrangerModel
+		from .models.tensorflow_model import TensorFlowGrangerModel
+		config = self._consume_loading_verbose(config)
+		if self._object_loader is not None:
+			self._object_loader.set_loading_verbose(self._loading_verbose)
 
+		regularizer_resolved = self.build_regularizer(regularizer)
+		constraint_resolved = self.build_constraint(constraint)
 		callbacks_cfg = config.get("callbacks", None)
 		callbacks_resolved = self.resolve_callbacks(callbacks_cfg)
 		optimizer_resolved = self.resolve_optimizer(config.get("optimizer", "adam"))
+		self.validate_components(
+			regularizer=regularizer_resolved,
+			constraint=constraint_resolved,
+			callbacks=callbacks_resolved,
+			optimizer=optimizer_resolved,
+		)
 
 		return TensorFlowGrangerModel(
 			backend="tensorflow",
-			scaler=scaler,
-			regularizer=regularizer,
-			constraint=constraint,
+			regularizer=regularizer_resolved,
+			constraint=constraint_resolved,
 			optimizer=optimizer_resolved,
 			loss=config.get("loss", "mse"),
 			callbacks=callbacks_resolved,
@@ -109,11 +119,13 @@ class TensorFlowBackendStrategy(BackendStrategy):
 	def resolve_callbacks(self, callbacks: Optional[List[Any]]) -> Optional[List[Any]]:
 		if self._object_loader is None:
 			return callbacks
+		self._object_loader.set_loading_verbose(self._loading_verbose)
 		return self._object_loader.resolve_callbacks(callbacks)
 
 	def resolve_optimizer(self, optimizer: Any) -> Any:
 		if self._object_loader is None:
 			return optimizer
+		self._object_loader.set_loading_verbose(self._loading_verbose)
 		return self._object_loader.resolve_optimizer(optimizer)
 
 	def build_constraint_from_relations(
@@ -128,7 +140,7 @@ class TensorFlowBackendStrategy(BackendStrategy):
 		if not relations:
 			return None
 
-		from ..components.constaints import build_tensorflow_constraint_from_relations
+		from .constraints import build_tensorflow_constraint_from_relations
 
 		return build_tensorflow_constraint_from_relations(
 			relations=relations,
@@ -140,35 +152,31 @@ class TensorFlowBackendStrategy(BackendStrategy):
 		)
 
 	def build_regularizer(self, regularizer_spec: Any):
-		if regularizer_spec is None:
-			return None
+		if self._object_loader is None:
+			return regularizer_spec
+		self._object_loader.set_loading_verbose(self._loading_verbose)
+		return self._object_loader.resolve_regularizer(regularizer_spec)
 
-		if isinstance(regularizer_spec, dict):
-			reg_type = regularizer_spec.get("type", "l1").lower()
-			if reg_type == "l1":
-				from ..components.regularizers.tensorflow_regularizers import KerasL1Regularizer
-				return KerasL1Regularizer(l1=regularizer_spec.get("l1", 0.01))
-			if reg_type == "lag_dependent_l1":
-				from ..components.regularizers.tensorflow_regularizers import KerasLagDependentL1Regularizer
-				return KerasLagDependentL1Regularizer(
-					l1=regularizer_spec.get("l1", 0.01),
-					lag_weights=regularizer_spec.get("lag_weights", None),
-					max_lags_per_pred=regularizer_spec.get("max_lags_per_pred", None),
-					col_offsets=regularizer_spec.get("col_offsets", None),
-				)
+	def build_constraint(self, constraint_spec: Any) -> Any:
+		if self._object_loader is None:
+			return constraint_spec
+		self._object_loader.set_loading_verbose(self._loading_verbose)
+		return self._object_loader.resolve_constraint(constraint_spec)
 
-		return regularizer_spec
+	def validate_components(
+		self,
+		regularizer: Optional[Any],
+		constraint: Optional[Any],
+		callbacks: Optional[List[Any]] = None,
+		optimizer: Any = None,
+	) -> None:
+		if self._object_loader is None:
+			return
+		self._object_loader.set_loading_verbose(self._loading_verbose)
+		resolved_callbacks = self._object_loader.resolve_callbacks(callbacks)
+		_ = self._object_loader.resolve_optimizer(optimizer)
+		_ = self._object_loader.resolve_regularizer(regularizer)
+		_ = self._object_loader.resolve_constraint(constraint)
+		self._log_loaded_component("callbacks", resolved_callbacks)
 
-	def get_scaler(self):
-		return None
-
-	def get_model_hyperparameters(self) -> Dict[str, Any]:
-		return {
-			"epochs": 100,
-			"batch_size": 32,
-			"learning_rate": 0.001,
-			"optimizer": "adam",
-			"loss": "mse",
-			"verbose": 0,
-		}
 

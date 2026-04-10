@@ -11,13 +11,12 @@ __all__.extend([
 
 if importlib.util.find_spec("pandas") is not None:
 	try:
-		from .builder import GrangerAnalysisBuilder, MultitaskGrangerBuilder
+		from .builder import MultitaskGrangerBuilder
 		from .orchestrator import MultiTaskGrangerAPI, MultitaskGrangerOutput
 		from .simple_granger import SimpleGrangerAPI, SimpleGrangerOutput
 
 		__all__.extend([
 			"MultitaskGrangerBuilder",
-			"GrangerAnalysisBuilder",
 			"MultiTaskGrangerAPI",
 			"MultitaskGrangerOutput",
 			"SimpleGrangerAPI",

@@ -1,3 +1,35 @@
+"""
+Script for running Granger causality test sweeps from configuration files.
+
+This script:
+1. Loads multiple datasets (DataFrames) from CSV files.
+2. Iterates through group configurations (sweep of parameter variations).
+3. For each configuration, runs Granger analysis via MultitaskGrangerBuilder.
+4. Saves resulting causality matrices (binary, p-values, F-test, sign).
+5. Computes metrics against ground truth (TP, FP, accuracy, F1, etc.).
+6. Produces a summary CSV with timing and metrics for each test configuration.
+
+Typical workflow:
+    python run_group_causality_tests.py --config script_config.json
+
+Config structure (scripts/run_group_causality_tests.config.json):
+    {
+        "output_dir": "./results",  # folder for result matrices and summary.csv
+        "ground_truth_path": "./ground_truth.csv",  # reference causality matrix
+        "group_config_path": "./group_config.json",  # test sweep config
+        "threshold": 0.01,  # p-value threshold for binary causality
+        "data": {
+            "csv_paths": ["./data.csv"],  # list of CSV files to load
+            "index_col": 0  # column index (or name) for row index
+        }
+    }
+
+Results in output_dir:
+    - case_000_causality.csv, case_000_p_value.csv, case_000_f_test.csv, case_000_sign.csv
+    - case_001_causality.csv, case_001_p_value.csv, ...
+    - summary.csv (aggregated metrics and timing for all cases)
+"""
+
 from __future__ import annotations
 
 import argparse
@@ -19,6 +51,7 @@ from complex_granger_analysis.utilities.metric_calculator import MetricCalculato
 
 
 def _sanitize_token(value: Any) -> str:
+    """Convert arbitrary value into a safe filename token (alphanumeric, -, _)."""
     s = str(value)
     s = s.replace(" ", "_")
     s = re.sub(r"[^a-zA-Z0-9_.-]", "_", s)
@@ -26,18 +59,55 @@ def _sanitize_token(value: Any) -> str:
 
 
 def _short_param_name(param_name: str) -> str:
+    """Extract last segment from dotted parameter name (e.g., 'model_config.epochs' -> 'epochs')."""
     return param_name.split(".")[-1]
 
 
-def _build_result_filename(backend: str, param_names: List[str], case_values: List[Any]) -> str:
-    parts = [_sanitize_token(backend)]
+def _build_result_filename(case_idx: int, backend: str, param_names: List[str], case_values: List[Any], suffix: str = "causality") -> str:
+    """
+    Build descriptive result filename for a single test case.
+    
+    Args:
+        case_idx: numeric index of the test case (e.g., 0, 1, 2)
+        backend: backend name (pytorch, tensorflow, sklearn)
+        param_names: list of swept parameter names
+        case_values: list of values for this specific case
+        suffix: type of result (causality, p_value, f_test, sign)
+    
+    Returns:
+        filename like "case_000_causality.csv" or "case_001_pytorch_adam_0.001_causality.csv"
+    """
+    # Base: case index
+    parts = [f"case_{case_idx:03d}"]
+    
+    # Optionally add backend and param values for richer naming
+    if backend and backend.lower() not in {"none", "unknown", "auto"}:
+        parts.append(_sanitize_token(backend))
+    
     for p, v in zip(param_names, case_values):
         parts.append(_sanitize_token(_short_param_name(p)))
         parts.append(_sanitize_token(v))
+    
+    # Suffix (causality, p_value, f_test, sign)
+    parts.append(suffix)
+    
     return "_".join(parts) + ".csv"
 
 
 def _load_dataframes(cfg: Dict[str, Any]) -> List[pd.DataFrame]:
+    """
+    Load list of DataFrames from CSV paths specified in script config.
+    
+    Args:
+        cfg: script config dict with 'data' section containing 'csv_paths' and optional 'index_col'
+    
+    Returns:
+        List of loaded DataFrames in order of csv_paths
+    
+    Raises:
+        ValueError: if config structure is invalid
+        FileNotFoundError: if any CSV file does not exist
+    """
     data_cfg = cfg.get("data")
     if not isinstance(data_cfg, dict):
         raise ValueError("script config must contain 'data' mapping")
@@ -50,6 +120,7 @@ def _load_dataframes(cfg: Dict[str, Any]) -> List[pd.DataFrame]:
 
     index_col = data_cfg.get("index_col", None)
     frames: List[pd.DataFrame] = []
+    
     for p in csv_paths:
         csv_path = Path(p)
         if not csv_path.exists():
@@ -58,10 +129,21 @@ def _load_dataframes(cfg: Dict[str, Any]) -> List[pd.DataFrame]:
                 "Update 'data.csv_paths' in script config or provide --config with valid paths."
             )
         frames.append(pd.read_csv(csv_path, index_col=index_col))
+    
     return frames
 
 
 def _resolve_path(base_dir: Path, raw_path: str | Path) -> Path:
+    """
+    Resolve relative path against base_dir, or return absolute path as-is.
+    
+    Args:
+        base_dir: reference directory for relative paths
+        raw_path: relative or absolute path
+    
+    Returns:
+        Resolved absolute Path
+    """
     p = Path(raw_path)
     if p.is_absolute():
         return p
@@ -69,16 +151,33 @@ def _resolve_path(base_dir: Path, raw_path: str | Path) -> Path:
 
 
 def run_from_config(script_config_path: str | Path) -> Path:
+    """
+    Run Granger analysis test sweep from configuration file.
+    
+    Args:
+        script_config_path: path to script configuration JSON/YAML file
+    
+    Returns:
+        Path to generated summary.csv file
+    
+    Raises:
+        FileNotFoundError: if required config files or data files not found
+        ValueError: if config structure is invalid
+    """
     config_path = Path(script_config_path).resolve()
     config_dir = config_path.parent
 
     if not config_path.exists():
         raise FileNotFoundError(f"Script config file not found: {config_path}")
 
+    print(f"\n{'='*70}")
+    print(f"Loading script config from: {config_path}")
     script_cfg = BuilderConfigLoader.load_raw_file(config_path)
 
+    # Resolve paths relative to config directory
     output_dir = _resolve_path(config_dir, script_cfg["output_dir"])
     output_dir.mkdir(parents=True, exist_ok=True)
+    print(f"Output directory: {output_dir.resolve()}")
 
     ground_truth_path = _resolve_path(config_dir, script_cfg["ground_truth_path"])
     threshold = float(script_cfg.get("threshold", 0.01))
@@ -95,6 +194,7 @@ def run_from_config(script_config_path: str | Path) -> Path:
             "Update 'group_config_path' in script config."
         )
 
+    # Resolve CSV paths
     data_cfg = script_cfg.get("data")
     if isinstance(data_cfg, dict):
         csv_paths = data_cfg.get("csv_paths")
@@ -103,55 +203,142 @@ def run_from_config(script_config_path: str | Path) -> Path:
         elif isinstance(csv_paths, list):
             data_cfg["csv_paths"] = [str(_resolve_path(config_dir, p)) for p in csv_paths]
 
+    # Load data
+    print(f"Loading data from CSV files...")
     data_frames = _load_dataframes(script_cfg)
+    print(f"  ✓ Loaded {len(data_frames)} DataFrame(s)")
 
+    # Load group config and extract sweep parameters
+    print(f"Loading group config from: {group_config_path}")
     group_raw = BuilderConfigLoader.load_raw_file(group_config_path)
     sweep = group_raw.get("sweep", {})
     param_names = list(sweep.get("param_names", []))
     cases = list(sweep.get("cases", []))
+    
+    if cases:
+        print(f"  Sweep: {len(cases)} configuration case(s)")
+        for k, v in zip(param_names, cases[0] if cases else []):
+            print(f"    - {_short_param_name(k)}")
+    else:
+        print(f"  No sweep parameters; running single configuration")
 
+    # Iterate through test group configurations
     iterator = TestGroupConfigIterator.from_file(group_config_path)
-
+    
     summary_rows: List[Dict[str, Any]] = []
     case_idx = 0
+    total_time = 0.0
+
+    print(f"\n{'='*70}")
+    print(f"Running test cases...")
+    print(f"{'='*70}\n")
 
     while iterator.has_next():
         cfg = iterator.next()
         case_values = cases[case_idx] if case_idx < len(cases) else []
-
+        
         backend = str(cfg.get("backend", "unknown"))
-        filename = _build_result_filename(backend, param_names, case_values)
-        pred_path = output_dir / filename
-
+        
+        # Build filenames for all result matrices
+        base_filename = _build_result_filename(case_idx, backend, param_names, case_values)
+        causality_path = output_dir / base_filename
+        p_value_path = output_dir / _build_result_filename(case_idx, backend, param_names, case_values, "p_value")
+        f_test_path = output_dir / _build_result_filename(case_idx, backend, param_names, case_values, "f_test")
+        sign_path = output_dir / _build_result_filename(case_idx, backend, param_names, case_values, "sign")
+        
+        # Print case header
+        case_desc = ", ".join(
+            f"{_short_param_name(k)}={v}" for k, v in zip(param_names, case_values)
+        ) if case_values else "default"
+        print(f"[Case {case_idx:3d}] {backend:15s} | {case_desc}")
+        
+        # Run Granger analysis
         start = time.time()
-        out = MultitaskGrangerBuilder().from_config(cfg).data(data_frames).fit()
-        pred_df = out.results.result(threshold=threshold)
-        pred_df.to_csv(pred_path)
-        elapsed_s = int(round(time.time() - start))
-
-        metrics = MetricCalculator(str(ground_truth_path), str(pred_path)).evaluate()
-
-        row: Dict[str, Any] = {
-            "backend": backend,
-            "prediction_file": filename,
-            "execution_time_seconds": elapsed_s,
-        }
-        for p, v in zip(param_names, case_values):
-            row[p] = v
-        row.update(metrics)
-        summary_rows.append(row)
+        try:
+            out = MultitaskGrangerBuilder().from_config(cfg).data(data_frames).fit()
+            
+            # Extract and save all result matrices
+            causality_df = out.results.result(threshold=threshold, with_sign=True)
+            p_value_df = out.results.p_value
+            f_test_df = out.results.F_test
+            sign_df = out.results.sign
+            
+            causality_df.to_csv(causality_path)
+            p_value_df.to_csv(p_value_path)
+            f_test_df.to_csv(f_test_path)
+            sign_df.to_csv(sign_path)
+            
+            elapsed_s = time.time() - start
+            total_time += elapsed_s
+            
+            # Compute metrics against ground truth
+            metrics = MetricCalculator(str(ground_truth_path), str(causality_path)).evaluate()
+            
+            # Build summary row
+            row: Dict[str, Any] = {
+                "case_id": case_idx,
+                "backend": backend,
+                "causality_file": causality_path.name,
+                "p_value_file": p_value_path.name,
+                "f_test_file": f_test_path.name,
+                "sign_file": sign_path.name,
+                "execution_time_seconds": round(elapsed_s, 2),
+            }
+            for p, v in zip(param_names, case_values):
+                row[p] = v
+            row.update(metrics)
+            summary_rows.append(row)
+            
+            # Print timing
+            print(f"        ✓ Completed in {elapsed_s:.2f}s | Accuracy: {metrics.get('accuracy', 0):.3f} | F1: {metrics.get('f1', 0):.3f}")
+        
+        except Exception as e:
+            elapsed_s = time.time() - start
+            print(f"        ✗ FAILED after {elapsed_s:.2f}s: {e}")
+            # Still create a row but mark as failed
+            row: Dict[str, Any] = {
+                "case_id": case_idx,
+                "backend": backend,
+                "causality_file": "FAILED",
+                "p_value_file": "FAILED",
+                "f_test_file": "FAILED",
+                "sign_file": "FAILED",
+                "execution_time_seconds": round(elapsed_s, 2),
+                "error": str(e),
+            }
+            for p, v in zip(param_names, case_values):
+                row[p] = v
+            summary_rows.append(row)
 
         case_idx += 1
 
+    # Save summary
+    print(f"\n{'='*70}")
     summary_df = pd.DataFrame(summary_rows)
     summary_path = output_dir / "summary.csv"
     summary_df.to_csv(summary_path, index=False)
+    
+    print(f"Saved summary to: {summary_path}")
+    print(f"Total execution time: {total_time:.2f}s across {case_idx} case(s)")
+    print(f"Average time per case: {total_time/case_idx if case_idx > 0 else 0:.2f}s")
+    print(f"{'='*70}\n")
+    
     return summary_path
 
 
 def main() -> None:
+    """
+    Main entry point: parse command-line arguments and run test sweep.
+    
+    Usage:
+        python run_group_causality_tests.py --config scripts/run_group_causality_tests.config.json
+    
+    If --config is not provided, defaults to run_group_causality_tests.config.json in the script directory.
+    """
     parser = argparse.ArgumentParser(
-        description="Run Granger test sweeps from JSON/YAML configuration files."
+        description="Run Granger test sweeps from JSON/YAML configuration files. "
+        "Loads data, iterates through parameter sweeps, runs Granger analysis, "
+        "computes metrics against ground truth, and saves summary."
     )
     default_config = Path(__file__).with_name("run_group_causality_tests.config.json")
     parser.add_argument(
@@ -161,8 +348,12 @@ def main() -> None:
     )
     args = parser.parse_args()
 
-    summary_path = run_from_config(args.config)
-    print(f"Saved summary to: {summary_path}")
+    try:
+        summary_path = run_from_config(args.config)
+        print(f"\n✓ SUCCESS: Results saved to {summary_path}")
+    except Exception as e:
+        print(f"\n✗ ERROR: {e}", file=sys.stderr)
+        sys.exit(1)
 
 
 if __name__ == "__main__":

@@ -8,15 +8,25 @@ from typing import Any, Dict, List, Mapping, Optional, Sequence, Tuple
 from ..core.exceptions import DataValidationError
 from ..core.lag_config import LagConfiguration
 from ..preprocessing.lag.lag_selectors import CVLagSelector, ICLagSelector, VARLagSelector
-from ..callbacks import ConvergenceCheck, EarlyStopping, ReduceLearningRate
+from ..backends.callbacks import ConvergenceCheck, EarlyStopping, ReduceLearningRate
 
 try:
-	from ..callbacks import TorchTensorBoardCallback  # type: ignore
+	from ..backends.callbacks import TorchTensorBoardCallback  # type: ignore
 except Exception:  # pragma: no cover - optional callback
 	TorchTensorBoardCallback = None  # type: ignore[assignment]
 
 
 _RELATION_KEY_SEPARATORS = ("->", "|", ",", ":")
+_BACKEND_ALIASES = {
+	"tensorflow": "tensorflow",
+	"tf": "tensorflow",
+	"keras": "tensorflow",
+	"pytorch": "pytorch",
+	"torch": "pytorch",
+	"sklearn": "sklearn",
+	"scikit": "sklearn",
+	"scikit-learn": "sklearn",
+}
 
 
 def _parse_relation_key(key: Any) -> Tuple[str, str]:
@@ -179,36 +189,48 @@ def _normalize_callbacks(raw_callbacks: Any) -> List[Any]:
 
 
 def _normalize_callbacks_for_backend(raw_callbacks: Any, backend_name: Optional[str]) -> List[Any]:
-	"""Normalize callbacks with backend-aware behavior.
+	"""Normalize callback specs and delegate object creation to backend strategies.
 
-	For TensorFlow backends, callback specs are passed through as raw string/object
-	specifications and are instantiated in tensorflow_backend.
-	For other backends, only built-in library callbacks are allowed and instantiated here.
+	This keeps config_loader focused on schema normalization while backend strategies
+	(and their object loaders) are responsible for instantiating backend-native callbacks.
 	"""
 	if raw_callbacks is None:
 		return []
 
-	backend_lower = (backend_name or "").strip().lower()
-	is_tensorflow_backend = backend_lower in {"tensorflow", "tf", "keras"}
-
-	if not is_tensorflow_backend:
-		return _normalize_callbacks(raw_callbacks)
-
+	# Keep backward compatibility for already-instantiated callback objects.
 	if isinstance(raw_callbacks, (str, Mapping)):
 		return [raw_callbacks]
 
 	if isinstance(raw_callbacks, Sequence) and not isinstance(raw_callbacks, (str, bytes)):
-		out: List[Any] = []
-		for idx, cb in enumerate(raw_callbacks):
-			if isinstance(cb, (str, Mapping)):
-				out.append(cb)
-			else:
-				raise DataValidationError(
-					f"callbacks[{idx}] for TensorFlow backend must be a string or object spec"
-				)
-		return out
+		return list(raw_callbacks)
 
-	raise DataValidationError("callbacks must be a callback spec object/string or a list of specs")
+	raise DataValidationError("callbacks must be a callback spec object/string, callback object, or a list")
+
+
+def _normalize_backend(raw_backend: Any) -> Tuple[Optional[str], Dict[str, Any]]:
+	"""Normalize backend spec into canonical backend name and model_config defaults.
+
+	Supported formats:
+	- "pytorch"
+	- {"type": "pytorch", "params": {"loading_verbose": true}}
+	"""
+	if raw_backend is None:
+		return None, {}
+
+	if isinstance(raw_backend, str):
+		backend_name = raw_backend.strip().lower()
+		if not backend_name:
+			raise DataValidationError("backend must be a non-empty string")
+		return _BACKEND_ALIASES.get(backend_name, backend_name), {}
+
+	backend_type, backend_params = _extract_typed_spec(raw_backend, context="backend")
+	canonical = _BACKEND_ALIASES.get(backend_type, backend_type)
+	if canonical not in {"tensorflow", "pytorch", "sklearn"}:
+		raise DataValidationError(
+			"Unsupported backend type. Supported: tensorflow, pytorch, sklearn"
+		)
+
+	return canonical, dict(backend_params)
 
 
 def _normalize_regularizer_spec(raw_regularizer: Any) -> Dict[str, Any]:
@@ -241,7 +263,24 @@ class BuilderConfigLoader:
 	@staticmethod
 	def normalize_builder_config(config: Mapping[str, Any]) -> Dict[str, Any]:
 		out = dict(config)
-		backend_name = out.get("backend") if isinstance(out.get("backend"), str) else None
+
+		backend_name, backend_model_defaults = _normalize_backend(out.get("backend"))
+		if backend_name is not None:
+			out["backend"] = backend_name
+
+		if backend_model_defaults:
+			model_cfg_raw = out.get("model_config")
+			if model_cfg_raw is None:
+				model_cfg: Dict[str, Any] = {}
+			elif isinstance(model_cfg_raw, Mapping):
+				model_cfg = dict(model_cfg_raw)
+			else:
+				raise DataValidationError("model_config must be an object")
+
+			for key, value in backend_model_defaults.items():
+				# Explicit model_config values should win over backend defaults.
+				model_cfg.setdefault(key, value)
+			out["model_config"] = model_cfg
 
 		lag_cfg = out.get("lag_config")
 		if isinstance(lag_cfg, Mapping):
@@ -344,10 +383,17 @@ class TestGroupConfigIterator:
 	@staticmethod
 	def _expand(group_cfg: Mapping[str, Any]) -> List[Dict[str, Any]]:
 		base = dict(group_cfg.get("base_config", {}))
+		group_meta = {
+			key: copy.deepcopy(value)
+			for key, value in group_cfg.items()
+			if key not in {"base_config", "sweep"}
+		}
 		sweep = group_cfg.get("sweep")
 
 		if sweep is None:
-			return [base]
+			merged = dict(group_meta)
+			merged.update(base)
+			return [merged]
 		if not isinstance(sweep, Mapping):
 			raise DataValidationError("'sweep' must be a mapping")
 
@@ -368,7 +414,8 @@ class TestGroupConfigIterator:
 					f"sweep.cases[{idx}] has length {len(row)}, expected {len(param_names)}"
 				)
 
-			cfg = copy.deepcopy(base)
+			cfg = dict(group_meta)
+			cfg.update(copy.deepcopy(base))
 			for key, value in zip(param_names, row):
 				TestGroupConfigIterator._set_dotted(cfg, key, value)
 			out.append(cfg)
