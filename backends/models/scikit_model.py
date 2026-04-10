@@ -8,8 +8,13 @@ from sklearn.base import RegressorMixin
 from sklearn.linear_model._base import LinearModel, _preprocess_data
 
 from .base_model import BaseGrangerModel
-from ...callbacks.base_callback import Callback
-from ...core.exceptions import ConstraintConfigurationError, ModelNotFittedError, TrainingError
+from ..callbacks.base_callback import Callback
+from ...core.exceptions import (
+	ConstraintConfigurationError,
+	RegularizerConfigurationError,
+	ModelNotFittedError,
+	TrainingError,
+)
 
 
 class _OptimizerProxy:
@@ -79,8 +84,7 @@ class ScikitConstrainedGrangerModel(LinearModel, RegressorMixin, BaseGrangerMode
 
 	def __init__(
 		self,
-		backend: str = "sklearn_gd",
-		scaler: Optional[Any] = None,
+		backend: str = "sklearn",
 		regularizer: Optional[Any] = None,
 		constraint: Optional[Any] = None,
 		callbacks: Optional[List[Callback]] = None,
@@ -94,9 +98,10 @@ class ScikitConstrainedGrangerModel(LinearModel, RegressorMixin, BaseGrangerMode
 		BaseGrangerModel.__init__(
 			self,
 			backend=backend,
-			scaler=scaler,
 			regularizer=regularizer,
 			constraint=constraint,
+			callbacks=callbacks or [],
+			needs_reinit=False,
 		)
 
 		if learning_rate <= 0:
@@ -114,7 +119,6 @@ class ScikitConstrainedGrangerModel(LinearModel, RegressorMixin, BaseGrangerMode
 		self.tol = tol
 		self.batch_size = batch_size
 		self.verbose = verbose
-		self.callbacks = callbacks or []
 
 		self._n_features: Optional[int] = None
 		self._n_outputs: Optional[int] = None
@@ -130,7 +134,7 @@ class ScikitConstrainedGrangerModel(LinearModel, RegressorMixin, BaseGrangerMode
 
 	def _validate_components(self) -> None:
 		if self.regularizer is not None and not callable(self.regularizer):
-			raise ConstraintConfigurationError("regularizer must be callable for ScikitConstrainedGrangerModel")
+			raise RegularizerConfigurationError("regularizer must be callable for ScikitConstrainedGrangerModel")
 
 		if self.constraint is not None and not callable(self.constraint):
 			raise ConstraintConfigurationError("constraint must be callable for ScikitConstrainedGrangerModel")
@@ -262,9 +266,6 @@ class ScikitConstrainedGrangerModel(LinearModel, RegressorMixin, BaseGrangerMode
 			raise TrainingError("targets must be 1D or 2D array")
 		if X.shape[0] != y.shape[0]:
 			raise TrainingError("Lagged features and targets must have the same number of rows")
-
-		if self.scaler is not None:
-			X = self.scaler.fit_transform(X)
 
 		self._n_features = X.shape[1]
 		self._n_outputs = y.shape[1]
@@ -449,16 +450,18 @@ class ScikitConstrainedGrangerModel(LinearModel, RegressorMixin, BaseGrangerMode
 		if self._variable_control_layer is None:
 			raise ModelNotFittedError("Model is not initialized. Call initialize(...) first.")
 
+		# Match PyTorch behavior: each call starts from fully enabled variables.
+		self._variable_control_layer.reset()
 		self._variable_control_layer.omit(variable_indices)
 		self._variable_mask = self._variable_control_layer.mask
 
 	def set_regularizer(self, regularizer: Any) -> None:
-		self.regularizer = regularizer
 		self._validate_components()
+		self.regularizer = regularizer
 
 	def set_constraint(self, constraint: Any) -> None:
-		self.constraint = constraint
 		self._validate_components()
+		self.constraint = constraint
 
 	def hyperoptimize(
 		self,
@@ -471,5 +474,5 @@ class ScikitConstrainedGrangerModel(LinearModel, RegressorMixin, BaseGrangerMode
 			"trial_results": [],
 			"n_trials_requested": n_trials,
 			"reg_param_grid": reg_param_grid,
-			"message": "ScikitConstrainedGrangerModel nie posiada parametrów do hiperoptymalizacji.",
+			"message": "ScikitConstrainedGrangerModel does not have parameters for hyperoptimization.",
 		}

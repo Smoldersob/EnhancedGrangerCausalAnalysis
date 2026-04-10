@@ -8,11 +8,14 @@ import numpy as np
 from numpy.typing import NDArray
 
 from .base_model import BaseGrangerModel
-from ...callbacks.base_callback import Callback
+from ..callbacks.base_callback import Callback
 from ...core.exceptions import (
 	BackendNotAvailableError,
 	ConstraintConfigurationError,
+	RegularizerConfigurationError,
+	BackendCompatibilityError,
 	ModelNotFittedError,
+
 	TrainingError,
 )
 
@@ -34,7 +37,6 @@ class PyTorchGrangerModel(BaseGrangerModel):
 	def __init__(
 		self,
 		backend: str = "pytorch",
-		scaler: Optional[Any] = None,
 		regularizer: Optional[Any] = None,
 		constraint: Optional[Any] = None,
 		optimizer: Optional[Union[str, Type[Any], Any]] = None,
@@ -50,9 +52,9 @@ class PyTorchGrangerModel(BaseGrangerModel):
 	) -> None:
 		super().__init__(
 			backend=backend,
-			scaler=scaler,
 			regularizer=regularizer,
 			constraint=constraint,
+			needs_reinit=False,
 		)
 
 		if torch is None:
@@ -105,7 +107,7 @@ class PyTorchGrangerModel(BaseGrangerModel):
 			}
 			resolved = optimizers.get(optimizer.lower())
 			if resolved is None:
-				raise ConstraintConfigurationError(
+				raise BackendCompatibilityError(
 					f"Unsupported optimizer '{optimizer}'. Use one of: {sorted(optimizers.keys())}"
 				)
 			return resolved
@@ -113,7 +115,7 @@ class PyTorchGrangerModel(BaseGrangerModel):
 		if isinstance(optimizer, type):
 			if issubclass(optimizer, torch.optim.Optimizer):
 				return optimizer
-			raise ConstraintConfigurationError(
+			raise BackendCompatibilityError(
 				"optimizer class must inherit from torch.optim.Optimizer"
 			)
 
@@ -208,7 +210,7 @@ class PyTorchGrangerModel(BaseGrangerModel):
 		if self.regularizer is not None:
 			is_valid_reg = isinstance(self.regularizer, nn.Module) or callable(self.regularizer)
 			if not is_valid_reg:
-				raise ConstraintConfigurationError(
+				raise RegularizerConfigurationError(
 					"regularizer must be torch.nn.Module or callable for PyTorchGrangerModel"
 				)
 
@@ -243,9 +245,6 @@ class PyTorchGrangerModel(BaseGrangerModel):
 			raise TrainingError("targets must be 1D or 2D array")
 		if X.shape[0] != y.shape[0]:
 			raise TrainingError("Lagged features and targets must have the same number of rows")
-
-		if self.scaler is not None:
-			X = self.scaler.fit_transform(X)
 
 		n_features = X.shape[1]
 		n_outputs = y.shape[1]
@@ -403,21 +402,51 @@ class PyTorchGrangerModel(BaseGrangerModel):
 		if self._coefficient_layer is None:
 			raise ModelNotFittedError("Model is not initialized. Call initialize(...) first.")
 
+		expected_kernel_shape = tuple(self._coefficient_layer.weight.shape)
+		expected_kernel_external_shape = tuple(self._coefficient_layer.weight.T.shape)
+
+		def _resolve_and_validate_kernel(kernel: NDArray[np.float64]) -> Any:
+			kernel_arr = np.asarray(kernel, dtype=np.float64)
+			if kernel_arr.ndim != 2:
+				raise TrainingError(
+					"kernel weights must be a 2D array with shape "
+					f"{expected_kernel_external_shape} (external) or {expected_kernel_shape} (internal)"
+				)
+
+			if kernel_arr.shape == expected_kernel_external_shape:
+				return torch.tensor(kernel_arr.T, dtype=torch.float32, device=self.device)
+
+			if kernel_arr.shape == expected_kernel_shape:
+				return torch.tensor(kernel_arr, dtype=torch.float32, device=self.device)
+
+			raise TrainingError(
+				"kernel weights shape mismatch: got "
+				f"{kernel_arr.shape}, expected {expected_kernel_external_shape} (external) "
+				f"or {expected_kernel_shape} (internal)"
+			)
+
 		with torch.no_grad():
 			if isinstance(weights, list):
 				if len(weights) == 1:
-					w = torch.tensor(weights[0], dtype=torch.float32, device=self.device)
-					self._coefficient_layer.weight.copy_(w.T if w.shape == self._coefficient_layer.weight.T.shape else w)
+					w = _resolve_and_validate_kernel(weights[0])
+					self._coefficient_layer.weight.copy_(w)
 				elif len(weights) == 2:
-					w = torch.tensor(weights[0], dtype=torch.float32, device=self.device)
-					b = torch.tensor(weights[1], dtype=torch.float32, device=self.device)
-					self._coefficient_layer.weight.copy_(w.T if w.shape == self._coefficient_layer.weight.T.shape else w)
+					w = _resolve_and_validate_kernel(weights[0])
+					bias_arr = np.asarray(weights[1], dtype=np.float64)
+					expected_bias_shape = tuple(self._coefficient_layer.bias.shape)
+					if bias_arr.ndim != 1 or bias_arr.shape != expected_bias_shape:
+						raise TrainingError(
+							"bias weights shape mismatch: got "
+							f"{bias_arr.shape}, expected {expected_bias_shape}"
+						)
+					b = torch.tensor(bias_arr, dtype=torch.float32, device=self.device)
+					self._coefficient_layer.weight.copy_(w)
 					self._coefficient_layer.bias.copy_(b)
 				else:
 					raise TrainingError("weights list must contain kernel or [kernel, bias]")
 			else:
-				w = torch.tensor(weights, dtype=torch.float32, device=self.device)
-				self._coefficient_layer.weight.copy_(w.T if w.shape == self._coefficient_layer.weight.T.shape else w)
+				w = _resolve_and_validate_kernel(weights)
+				self._coefficient_layer.weight.copy_(w)
 
 	def get_weights(self) -> List[NDArray[np.float64]]:
 		"""Return coefficient-layer kernel in a one-element list."""
@@ -432,8 +461,8 @@ class PyTorchGrangerModel(BaseGrangerModel):
 		if self._variable_control_layer is None or self._n_features is None:
 			raise ModelNotFittedError("Model is not initialized. Call initialize(...) first.")
 
-		if self._variable_mask is None:
-			self._variable_mask = np.ones(self._n_features, dtype=np.float64)
+		# Every call starts from fully enabled inputs; omissions are non-cumulative.
+		self._variable_mask = np.ones(self._n_features, dtype=np.float64)
 
 		for idx in variable_indices:
 			if idx < 0 or idx >= self._n_features:
@@ -448,13 +477,15 @@ class PyTorchGrangerModel(BaseGrangerModel):
 
 	def set_regularizer(self, regularizer: Any) -> None:
 		"""Set regularizer with PyTorch component validation."""
-		self.regularizer = regularizer
 		self._validate_torch_components()
+		self.regularizer = regularizer
+		
 
 	def set_constraint(self, constraint: Any) -> None:
 		"""Set constraint with PyTorch component validation."""
-		self.constraint = constraint
 		self._validate_torch_components()
+		self.constraint = constraint
+		
 
 	def hyperoptimize(
 		self,
@@ -468,5 +499,5 @@ class PyTorchGrangerModel(BaseGrangerModel):
 			"trial_results": [],
 			"n_trials_requested": n_trials,
 			"reg_param_grid": reg_param_grid,
-			"message": "PyTorchGrangerModel nie posiada parametrów do hiperoptymalizacji.",
+			"message": "PyTorchGrangerModel does not have parameters for hyperoptimization.",
 		}

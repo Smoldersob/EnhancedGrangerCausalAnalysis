@@ -10,7 +10,7 @@ PROJECT_ROOT = Path(__file__).resolve().parents[2]
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
-from complex_granger_analysis.components.regularizers.numpy_regularizers import (
+from complex_granger_analysis.backends.regularizers.numpy_regularizers import (
     NumpyL1Regularizer,
     NumpyLagDependentL1Regularizer,
 )
@@ -88,7 +88,7 @@ def test_pytorch_regularizers_basic_behavior():
     _require_torch()
 
     import torch
-    from complex_granger_analysis.components.regularizers.pytorch_regularizers import (
+    from complex_granger_analysis.backends.regularizers.pytorch_regularizers import (
         PyTorchL1Regularizer,
         PyTorchLagDependentL1Regularizer,
     )
@@ -119,7 +119,7 @@ def test_pytorch_lag_dependent_regularizer_shifted_lag_window_uses_absolute_lag_
     _require_torch()
 
     import torch
-    from complex_granger_analysis.components.regularizers.pytorch_regularizers import (
+    from complex_granger_analysis.backends.regularizers.pytorch_regularizers import (
         PyTorchLagDependentL1Regularizer,
     )
 

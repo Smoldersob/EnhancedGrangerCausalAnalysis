@@ -36,7 +36,7 @@ class DummyModel:
         return [self._kernel]
 
 
-def test_granger_results_updates_sign_and_p_value_with_legacy_scheme():
+def test_granger_results_updates_sign_and_p_value_with_prediction_inputs():
     if GrangerAnalysisResults is None:
         raise SkipTest("pandas is not installed")
 
@@ -45,7 +45,6 @@ def test_granger_results_updates_sign_and_p_value_with_legacy_scheme():
     result = GrangerAnalysisResults(effects=effects, causes=causes)
 
     n_samples = 10
-    X = np.zeros((n_samples, 6), dtype=np.float64)
     y_true = np.column_stack([
         np.linspace(0.0, 1.0, n_samples),
         np.linspace(1.0, 0.0, n_samples),
@@ -79,11 +78,12 @@ def test_granger_results_updates_sign_and_p_value_with_legacy_scheme():
     result.update_cause(
         cause="x1",
         cause_index=0,
-        base_model=base_model,
-        reference_model=ref_model,
-        X=X,
-        y=y_true,
         col_offsets=col_offsets,
+        y_true=y_true,
+        base_predictions=y_base,
+        reference_predictions=y_ref,
+        base_weights=base_kernel,
+        reference_weights=ref_kernel,
     )
 
     sign_col = result.sign.loc[:, "x1"].to_numpy(dtype=np.float64)
@@ -100,7 +100,6 @@ def test_granger_results_stores_base_and_reference_weights_and_predictions():
 
     result = GrangerAnalysisResults(effects=["y1"], causes=["x1"])
 
-    X = np.zeros((8, 3), dtype=np.float64)
     y = np.linspace(0.0, 1.0, 8).reshape(-1, 1)
     y_base = y + 0.01
     y_ref = y + 0.10
@@ -114,11 +113,12 @@ def test_granger_results_stores_base_and_reference_weights_and_predictions():
     result.update_cause(
         cause="x1",
         cause_index=0,
-        base_model=base_model,
-        reference_model=ref_model,
-        X=X,
-        y=y,
         col_offsets=np.array([0, 3], dtype=int),
+        y_true=y,
+        base_predictions=y_base,
+        reference_predictions=y_ref,
+        base_weights=base_kernel,
+        reference_weights=ref_kernel,
     )
 
     assert result.base_weights is not None

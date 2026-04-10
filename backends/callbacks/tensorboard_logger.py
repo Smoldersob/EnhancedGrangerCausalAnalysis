@@ -8,6 +8,7 @@ from typing import Any, Dict, Optional
 import numpy as np
 
 from .base_callback import Callback
+from ...core.exceptions import TrainingConfigurationError, TrainingError
 
 
 class TorchTensorBoardCallback(Callback):
@@ -22,9 +23,9 @@ class TorchTensorBoardCallback(Callback):
 		histogram_every_n_epochs: int = 1,
 	) -> None:
 		if log_every_n_epochs <= 0:
-			raise ValueError("log_every_n_epochs must be a positive integer")
+			raise TrainingConfigurationError("log_every_n_epochs must be a positive integer")
 		if histogram_every_n_epochs <= 0:
-			raise ValueError("histogram_every_n_epochs must be a positive integer")
+			raise TrainingConfigurationError("histogram_every_n_epochs must be a positive integer")
 
 		self.log_dir = log_dir
 		self.log_every_n_epochs = log_every_n_epochs
@@ -42,7 +43,7 @@ class TorchTensorBoardCallback(Callback):
 	def set_run_name(self, run_name: str) -> None:
 		"""Set run name and update log_dir before writer initialization."""
 		if self._writer is not None:
-			raise RuntimeError("Cannot change run_name after writer was initialized")
+			raise TrainingError("Cannot change run_name after writer was initialized")
 		self._run_name = run_name
 		self.log_dir = os.path.join(self.log_dir, self._sanitize_segment(run_name))
 
@@ -66,7 +67,7 @@ class TorchTensorBoardCallback(Callback):
 		try:
 			tensorboard_module = importlib.import_module("torch.utils.tensorboard")
 		except Exception as exc:  # pragma: no cover - optional runtime dependency
-			raise RuntimeError(
+			raise TrainingError(
 				"torch.utils.tensorboard is unavailable. Install PyTorch with tensorboard support."
 			) from exc
 

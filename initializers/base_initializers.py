@@ -2,6 +2,8 @@ import numpy as np
 from numpy.linalg import lstsq
 from typing import Tuple
 
+from ..core.exceptions import DataShapeError
+
 
 class LinearARXInitializer:
     """
@@ -76,7 +78,9 @@ class RandomNormalInitializer(LinearARXInitializer):
         super().__init__(**kwargs)
         self.mean = mean
 
-    def __call__(self, *args, **kwargs) -> Tuple[np.ndarray, np.ndarray]:
+    def __call__(self,
+                 mask: np.ndarray | None = None,
+                 *args, **kwargs) -> Tuple[np.ndarray, np.ndarray]:
         """
         Initialize A with random normal weights, Keras-style:
 
@@ -102,6 +106,8 @@ class RandomNormalInitializer(LinearARXInitializer):
 
         A = np.random.normal(loc=self.mean, scale=std,
                              size=(self.n_targets, self.n_features_eff))
+        if mask is not None:
+            A = A * mask  # Apply mask to zero out disallowed weights
         B = np.zeros(self.n_targets, dtype=float)
         return A, B
 
@@ -147,20 +153,20 @@ class OLSInitializer(LinearARXInitializer):
         X_lagged = np.asarray(X_lagged, dtype=float)
         T_eff, n_features = X_lagged.shape
         if n_features != self.n_features_eff:
-            raise ValueError(
+            raise DataShapeError(
                 f"X_lagged has {n_features} features, expected {self.n_features_eff}"
             )
         if Y.shape[0] != T_eff:
-            raise ValueError("Y and X_lagged must have the same number of rows (time).")
+            raise DataShapeError("Y and X_lagged must have the same number of rows (time).")
         if Y.shape[1] != self.n_targets:
-            raise ValueError(
+            raise DataShapeError(
                 f"Y has {Y.shape[1]} targets, expected {self.n_targets}"
             )
 
         if mask is not None:
             mask = np.asarray(mask, dtype=int)
             if mask.shape != (self.n_targets, self.n_features_eff):
-                raise ValueError(
+                raise DataShapeError(
                     f"mask shape {mask.shape} does not match "
                     f"(n_targets, n_features_eff)=({self.n_targets}, {self.n_features_eff})"
                 )

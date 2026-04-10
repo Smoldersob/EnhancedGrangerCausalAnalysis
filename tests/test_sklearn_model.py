@@ -11,7 +11,7 @@ if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
 from complex_granger_analysis.core.exceptions import TrainingError
-from complex_granger_analysis.components.models.scikit_model import SklearnGrangerModel
+from complex_granger_analysis.backends.models.scikit_model import SklearnGrangerModel
 
 
 def _assert_raises(exc_type, fn, *args, **kwargs):

@@ -12,6 +12,7 @@ if str(PROJECT_ROOT) not in sys.path:
 import complex_granger_analysis.api.orchestrator as orchestrator_module
 from complex_granger_analysis.api.orchestrator import MultiTaskGrangerAPI
 from complex_granger_analysis.core.lag_config import LagConfiguration
+from complex_granger_analysis.preprocessing.scaling import _BaseScaler
 from complex_granger_analysis.preprocessing.stationarity import StationarityTransformer
 
 
@@ -79,6 +80,33 @@ class _DummyStrategy:
         return None
 
 
+class _CountingStationarity:
+    def __init__(self):
+        self._fit_transform_calls = 0
+
+    @property
+    def fit_transform_calls(self):
+        return self._fit_transform_calls
+
+    def fit_transform(self, data_list):
+        self._fit_transform_calls += 1
+        return [df.copy() for df in data_list]
+
+
+class _IdentityCustomScaler(_BaseScaler):
+    def fit_transform(self, data):
+        self._fitted = True
+        return np.asarray(data, dtype=np.float64)
+
+    def transform(self, data):
+        self._ensure_fitted()
+        return np.asarray(data, dtype=np.float64)
+
+    def inverse_transform(self, data):
+        self._ensure_fitted()
+        return np.asarray(data, dtype=np.float64)
+
+
 def test_orchestrator_clones_callbacks_with_run_names_for_base_and_references():
     _DummyModel.seen_run_names = []
 
@@ -114,9 +142,80 @@ def test_orchestrator_clones_callbacks_with_run_names_for_base_and_references():
         orchestrator_module.BackendFactory.get_strategy = old_get_strategy
 
 
+def test_orchestrator_uses_default_stationarity_and_reuses_prepared_data_explicitly():
+    old_get_strategy = orchestrator_module.BackendFactory.get_strategy
+    orchestrator_module.BackendFactory.get_strategy = staticmethod(lambda backend: _DummyStrategy())
+
+    try:
+        data = pd.DataFrame(
+            {
+                "x": np.linspace(0.0, 1.0, 20),
+                "y": np.linspace(1.0, 0.0, 20),
+            }
+        )
+
+        api_default = MultiTaskGrangerAPI(backend="dummy")
+        assert isinstance(api_default._stationarity_transformer, StationarityTransformer)
+
+        counting_stationarity = _CountingStationarity()
+        api = MultiTaskGrangerAPI(
+            backend="dummy",
+            stationarity_transformer=counting_stationarity,
+            reuse_data=True,
+        )
+
+        common_kwargs = dict(
+            data=data,
+            causes=["x", "y"],
+            effects=["y"],
+            tested_causes=["x"],
+            lag_config=LagConfiguration(max_lag=1, use_lag_zero=False),
+            callbacks=[_DummyCallback()],
+            model_config={"epochs": 1},
+        )
+
+        first_output = api.fit(**common_kwargs)
+        second_output = api.fit(**common_kwargs, prepared_data=first_output.prepared_data)
+
+        assert counting_stationarity.fit_transform_calls == 1
+        assert first_output.prepared_data is not None
+        assert second_output.prepared_data is not None
+    finally:
+        orchestrator_module.BackendFactory.get_strategy = old_get_strategy
+
+
+def test_orchestrator_accepts_custom_scaler_class():
+    old_get_strategy = orchestrator_module.BackendFactory.get_strategy
+    orchestrator_module.BackendFactory.get_strategy = staticmethod(lambda backend: _DummyStrategy())
+
+    try:
+        api = MultiTaskGrangerAPI(backend="dummy")
+        data = pd.DataFrame(
+            {
+                "x": np.linspace(0.0, 1.0, 20),
+                "y": np.linspace(1.0, 0.0, 20),
+            }
+        )
+
+        prepared = api._prepare_data(
+            data=data,
+            effects=["y"],
+            lag_config=LagConfiguration(max_lag=1, use_lag_zero=False),
+            x_scaler=_IdentityCustomScaler,
+            y_scaler=_IdentityCustomScaler,
+        )
+
+        assert isinstance(prepared.x_scaler, _IdentityCustomScaler)
+        assert isinstance(prepared.y_scaler, _IdentityCustomScaler)
+    finally:
+        orchestrator_module.BackendFactory.get_strategy = old_get_strategy
+
+
 if __name__ == "__main__":
     tests = [
         test_orchestrator_clones_callbacks_with_run_names_for_base_and_references,
+        test_orchestrator_uses_default_stationarity_and_reuses_prepared_data_explicitly,
+        test_orchestrator_accepts_custom_scaler_class,
     ]
 
     print("\n" + "=" * 80)

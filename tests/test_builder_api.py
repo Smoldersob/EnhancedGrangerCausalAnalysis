@@ -30,8 +30,10 @@ def test_builder_from_config_and_fluent_forward_to_orchestrator_fit():
     captured = {}
 
     class DummyAPI:
-        def __init__(self, backend=None):
+        def __init__(self, backend=None, stationarity_transformer=None, reuse_data=False):
             captured["backend"] = backend
+            captured["stationarity_transformer"] = stationarity_transformer
+            captured["reuse_data"] = reuse_data
 
         def fit(self, data, **kwargs):
             captured["data"] = data
@@ -55,11 +57,13 @@ def test_builder_from_config_and_fluent_forward_to_orchestrator_fit():
                     "x_scaler": "standard",
                     "y_scaler": "standard",
                     "model_config": {"epochs": 10},
+                    "reuse_data": True,
                 }
             )
             .data(df)
             .variables(causes=["x1"], effects=["x2"], tested_causes=["x1"])
             .backend_load(backend_sample_fraction=0.5, backend_max_samples=2)
+            .reuse_data(True)
             .hyperoptimization(state="model", config={"n_trials": 3, "param_grid": {"epochs": [5, 10]}})
             .fit()
         )
@@ -69,6 +73,8 @@ def test_builder_from_config_and_fluent_forward_to_orchestrator_fit():
 
         assert captured["backend"] == "pytorch"
         assert captured["data"].equals(df)
+        assert captured["reuse_data"] is True
+        assert captured["stationarity_transformer"] is not None
 
         kwargs = captured["kwargs"]
         assert kwargs["causes"] == ["x1"]

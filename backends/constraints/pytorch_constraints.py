@@ -9,6 +9,7 @@ from numpy.typing import NDArray
 
 from .base_constaint import process_user_relations
 from ...core.constraints_config import ProcessedConstraintSpec, RelationMap
+from ...core.exceptions import BackendNotAvailableError, ConstraintConfigurationError
 
 
 if find_spec("torch") is not None:
@@ -19,7 +20,7 @@ else:  # pragma: no cover - runtime dependency check
 
 def _ensure_torch() -> None:
 	if torch is None:
-		raise RuntimeError("PyTorch is required to use pytorch constraints.")
+		raise BackendNotAvailableError("PyTorch is required to use pytorch constraints.")
 
 
 class PyTorchMaskConstraint:
@@ -33,7 +34,7 @@ class PyTorchMaskConstraint:
 		_ensure_torch()
 		arr = np.asarray(mask, dtype=np.float64)
 		if arr.ndim != 2:
-			raise ValueError("mask must be 2D with shape (n_outputs, n_features)")
+			raise ConstraintConfigurationError("mask must be 2D with shape (n_outputs, n_features)")
 		self.mask = arr
 
 	def __call__(self, params: Any) -> Any:
@@ -41,9 +42,9 @@ class PyTorchMaskConstraint:
 
 	def enforce(self, params: Any) -> Any:
 		if not torch.is_tensor(params):
-			raise ValueError("params must be torch.Tensor")
+			raise ConstraintConfigurationError("params must be torch.Tensor")
 		if tuple(params.shape) != tuple(self.mask.shape):
-			raise ValueError(
+			raise ConstraintConfigurationError(
 				f"params shape {tuple(params.shape)} does not match mask shape {self.mask.shape}"
 			)
 		mask_t = torch.as_tensor(self.mask, dtype=params.dtype, device=params.device)
@@ -67,9 +68,9 @@ class PyTorchMaskAndMinAbsSumConstraint:
 		_ensure_torch()
 		mask = np.asarray(spec.mask, dtype=np.float64)
 		if mask.ndim != 2:
-			raise ValueError("spec.mask must be 2D with shape (n_outputs, n_features)")
+			raise ConstraintConfigurationError("spec.mask must be 2D with shape (n_outputs, n_features)")
 		if eps <= 0:
-			raise ValueError("eps must be > 0")
+			raise ConstraintConfigurationError("eps must be > 0")
 
 		self.mask = mask
 		self.rules = tuple(spec.rules)
@@ -80,9 +81,9 @@ class PyTorchMaskAndMinAbsSumConstraint:
 
 	def enforce(self, params: Any) -> Any:
 		if not torch.is_tensor(params):
-			raise ValueError("params must be torch.Tensor")
+			raise ConstraintConfigurationError("params must be torch.Tensor")
 		if tuple(params.shape) != tuple(self.mask.shape):
-			raise ValueError(
+			raise ConstraintConfigurationError(
 				f"params shape {tuple(params.shape)} does not match mask shape {self.mask.shape}"
 			)
 

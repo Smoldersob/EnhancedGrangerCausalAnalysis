@@ -1,4 +1,5 @@
 {
+  "reuse_data": true,
   "base_config": {
     "backend": "tensorflow",
     "x_scaler": "standard",

@@ -7,6 +7,7 @@ import numpy as np
 import pandas as pd
 from numpy.typing import NDArray
 
+from ..core.exceptions import ResultsError
 from .causality_matrix import CausalityMatrices
 from .statistics import ensure_2d, error_and_p_values
 
@@ -43,15 +44,15 @@ class GrangerAnalysisResults:
 	) -> NDArray[np.float64]:
 		"""Convert model.get_weights() output into shape (n_outputs, n_features)."""
 		if not hasattr(model, "get_weights"):
-			raise TypeError("Model must define get_weights()")
+			raise ResultsError("Model must define get_weights()")
 
 		weights_list = model.get_weights()
 		if not isinstance(weights_list, list) or len(weights_list) == 0:
-			raise ValueError("model.get_weights() must return a non-empty list")
+			raise ResultsError("model.get_weights() must return a non-empty list")
 
 		kernel = np.asarray(weights_list[0], dtype=np.float64)
 		if kernel.ndim != 2:
-			raise ValueError(f"Expected 2D kernel matrix, got shape {kernel.shape}")
+			raise ResultsError(f"Expected 2D kernel matrix, got shape {kernel.shape}")
 
 		# Preferred convention in current models: (n_features, n_outputs)
 		if kernel.shape == (n_features, n_outputs):
@@ -60,7 +61,7 @@ class GrangerAnalysisResults:
 		if kernel.shape == (n_outputs, n_features):
 			return kernel
 
-		raise ValueError(
+		raise ResultsError(
 			"Cannot infer weight orientation from kernel shape "
 			f"{kernel.shape}; expected {(n_features, n_outputs)} or {(n_outputs, n_features)}"
 		)
@@ -74,12 +75,12 @@ class GrangerAnalysisResults:
 		"""Coerce explicit weights into shape (n_outputs, n_features)."""
 		arr = np.asarray(weights, dtype=np.float64)
 		if arr.ndim != 2:
-			raise ValueError(f"Expected 2D weights matrix, got shape {arr.shape}")
+			raise ResultsError(f"Expected 2D weights matrix, got shape {arr.shape}")
 		if arr.shape == (n_outputs, n_features):
 			return arr
 		if arr.shape == (n_features, n_outputs):
 			return arr.T
-		raise ValueError(
+		raise ResultsError(
 			f"Cannot infer explicit weights orientation from shape {arr.shape}; "
 			f"expected {(n_outputs, n_features)} or {(n_features, n_outputs)}"
 		)
@@ -92,7 +93,7 @@ class GrangerAnalysisResults:
 		For each output row, this matches requirement #sym:sign.
 		"""
 		if weight_block.ndim != 2:
-			raise ValueError("weight_block must be 2D")
+			raise ResultsError("weight_block must be 2D")
 		if weight_block.shape[1] == 0:
 			return np.zeros(weight_block.shape[0], dtype=np.float64)
 
@@ -104,10 +105,7 @@ class GrangerAnalysisResults:
 		self,
 		cause: str,
 		cause_index: int,
-		base_model: Optional[object],
-		reference_model: Optional[object],
-		X: NDArray[np.float64],
-		y: NDArray[np.float64],
+		y_true: NDArray[np.float64],
 		col_offsets: NDArray[np.int_],
 		base_predictions: Optional[NDArray[np.float64]] = None,
 		reference_predictions: Optional[NDArray[np.float64]] = None,
@@ -116,42 +114,56 @@ class GrangerAnalysisResults:
 	) -> None:
 		"""Update all matrices and snapshots for one tested cause variable."""
 		if cause not in self.causes:
-			raise ValueError(f"Unknown cause: {cause}")
+			raise ResultsError(f"Unknown cause: {cause}")
 		if cause_index < 0 or cause_index + 1 >= len(col_offsets):
-			raise ValueError("cause_index out of range for provided col_offsets")
+			raise ResultsError("cause_index out of range for provided col_offsets")
 
-		y_true = ensure_2d(np.asarray(y, dtype=np.float64))
-		X_arr = ensure_2d(np.asarray(X, dtype=np.float64))
-		n_outputs = y_true.shape[1]
-		n_features = X_arr.shape[1]
+		y_true_2d = ensure_2d(np.asarray(y_true, dtype=np.float64))
+		n_outputs = y_true_2d.shape[1]
 
-		if base_predictions is not None:
-			base_pred = ensure_2d(np.asarray(base_predictions, dtype=np.float64))
+		if base_predictions is None:
+			raise ResultsError("Provide base_predictions")
 		else:
-			if base_model is None:
-				raise ValueError("Provide either base_model or base_predictions")
-			base_pred = ensure_2d(np.asarray(base_model.predict(X_arr), dtype=np.float64))
+			base_pred = ensure_2d(np.asarray(base_predictions, dtype=np.float64))
 
 		if reference_predictions is not None:
 			ref_pred = ensure_2d(np.asarray(reference_predictions, dtype=np.float64))
 		else:
-			if reference_model is None:
-				raise ValueError("Provide either reference_model or reference_predictions")
-			ref_pred = ensure_2d(np.asarray(reference_model.predict(X_arr), dtype=np.float64))
+			raise ResultsError("Provide reference_predictions")
 
 		if base_weights is not None:
-			base_w = self._coerce_output_feature_weights(base_weights, n_outputs=n_outputs, n_features=n_features)
+			base_weights_arr = np.asarray(base_weights, dtype=np.float64)
+			if base_weights_arr.ndim != 2:
+				raise ResultsError(f"Expected 2D weights matrix, got shape {base_weights_arr.shape}")
+			if base_weights_arr.shape[0] == n_outputs:
+				n_features = int(base_weights_arr.shape[1])
+			elif base_weights_arr.shape[1] == n_outputs:
+				n_features = int(base_weights_arr.shape[0])
+			else:
+				raise ResultsError(
+					f"Cannot infer explicit weights orientation from shape {base_weights_arr.shape}; "
+					f"expected {(n_outputs, 'n_features')} or {('n_features', n_outputs)}"
+				)
+			base_w = self._coerce_output_feature_weights(base_weights_arr, n_outputs=n_outputs, n_features=n_features)
 		else:
-			if base_model is None:
-				raise ValueError("Provide either base_model or base_weights")
-			base_w = self._extract_output_feature_weights(base_model, n_outputs=n_outputs, n_features=n_features)
+			raise ResultsError("Provide base_weights")
 
 		if reference_weights is not None:
-			ref_w = self._coerce_output_feature_weights(reference_weights, n_outputs=n_outputs, n_features=n_features)
+			reference_weights_arr = np.asarray(reference_weights, dtype=np.float64)
+			if reference_weights_arr.ndim != 2:
+				raise ResultsError(f"Expected 2D weights matrix, got shape {reference_weights_arr.shape}")
+			if reference_weights_arr.shape[0] == n_outputs:
+				n_features = int(reference_weights_arr.shape[1])
+			elif reference_weights_arr.shape[1] == n_outputs:
+				n_features = int(reference_weights_arr.shape[0])
+			else:
+				raise ResultsError(
+					f"Cannot infer explicit weights orientation from shape {reference_weights_arr.shape}; "
+					f"expected {(n_outputs, 'n_features')} or {('n_features', n_outputs)}"
+				)
+			ref_w = self._coerce_output_feature_weights(reference_weights_arr, n_outputs=n_outputs, n_features=n_features)
 		else:
-			if reference_model is None:
-				raise ValueError("Provide either reference_model or reference_weights")
-			ref_w = self._extract_output_feature_weights(reference_model, n_outputs=n_outputs, n_features=n_features)
+			raise ResultsError("Provide reference_weights")
 
 		self.base_snapshot = ModelSnapshot(predictions=base_pred, weights=base_w)
 		self.reference_snapshots[cause] = ModelSnapshot(predictions=ref_pred, weights=ref_w)
@@ -161,7 +173,7 @@ class GrangerAnalysisResults:
 		lag_order = max(end - start, 1)
 
 		base_error, ref_error, f_values, p_values = error_and_p_values(
-			y_true=y_true,
+			y_true=y_true_2d,
 			y_base_pred=base_pred,
 			y_ref_pred=ref_pred,
 			lag_order=lag_order,

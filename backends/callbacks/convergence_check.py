@@ -5,6 +5,7 @@ from typing import Any, Dict
 import numpy as np
 
 from .base_callback import Callback
+from ...core.exceptions import TrainingConfigurationError
 
 
 class ConvergenceCheck(Callback):
@@ -12,7 +13,7 @@ class ConvergenceCheck(Callback):
 
 	def __init__(self, relative_change_threshold: float = 1e-4) -> None:
 		if relative_change_threshold < 0:
-			raise ValueError("relative_change_threshold must be >= 0")
+			raise TrainingConfigurationError("relative_change_threshold must be >= 0")
 		self.relative_change_threshold = relative_change_threshold
 
 	def on_epoch_end(self, state: Dict[str, Any]) -> bool:

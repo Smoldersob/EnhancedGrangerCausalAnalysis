@@ -5,6 +5,7 @@ from typing import Any, Dict
 import numpy as np
 
 from .base_callback import Callback
+from ...core.exceptions import TrainingConfigurationError
 
 
 class ReduceLearningRate(Callback):
@@ -18,13 +19,13 @@ class ReduceLearningRate(Callback):
 		min_delta: float = 0.0,
 	) -> None:
 		if patience <= 0:
-			raise ValueError("patience must be a positive integer")
+			raise TrainingConfigurationError("patience must be a positive integer")
 		if not (0.0 < factor < 1.0):
-			raise ValueError("factor must be in range (0, 1)")
+			raise TrainingConfigurationError("factor must be in range (0, 1)")
 		if min_lr < 0:
-			raise ValueError("min_lr must be >= 0")
+			raise TrainingConfigurationError("min_lr must be >= 0")
 		if min_delta < 0:
-			raise ValueError("min_delta must be >= 0")
+			raise TrainingConfigurationError("min_delta must be >= 0")
 
 		self.patience = patience
 		self.factor = factor

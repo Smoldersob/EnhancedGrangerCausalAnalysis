@@ -16,12 +16,12 @@ if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
 from complex_granger_analysis.core.exceptions import TrainingError
-from complex_granger_analysis.components.models.tensorflow_model import TensorFlowGrangerModel
-from complex_granger_analysis.components.regularizers.tensorflow_regularizers import (
+from complex_granger_analysis.backends.models.tensorflow_model import TensorFlowGrangerModel
+from complex_granger_analysis.backends.regularizers.tensorflow_regularizers import (
     KerasL1Regularizer,
     KerasLagDependentL1Regularizer,
 )
-from complex_granger_analysis.components.constaints import (
+from complex_granger_analysis.backends.constraints import (
     build_tensorflow_constraint_from_relations,
     process_user_relations,
 )
@@ -304,6 +304,33 @@ def test_tensorflow_constraint_enforces_zero_mask_and_min_abs_sum():
     # Second block (x2) must satisfy min abs sum >= 1.5.
     sum_abs_x2 = float(np.sum(np.abs(constrained[3:6, 0])))
     assert sum_abs_x2 >= 1.5 - 1e-9
+    assert constraint.is_satisfied(tf.convert_to_tensor(constrained, dtype=tf.float64))
+
+
+def test_tensorflow_constraint_rejects_invalid_kernel_shape():
+    _require_tensorflow()
+
+    import tensorflow as tf
+    from complex_granger_analysis.core.exceptions import ConstraintConfigurationError
+
+    constraint = build_tensorflow_constraint_from_relations(
+        relations={
+            ("y1", "x1"): 0,
+        },
+        predictor_names=["x1", "x2"],
+        output_names=["y1"],
+        col_offsets=[0, 3],
+        n_features=6,
+        base_mask=np.ones((1, 6), dtype=np.float64),
+    )
+
+    # Correct Dense kernel shape is (n_features, n_outputs) => (6, 1).
+    wrong_shape = tf.zeros((1, 6), dtype=tf.float64)
+    try:
+        _ = constraint(wrong_shape)
+        raise AssertionError("Expected ConstraintConfigurationError for invalid kernel shape")
+    except ConstraintConfigurationError:
+        pass
 
 
 if __name__ == "__main__":
@@ -319,6 +346,7 @@ if __name__ == "__main__":
         test_keras_lag_dependent_regularizer_set_lag_layout_after_init,
         test_tensorflow_constraint_processes_user_relations_and_mask,
         test_tensorflow_constraint_enforces_zero_mask_and_min_abs_sum,
+        test_tensorflow_constraint_rejects_invalid_kernel_shape,
     ]
 
     print("\n" + "=" * 80)

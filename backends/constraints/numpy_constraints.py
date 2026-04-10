@@ -1,12 +1,13 @@
 from __future__ import annotations
 
-from typing import Any, Dict, Mapping, Optional, Sequence, Tuple
+from typing import Any, Dict, Optional, Sequence
 
 import numpy as np
 from numpy.typing import NDArray
 
 from .base_constaint import process_user_relations
 from ...core.constraints_config import ProcessedConstraintSpec, RelationMap
+from ...core.exceptions import ConstraintConfigurationError
 
 
 class NumpyMaskConstraint:
@@ -19,7 +20,7 @@ class NumpyMaskConstraint:
 	def __init__(self, mask: NDArray[np.float64]) -> None:
 		arr = np.asarray(mask, dtype=np.float64)
 		if arr.ndim != 2:
-			raise ValueError("mask must be 2D with shape (n_outputs, n_features)")
+			raise ConstraintConfigurationError("mask must be 2D with shape (n_outputs, n_features)")
 		self.mask = arr
 
 	def __call__(self, params: NDArray[np.float64]) -> NDArray[np.float64]:
@@ -28,7 +29,7 @@ class NumpyMaskConstraint:
 	def enforce(self, params: NDArray[np.float64]) -> NDArray[np.float64]:
 		w = np.asarray(params, dtype=np.float64)
 		if w.shape != self.mask.shape:
-			raise ValueError(
+			raise ConstraintConfigurationError(
 				f"params shape {w.shape} does not match mask shape {self.mask.shape}"
 			)
 		return w * self.mask
@@ -49,9 +50,9 @@ class NumpyMaskAndMinAbsSumConstraint:
 	def __init__(self, spec: ProcessedConstraintSpec, eps: float = 1e-8) -> None:
 		mask = np.asarray(spec.mask, dtype=np.float64)
 		if mask.ndim != 2:
-			raise ValueError("spec.mask must be 2D with shape (n_outputs, n_features)")
+			raise ConstraintConfigurationError("spec.mask must be 2D with shape (n_outputs, n_features)")
 		if eps <= 0:
-			raise ValueError("eps must be > 0")
+			raise ConstraintConfigurationError("eps must be > 0")
 
 		self.mask = mask
 		self.rules = tuple(spec.rules)
@@ -63,7 +64,7 @@ class NumpyMaskAndMinAbsSumConstraint:
 	def enforce(self, params: NDArray[np.float64]) -> NDArray[np.float64]:
 		w = np.asarray(params, dtype=np.float64)
 		if w.shape != self.mask.shape:
-			raise ValueError(
+			raise ConstraintConfigurationError(
 				f"params shape {w.shape} does not match mask shape {self.mask.shape}"
 			)
 

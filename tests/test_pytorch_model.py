@@ -13,13 +13,13 @@ if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
 from complex_granger_analysis.core.exceptions import TrainingError
-from complex_granger_analysis.callbacks import (
+from complex_granger_analysis.backends.callbacks import (
     ConvergenceCheck,
     EarlyStopping,
     ReduceLearningRate,
     TorchTensorBoardCallback,
 )
-from complex_granger_analysis.components.models.pytorch_model import PyTorchGrangerModel
+from complex_granger_analysis.backends.models.pytorch_model import PyTorchGrangerModel
 
 
 class SkipTest(Exception):

@@ -5,6 +5,7 @@ from typing import Any, Dict, List, Optional
 import numpy as np
 
 from .base_callback import Callback
+from ...core.exceptions import TrainingConfigurationError
 
 
 class EarlyStopping(Callback):
@@ -17,9 +18,9 @@ class EarlyStopping(Callback):
 		restore_best_weights: bool = True,
 	) -> None:
 		if patience <= 0:
-			raise ValueError("patience must be a positive integer")
+			raise TrainingConfigurationError("patience must be a positive integer")
 		if min_delta < 0:
-			raise ValueError("min_delta must be >= 0")
+			raise TrainingConfigurationError("min_delta must be >= 0")
 
 		self.patience = patience
 		self.min_delta = min_delta

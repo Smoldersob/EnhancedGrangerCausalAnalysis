@@ -41,7 +41,11 @@ class TrainingConfigurationError(ConfigurationError):
 
 
 class ConstraintConfigurationError(ConfigurationError):
-	"""Constraint/regularization configuration is invalid."""
+	"""Constraint configuration is invalid."""
+
+
+class RegularizerConfigurationError(ConfigurationError):
+	"""Regularizer configuration is invalid or inconsistent."""
 
 
 class ValidationError(ExtendedGrangerValueError):
@@ -174,8 +178,6 @@ class CausalityMatrixError(ResultsError):
 
 __all__ = [
 	"BackendCompatibilityError",
-	"BackendError",
-	"BackendExecutionError",
 	"BackendNotAvailableError",
 	"BackendSelectionError",
 	"CausalityMatrixError",
@@ -183,29 +185,19 @@ __all__ = [
 	"ExtendedGrangerError",
 	"ExtendedGrangerRuntimeError",
 	"ExtendedGrangerValueError",
-	"ConfigurationError",
 	"ConstraintConfigurationError",
-	"ConvergenceError",
+	"RegularizerConfigurationError",
 	"DataShapeError",
 	"DataValidationError",
-	"DifferencingError",
 	"EmptyDataError",
 	"InvalidFeatureRangeError",
 	"LagConfigurationError",
 	"LagPreparationError",
-	"LagPreprocessingError",
-	"LagSelectionError",
-	"MissingColumnsError",
 	"ModelNotFittedError",
-	"NumericalStabilityError",
-	"PreprocessingError",
 	"ResultsError",
 	"ScalerNotFittedError",
-	"ScalingError",
-	"StationarityError",
 	"StationarityNotFittedError",
 	"StationarityTestError",
 	"TrainingConfigurationError",
 	"TrainingError",
-	"ValidationError",
 ]

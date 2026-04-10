@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import importlib
+import os
 from importlib.util import find_spec
 from typing import Any, Dict, List, Optional, Union
 
@@ -11,12 +12,26 @@ from .base_model import BaseGrangerModel
 from ...core.exceptions import (
 	BackendNotAvailableError,
 	ConstraintConfigurationError,
+	RegularizerConfigurationError,
 	ModelNotFittedError,
 	TrainingError,
 )
 
 if find_spec("tensorflow") is not None:
 	tf = importlib.import_module("tensorflow")
+
+	_force_cpu_env = os.getenv("CGA_TF_FORCE_CPU", "").strip().lower()
+	_use_gpu_env = os.getenv("CGA_TF_USE_GPU", "").strip().lower()
+	_is_wsl = bool(os.getenv("WSL_DISTRO_NAME"))
+	_force_cpu = _force_cpu_env in {"1", "true", "yes", "on"}
+	_explicit_use_gpu = _use_gpu_env in {"1", "true", "yes", "on"}
+	_prefer_cpu = _force_cpu or (_is_wsl and not _explicit_use_gpu)
+
+	if _prefer_cpu:
+		try:
+			tf.config.set_visible_devices([], "GPU")
+		except Exception:
+			pass
 else:  # pragma: no cover - runtime dependency check
 	tf = None
 
@@ -27,7 +42,6 @@ class TensorFlowGrangerModel(BaseGrangerModel):
 	def __init__(
 		self,
 		backend: str = "tensorflow",
-		scaler: Optional[Any] = None,
 		regularizer: Optional[Any] = None,
 		constraint: Optional[Any] = None,
 		optimizer: Union[str, Any] = "adam",
@@ -39,9 +53,10 @@ class TensorFlowGrangerModel(BaseGrangerModel):
 	) -> None:
 		super().__init__(
 			backend=backend,
-			scaler=scaler,
 			regularizer=regularizer,
 			constraint=constraint,
+			callbacks=callbacks or [],
+			needs_reinit=False,
 		)
 		if tf is None:
 			raise BackendNotAvailableError(
@@ -53,7 +68,7 @@ class TensorFlowGrangerModel(BaseGrangerModel):
 		self.loss = loss
 		self._optimizer_spec = optimizer
 		self._loss_spec = loss
-		self.callbacks = callbacks or []
+
 		self.epochs = epochs
 		self.batch_size = batch_size
 		self.verbose = verbose
@@ -77,7 +92,7 @@ class TensorFlowGrangerModel(BaseGrangerModel):
 		keras_constraint = tf.keras.constraints.Constraint
 
 		if self.regularizer is not None and not isinstance(self.regularizer, keras_regularizer):
-			raise ConstraintConfigurationError(
+			raise RegularizerConfigurationError(
 				"regularizer must inherit from tf.keras.regularizers.Regularizer "
 				"for TensorFlowGrangerModel"
 			)
@@ -167,9 +182,6 @@ class TensorFlowGrangerModel(BaseGrangerModel):
 		if X.shape[0] != y.shape[0]:
 			raise TrainingError("Lagged features and targets must have the same number of rows")
 
-		if self.scaler is not None:
-			X = self.scaler.fit_transform(X)
-
 		n_features = X.shape[1]
 		n_outputs = y.shape[1]
 		variable_mask = np.ones(n_features, dtype=np.float64)
@@ -230,10 +242,18 @@ class TensorFlowGrangerModel(BaseGrangerModel):
 				verbose=self.verbose,
 			)
 		except Exception as exc:  # pragma: no cover - backend runtime errors
-			raise TrainingError(f"TensorFlow training failed: {exc}") from exc
+			if self._is_gpu_dnn_init_error(exc):
+				raise TrainingError(
+					"TensorFlow GPU runtime failed during DNN initialization. "
+					"Run in stable CPU mode by setting CGA_TF_FORCE_CPU=1 "
+					"or (on WSL) leave CGA_TF_USE_GPU unset. "
+					f"Original error: {exc}"
+				) from exc
+			else:
+				raise TrainingError(f"TensorFlow training failed: {exc}") from exc
 
 		self._fitted = True
-		forecasts = self.model.predict(self._X_train, verbose=0)
+		forecasts = np.asarray(self.model.predict(self._X_train, verbose=0), dtype=np.float64)
 
 		final_loss = (
 			float(self._history.history["loss"][-1])
@@ -241,13 +261,30 @@ class TensorFlowGrangerModel(BaseGrangerModel):
 			else float("nan")
 		)
 
+		loss_history = self._history.history.get("loss", []) if self._history is not None else []
+		epoch_indices = list(getattr(self._history, "epoch", [])) if self._history is not None else []
+		epochs_ran = len(epoch_indices) if epoch_indices else len(loss_history)
+		stop_reason = "callback_stop" if epochs_ran < self.epochs else "max_epochs_reached"
+
 		return {
 			"test_statistic": final_loss,
 			"p_value": np.nan,
 			"weights": self.get_weights(),
 			"forecasts": forecasts,
-			"history": self._history.history if self._history is not None else {},
+			"history": {
+				"loss": loss_history,
+				"stop_reason": stop_reason,
+			},
 		}
+
+	@staticmethod
+	def _is_gpu_dnn_init_error(exc: Exception) -> bool:
+		msg = str(exc).lower()
+		return (
+			"dnn library initialization failed" in msg
+			or "cudnn_status_not_initialized" in msg
+			or "failedpreconditionerror" in msg and "cuda" in msg
+		)
 
 	def predict(self, X: NDArray[np.float64]) -> NDArray[np.float64]:
 		"""Generate predictions from fitted TensorFlow model."""
@@ -307,8 +344,8 @@ class TensorFlowGrangerModel(BaseGrangerModel):
 		if self._variable_control_layer is None or self._n_features is None:
 			raise ModelNotFittedError("Model is not initialized. Call initialize(...) first.")
 
-		if self._variable_mask is None:
-			self._variable_mask = np.ones(self._n_features, dtype=np.float64)
+		# Match PyTorch/scikit behavior: each call starts from fully enabled variables.
+		self._variable_mask = np.ones(self._n_features, dtype=np.float64)
 
 		for idx in variable_indices:
 			if idx < 0 or idx >= self._n_features:

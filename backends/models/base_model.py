@@ -2,7 +2,7 @@ from abc import ABC, abstractmethod
 from typing import Any, Dict, List, Optional, Union
 import numpy as np
 from numpy.typing import NDArray
-from ...core.protocols import Scaler, Regularizer, Constraint
+from ...core.protocols import Regularizer, Constraint
 
 class BaseGrangerModel(ABC):
     """
@@ -18,9 +18,10 @@ class BaseGrangerModel(ABC):
     def __init__(
         self,
         backend: str = 'default',
-        scaler: Optional[Scaler] = None,
         regularizer: Optional[Regularizer] = None,
-        constraint: Optional[Constraint] = None
+        constraint: Optional[Constraint] = None,
+        callbacks: List[Any] = [],
+        needs_reinit: bool = True,
     ) -> None:
         """
         Initialize the Granger causality model with pluggable components.
@@ -32,9 +33,11 @@ class BaseGrangerModel(ABC):
             constraint: Constraint instance implementing Constraint protocol
         """
         self.backend: str = backend
-        self.scaler: Optional[Scaler] = scaler
         self.regularizer: Optional[Regularizer] = regularizer
         self.constraint: Optional[Constraint] = constraint
+        self.callbacks: List[Any] = callbacks
+        # If True, caller should run initialize(...) before each training cycle.
+        self.needs_reinit: bool = bool(needs_reinit)
         self._fitted: bool = False
 
     @abstractmethod
@@ -122,14 +125,14 @@ class BaseGrangerModel(ABC):
         """
         return self.backend
 
-    def set_scaler(self, scaler: Scaler) -> None:
-        """Dynamically set scaler component."""
-        self.scaler = scaler
-
-    def set_regularizer(self, regularizer: Regularizer) -> None:
+    def _set_regularizer(self, regularizer: Regularizer) -> None:
         """Dynamically set regularizer component."""
         self.regularizer = regularizer
 
-    def set_constraint(self, constraint: Constraint) -> None:
+    def _set_constraint(self, constraint: Constraint) -> None:
         """Dynamically set constraint component."""
         self.constraint = constraint
+
+    def _add_callback(self, callback: Any) -> None:
+        """Add a callback to the model's training process."""
+        self.callbacks.append(callback)

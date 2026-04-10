@@ -2,12 +2,14 @@ from __future__ import annotations
 
 import importlib
 from importlib.util import find_spec
-from typing import Any, Dict, Mapping, Optional, Sequence, Tuple
+from typing import Any, Dict, Optional, Sequence
 
 import numpy as np
 from numpy.typing import NDArray
 
-from .base_constaint import ProcessedConstraintSpec, process_user_relations
+from .base_constaint import process_user_relations
+from ...core.constraints_config import ProcessedConstraintSpec, RelationMap
+from ...core.exceptions import BackendNotAvailableError, ConstraintConfigurationError
 
 
 if find_spec("tensorflow") is not None:
@@ -18,7 +20,27 @@ else:  # pragma: no cover - runtime dependency check
 
 def _ensure_tensorflow() -> None:
 	if tf is None:
-		raise RuntimeError("TensorFlow is required to use tensorflow constraints.")
+		raise BackendNotAvailableError("TensorFlow is required to use tensorflow constraints.")
+
+
+def _expected_kernel_shape(mask: NDArray[np.float64]) -> tuple[int, int]:
+	"""Return expected Dense kernel shape (n_features, n_outputs)."""
+	return (int(mask.shape[1]), int(mask.shape[0]))
+
+
+def _validate_kernel_shape(w: Any, mask: NDArray[np.float64]) -> None:
+	"""Validate that kernel tensor shape matches mask-derived Dense layout."""
+	if not tf.is_tensor(w):
+		raise ConstraintConfigurationError("params must be tf.Tensor")
+	if w.shape.rank != 2:
+		raise ConstraintConfigurationError("params must be 2D with shape (n_features, n_outputs)")
+
+	expected_shape = _expected_kernel_shape(mask)
+	actual_shape = tuple(int(v) for v in w.shape)
+	if actual_shape != expected_shape:
+		raise ConstraintConfigurationError(
+			f"params shape {actual_shape} does not match expected Dense kernel shape {expected_shape}"
+		)
 
 
 class TensorFlowMaskConstraint(tf.keras.constraints.Constraint if tf is not None else object):
@@ -32,13 +54,29 @@ class TensorFlowMaskConstraint(tf.keras.constraints.Constraint if tf is not None
 		_ensure_tensorflow()
 		arr = np.asarray(mask, dtype=np.float64)
 		if arr.ndim != 2:
-			raise ValueError("mask must be a 2D array with shape (n_outputs, n_features)")
+			raise ConstraintConfigurationError("mask must be a 2D array with shape (n_outputs, n_features)")
 		self.mask = arr
 
 	def __call__(self, w: Any) -> Any:
+		return self.enforce(w)
+
+	def enforce(self, w: Any) -> Any:
+		_validate_kernel_shape(w, self.mask)
 		target_dtype = w.dtype if hasattr(w, "dtype") else tf.float32
 		mask_t = tf.transpose(tf.convert_to_tensor(self.mask, dtype=target_dtype))
 		return w * mask_t
+
+	def is_satisfied(self, params: Any, eps: float = 1e-8) -> bool:
+		if eps <= 0:
+			raise ConstraintConfigurationError("eps must be > 0")
+		try:
+			_validate_kernel_shape(params, self.mask)
+		except ConstraintConfigurationError:
+			return False
+
+		mask_t = tf.transpose(tf.convert_to_tensor(self.mask, dtype=params.dtype))
+		viol = tf.abs(params * (1.0 - mask_t))
+		return bool(tf.reduce_all(viol <= tf.cast(eps, params.dtype)).numpy())
 
 	def get_config(self) -> Dict[str, Any]:
 		return {"mask": self.mask.tolist()}
@@ -57,7 +95,7 @@ class TensorFlowMaskAndMinAbsSumConstraint(
 		_ensure_tensorflow()
 		self.mask = np.asarray(spec.mask, dtype=np.float64)
 		if self.mask.ndim != 2:
-			raise ValueError("spec.mask must be 2D with shape (n_outputs, n_features)")
+			raise ConstraintConfigurationError("spec.mask must be 2D with shape (n_outputs, n_features)")
 		self.rules = [
 			{
 				"output_index": int(rule.output_index),
@@ -67,10 +105,14 @@ class TensorFlowMaskAndMinAbsSumConstraint(
 			for rule in spec.rules
 		]
 		if eps <= 0:
-			raise ValueError("eps must be > 0")
+			raise ConstraintConfigurationError("eps must be > 0")
 		self.eps = float(eps)
 
 	def __call__(self, w: Any) -> Any:
+		return self.enforce(w)
+
+	def enforce(self, w: Any) -> Any:
+		_validate_kernel_shape(w, self.mask)
 		target_dtype = w.dtype if hasattr(w, "dtype") else tf.float32
 		mask_t = tf.transpose(tf.convert_to_tensor(self.mask, dtype=target_dtype))
 		constrained = w * mask_t
@@ -88,8 +130,6 @@ class TensorFlowMaskAndMinAbsSumConstraint(
 			current_sum = tf.reduce_sum(tf.abs(selected))
 			min_sum = tf.cast(rule["min_abs_sum"], target_dtype)
 			deficit = tf.maximum(tf.cast(0.0, target_dtype), min_sum - current_sum)
-			if tf.equal(deficit, 0.0):
-				continue
 
 			n_sel = tf.cast(tf.size(selected), target_dtype)
 			delta = deficit / n_sel
@@ -105,6 +145,31 @@ class TensorFlowMaskAndMinAbsSumConstraint(
 		constrained = constrained * mask_t
 		return constrained
 
+	def is_satisfied(self, params: Any) -> bool:
+		try:
+			_validate_kernel_shape(params, self.mask)
+		except ConstraintConfigurationError:
+			return False
+
+		mask_t = tf.transpose(tf.convert_to_tensor(self.mask, dtype=params.dtype))
+		viol = tf.abs(params * (1.0 - mask_t))
+		if not bool(tf.reduce_all(viol <= tf.cast(self.eps, params.dtype)).numpy()):
+			return False
+
+		for rule in self.rules:
+			out_idx = int(rule["output_index"])
+			feat_idx = rule["feature_indices"]
+			if len(feat_idx) == 0:
+				continue
+
+			idx_tf = tf.constant(feat_idx, dtype=tf.int32)
+			selected = tf.gather(params[:, out_idx], idx_tf)
+			sum_abs = tf.reduce_sum(tf.abs(selected))
+			if float(sum_abs.numpy()) + self.eps < float(rule["min_abs_sum"]):
+				return False
+
+		return True
+
 	def get_config(self) -> Dict[str, Any]:
 		return {
 			"mask": self.mask.tolist(),
@@ -114,7 +179,7 @@ class TensorFlowMaskAndMinAbsSumConstraint(
 
 
 def build_tensorflow_constraint_from_relations(
-	relations: Mapping[Tuple[str, str], float | int | bool | str | Mapping[str, float] | None],
+	relations: RelationMap,
 	predictor_names: Sequence[str],
 	output_names: Sequence[str],
 	col_offsets: Sequence[int],
