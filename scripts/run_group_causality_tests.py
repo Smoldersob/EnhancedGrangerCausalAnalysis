@@ -5,12 +5,14 @@ This script:
 1. Loads multiple datasets (DataFrames) from CSV files.
 2. Iterates through group configurations (sweep of parameter variations).
 3. For each configuration, runs Granger analysis via MultitaskGrangerBuilder.
-4. Saves resulting causality matrices (binary, p-values, F-test, sign).
+4. Saves results according to --save mode:
+    - minimum: binary causality matrix + summary.csv
+    - matrices: binary, p-values, F-test, sign + summary.csv
 5. Computes metrics against ground truth (TP, FP, accuracy, F1, etc.).
 6. Produces a summary CSV with timing and metrics for each test configuration.
 
 Typical workflow:
-    python run_group_causality_tests.py --config script_config.json
+    python run_group_causality_tests.py --config script_config.json --save minimum
 
 Config structure (scripts/run_group_causality_tests.config.json):
     {
@@ -25,9 +27,9 @@ Config structure (scripts/run_group_causality_tests.config.json):
     }
 
 Results in output_dir:
-    - case_000_causality.csv, case_000_p_value.csv, case_000_f_test.csv, case_000_sign.csv
-    - case_001_causality.csv, case_001_p_value.csv, ...
-    - summary.csv (aggregated metrics and timing for all cases)
+    - minimum mode: case_XXX_causality.csv + summary.csv
+    - matrices mode: case_XXX_causality.csv, case_XXX_p_value.csv,
+      case_XXX_f_test.csv, case_XXX_sign.csv + summary.csv
 """
 
 from __future__ import annotations
@@ -150,16 +152,19 @@ def _resolve_path(base_dir: Path, raw_path: str | Path) -> Path:
     return (base_dir / p).resolve()
 
 
-def run_from_config(script_config_path: str | Path) -> Path:
+def run_from_config(script_config_path: str | Path, save_mode: str = "minimum") -> Path:
     """
     Run Granger analysis test sweep from configuration file.
-    
+
     Args:
         script_config_path: path to script configuration JSON/YAML file
-    
+        save_mode: save strategy for per-case matrices:
+            - "minimum": save only binary causality matrix (+ summary.csv at the end)
+            - "matrices": save all matrices (binary, p-value, f-test, sign) (+ summary.csv)
+
     Returns:
         Path to generated summary.csv file
-    
+
     Raises:
         FileNotFoundError: if required config files or data files not found
         ValueError: if config structure is invalid
@@ -253,7 +258,7 @@ def run_from_config(script_config_path: str | Path) -> Path:
         print(f"[Case {case_idx:3d}] {backend:15s} | {case_desc}")
         
         # Run Granger analysis
-        start = time.time()
+        start = time.perf_counter()
         try:
             out = MultitaskGrangerBuilder().from_config(cfg).data(data_frames).fit()
             
@@ -262,14 +267,16 @@ def run_from_config(script_config_path: str | Path) -> Path:
             p_value_df = out.results.p_value
             f_test_df = out.results.F_test
             sign_df = out.results.sign
+
+            # Measure per-case execution time excluding file-save operations.
+            elapsed_s = time.perf_counter() - start
+            total_time += elapsed_s
             
             causality_df.to_csv(causality_path)
-            p_value_df.to_csv(p_value_path)
-            f_test_df.to_csv(f_test_path)
-            sign_df.to_csv(sign_path)
-            
-            elapsed_s = time.time() - start
-            total_time += elapsed_s
+            if save_mode == "matrices":
+                p_value_df.to_csv(p_value_path)
+                f_test_df.to_csv(f_test_path)
+                sign_df.to_csv(sign_path)
             
             # Compute metrics against ground truth
             metrics = MetricCalculator(str(ground_truth_path), str(causality_path)).evaluate()
@@ -279,9 +286,9 @@ def run_from_config(script_config_path: str | Path) -> Path:
                 "case_id": case_idx,
                 "backend": backend,
                 "causality_file": causality_path.name,
-                "p_value_file": p_value_path.name,
-                "f_test_file": f_test_path.name,
-                "sign_file": sign_path.name,
+                "p_value_file": p_value_path.name if save_mode == "matrices" else "NOT_SAVED",
+                "f_test_file": f_test_path.name if save_mode == "matrices" else "NOT_SAVED",
+                "sign_file": sign_path.name if save_mode == "matrices" else "NOT_SAVED",
                 "execution_time_seconds": round(elapsed_s, 2),
             }
             for p, v in zip(param_names, case_values):
@@ -293,7 +300,7 @@ def run_from_config(script_config_path: str | Path) -> Path:
             print(f"        ✓ Completed in {elapsed_s:.2f}s | Accuracy: {metrics.get('accuracy', 0):.3f} | F1: {metrics.get('f1', 0):.3f}")
         
         except Exception as e:
-            elapsed_s = time.time() - start
+            elapsed_s = time.perf_counter() - start
             print(f"        ✗ FAILED after {elapsed_s:.2f}s: {e}")
             # Still create a row but mark as failed
             row: Dict[str, Any] = {
@@ -346,10 +353,20 @@ def main() -> None:
         default=str(default_config),
         help="Path to script configuration JSON/YAML (default: sample config next to this script)",
     )
+    parser.add_argument(
+        "--save",
+        default="minimum",
+        choices=["minimum", "matrices"],
+        help=(
+            "Saving mode for per-case outputs: "
+            "'minimum' saves only binary causality matrix; "
+            "'matrices' saves binary, p-value, f-test, and sign matrices"
+        ),
+    )
     args = parser.parse_args()
 
     try:
-        summary_path = run_from_config(args.config)
+        summary_path = run_from_config(args.config, save_mode=args.save)
         print(f"\n✓ SUCCESS: Results saved to {summary_path}")
     except Exception as e:
         print(f"\n✗ ERROR: {e}", file=sys.stderr)

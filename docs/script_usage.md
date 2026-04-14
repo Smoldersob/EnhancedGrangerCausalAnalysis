@@ -10,7 +10,9 @@ The script performs the following workflow:
 2. **Load Data** — reads CSV files into a list of DataFrames
 3. **Iterate Test Cases** — expands parameter sweep from group_config.json file
 4. **Run Analysis** — for each configuration, executes Granger analysis via `MultitaskGrangerBuilder`
-5. **Save Results** — stores causality matrices, p-values, F-test statistics, and sign information for each case
+5. **Save Results** — stores outputs according to `--save` mode:
+  - `minimum` (default): binary causality matrix + `summary.csv`
+  - `matrices`: binary, p-values, F-test, sign + `summary.csv`
 6. **Compute Metrics** — evaluates predictions against ground truth (TP, FP, FN, accuracy, F1, precision, recall, etc.)
 7. **Generate Summary** — outputs summary.csv with timing and metrics across all test cases
 
@@ -102,18 +104,33 @@ For details on sweep expansion, see [Test Group Configuration Usage](test_group_
 
 ```bash
 cd scripts
-python run_group_causality_tests.py --config run_group_causality_tests.config.json
+python run_group_causality_tests.py --config run_group_causality_tests.config.json --save minimum
 ```
 
 ### With Custom Config
 
 ```bash
-python run_group_causality_tests.py --config my_custom_config.json
+python run_group_causality_tests.py --config my_custom_config.json --save matrices
 ```
+
+### Save Mode
+
+```bash
+# Default: minimum (binary + summary)
+python run_group_causality_tests.py --config run_group_causality_tests.config.json
+
+# Full matrices
+python run_group_causality_tests.py --config run_group_causality_tests.config.json --save matrices
+```
+
+Allowed values:
+- `minimum` — saves only `case_NNN_*_causality.csv` and `summary.csv`
+- `matrices` — saves `causality`, `p_value`, `f_test`, `sign` and `summary.csv`
 
 ### Default Behavior
 
-If `--config` is omitted, the script looks for `run_group_causality_tests.config.json` in the same directory:
+If `--config` is omitted, the script looks for `run_group_causality_tests.config.json` in the same directory.
+If `--save` is omitted, default mode is `minimum`:
 
 ```bash
 python run_group_causality_tests.py
@@ -123,7 +140,19 @@ python run_group_causality_tests.py
 
 ### Directory Structure
 
-After running, the output directory contains:
+After running, the output directory contains different artifacts depending on `--save` mode.
+
+`--save minimum`:
+
+```
+results/
+├── summary.csv
+├── case_000_*_causality.csv
+├── case_001_*_causality.csv
+└── ...
+```
+
+`--save matrices`:
 
 ```
 results/
@@ -159,10 +188,10 @@ Optional suffix in filename:
 - `case_id` — Numeric index of the test case (0, 1, 2, ...)
 - `backend` — Backend used (pytorch, tensorflow, sklearn)
 - `causality_file` — Filename of the binary causality matrix
-- `p_value_file` — Filename of the p-value matrix
-- `f_test_file` — Filename of the F-test matrix
-- `sign_file` — Filename of the sign matrix
-- `execution_time_seconds` — Wall-clock time for this configuration
+- `p_value_file` — Filename of the p-value matrix (`NOT_SAVED` in `minimum` mode)
+- `f_test_file` — Filename of the F-test matrix (`NOT_SAVED` in `minimum` mode)
+- `sign_file` — Filename of the sign matrix (`NOT_SAVED` in `minimum` mode)
+- `execution_time_seconds` — Time of one test case excluding CSV file-save time
 - `param_names...` — Parameter values for this case (e.g., `model_config.epochs`, `lag_config.max_lag`)
 - `tp`, `fp`, `tn`, `fn` — Confusion matrix components (True Positive, False Positive, etc.)
 - `accuracy` — $(TP + TN) / N$
@@ -254,7 +283,7 @@ Edit `group_config.json`:
 ### Step 3: Run Script
 
 ```bash
-python run_group_causality_tests.py --config run_group_causality_tests.config.json
+python run_group_causality_tests.py --config run_group_causality_tests.config.json --save matrices
 ```
 
 Output:
