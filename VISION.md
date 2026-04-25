@@ -104,4 +104,4 @@ We welcome contributions aligned with this vision. See [CONTRIBUTING.md](CONTRIB
 
 ## Related Documents
 For installation, usage, and API details, refer to [README.md](README.md).</content>
-<parameter name="filePath">/home/janek/my_pro/complex_granger_analysis/VISION.md
+<parameter name="filePath">

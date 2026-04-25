@@ -15,7 +15,7 @@ Since this project is maintained by a small team, contributions are primarily ha
 - **Feature Requests**: Suggest new features or improvements by opening an issue. Describe the feature, its benefits, and any relevant use cases.
 
 ### Contacting the Author
-For direct inquiries, questions, or contributions that don't fit the issue format, please email the author at: [author@example.com](janek.tlalka@gmail.com). Include details about your contribution idea or feedback.
+For direct inquiries, questions, or contributions that don't fit the reporting issue format, please use use label 'question' or 'help wanted'.
 
 ## Code of Conduct
 We strive to maintain a respectful and inclusive community. Please be considerate in your communications and follow standard open-source etiquette.
@@ -24,6 +24,12 @@ We strive to maintain a respectful and inclusive community. Please be considerat
 - Ensure any code changes align with the library's goals of providing customizable Granger causality analysis.
 - Test your changes thoroughly before submitting.
 - Follow Python best practices and the existing code style.
+- When you want to submit you change use pull request and remember to add a reviewer form reviewers list.
+- Describe shortly in pull request the changes you want to submitt. 
+
+Reviewers list:
+- Smoldersob
+- ...(to be added)
 
 ## License
 By contributing, you agree that your contributions will be licensed under the same license as the project (MIT License).
