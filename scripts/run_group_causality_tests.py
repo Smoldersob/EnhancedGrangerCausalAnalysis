@@ -50,6 +50,7 @@ if str(REPO_ROOT) not in sys.path:
 from complex_granger_analysis.api import MultitaskGrangerBuilder, TestGroupConfigIterator
 from complex_granger_analysis.api.config_loader import BuilderConfigLoader
 from complex_granger_analysis.utilities.metric_calculator import MetricCalculator
+from complex_granger_analysis import initializers as init_initializers
 
 
 def _sanitize_token(value: Any) -> str:
@@ -130,9 +131,33 @@ def _load_dataframes(cfg: Dict[str, Any]) -> List[pd.DataFrame]:
                 f"CSV input file not found: {csv_path}. "
                 "Update 'data.csv_paths' in script config or provide --config with valid paths."
             )
-        frames.append(pd.read_csv(csv_path, index_col=index_col))
+        frames.append(pd.read_csv(csv_path, sep=';', index_col=index_col))
     
     return frames
+
+
+def _align_dataframe_columns(frames: List[pd.DataFrame]) -> List[pd.DataFrame]:
+    """Align all frames to the union of columns and fill missing values with zeros."""
+    if not frames:
+        return frames
+
+    all_columns: List[str] = []
+    seen: set[str] = set()
+    changed = False
+    for frame in frames:
+        for column in frame.columns:
+            if column not in seen:
+                seen.add(column)
+                all_columns.append(column)
+        if list(frame.columns) != all_columns:
+            changed = True
+
+    aligned: List[pd.DataFrame] = []
+    for frame in frames:
+        aligned_frame = frame.reindex(columns=all_columns, fill_value=0)
+        aligned.append(aligned_frame)
+
+    return aligned if changed else frames
 
 
 def _resolve_path(base_dir: Path, raw_path: str | Path) -> Path:
@@ -211,6 +236,10 @@ def run_from_config(script_config_path: str | Path, save_mode: str = "minimum") 
     # Load data
     print(f"Loading data from CSV files...")
     data_frames = _load_dataframes(script_cfg)
+    aligned_frames = _align_dataframe_columns(data_frames)
+    if aligned_frames is not data_frames:
+        print("  ✓ Aligned DataFrame columns across all inputs; missing values filled with 0")
+    data_frames = aligned_frames
     print(f"  ✓ Loaded {len(data_frames)} DataFrame(s)")
 
     # Load group config and extract sweep parameters
@@ -260,6 +289,17 @@ def run_from_config(script_config_path: str | Path, save_mode: str = "minimum") 
         # Run Granger analysis
         start = time.perf_counter()
         try:
+            # Resolve initializer string (from JSON) into actual initializer class when provided
+            init_spec = cfg.get("initializer")
+            if isinstance(init_spec, str):
+                name = init_spec.strip().lower()
+                if name in {"olsinitializer", "ols"}:
+                    cfg["initializer"] = init_initializers.OLSInitializer
+                elif name in {"zerosinitializer", "zeros", "zero"}:
+                    cfg["initializer"] = init_initializers.ZerosInitializer
+                elif name in {"randomnormalinitializer", "randomnormal", "random_normal", "random"}:
+                    cfg["initializer"] = init_initializers.RandomNormalInitializer
+
             out = MultitaskGrangerBuilder().from_config(cfg).data(data_frames).fit()
             
             # Extract and save all result matrices

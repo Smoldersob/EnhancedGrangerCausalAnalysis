@@ -156,9 +156,9 @@ def _build_callback_from_spec(raw_callback: Any) -> Any:
 	"""Instantiate supported built-in callbacks from config spec."""
 	type_name, params = _extract_typed_spec(raw_callback, context="callback")
 
-	if type_name in {"early_stopping", "earlystopping"}:
+	if type_name in {"early_stopping", "earlystopping", "early_stoping"}:
 		return EarlyStopping(**params)
-	if type_name in {"reduce_lr", "reduce_learning_rate", "reducelearningrate"}:
+	if type_name in {"reduce_lr", "reduce_learning_rate", "reducelearningrate", "reduce_lr_on_plateau"}:
 		return ReduceLearningRate(**params)
 	if type_name in {"convergence_check", "convergencecheck"}:
 		return ConvergenceCheck(**params)
