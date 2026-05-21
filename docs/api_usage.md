@@ -274,7 +274,7 @@ while it.has_next():
 - Each config is normalized via `BuilderConfigLoader`.
 - Dotted keys (e.g., `"model_config.epochs"`) update nested config.
 
-For details, see [Test Group Configuration Usage](test_group_config_usage.md).
+For details, see [Configuration File Usage](config_file_usage.md).
 
 ---
 
@@ -505,7 +505,7 @@ print(output.p_value)
 ## References
 
 - [Configuration File Usage](config_file_usage.md) — Detailed config structure reference.
-- [Test Group Configuration Usage](test_group_config_usage.md) — Sweep expansion and iteration.
+- [Configuration File Usage](config_file_usage.md) — Sweep expansion and iteration.
 - [Backend Usage](backend_usage.md) — Creating components (callbacks, regularizers, constraints).
 - [Components Loading](components_loading.md) — Backend-specific component formats.
 

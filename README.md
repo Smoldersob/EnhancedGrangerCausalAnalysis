@@ -29,15 +29,14 @@ Compared to a standard Granger test, the library adds:
 - regularization (`l1`, lag-dependent `l1` variants),
 - callbacks and optional hyperparameter sweeps,
 - unified outputs (`p_value`, `F_test`, sign, error matrices),
-- config-driven group runs with `summary.csv` and per-case result files.
+- config-driven group runs with `summary.csv`, per-case result files, `reuse_data`, and `compute_device` selection.
 
 For details, see:
 - [docs/api_usage.md](docs/api_usage.md)
-- [docs/config_file_usage.md](docs/config_file_usage.md)
+- [docs/config_file_usage.md](docs/config_file_usage.md) — Builder and group config format, including sweepable fields
 - [docs/data_preprocessing.md](docs/data_preprocessing.md)
 - [docs/project_structure.md](docs/project_structure.md)
-- [docs/test_group_config_usage.md](docs/test_group_config_usage.md)
-- [docs/script_usage.md](docs/script_usage.md)
+- [docs/script_usage.md](docs/script_usage.md) — Script runner and group execution workflow
 
 ## APIs In One Line
 
@@ -103,7 +102,8 @@ python scripts/run_group_causality_tests.py --config scripts/run_group_causality
 This flow supports loading a list of input DataFrames, running sweep cases, measuring execution time, comparing against ground truth, and saving `summary.csv`.
 
 Details:
-- [docs/script_usage.md](docs/script_usage.md)
+- [docs/config_file_usage.md](docs/config_file_usage.md) — Group config structure and sweepable fields
+- [docs/script_usage.md](docs/script_usage.md) — Script runner options and output layout
 
 ## Installation
 

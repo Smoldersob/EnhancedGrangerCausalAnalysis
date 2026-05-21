@@ -183,5 +183,5 @@ This keeps preprocessing consistent across all supported backends (`pytorch`, `t
 - [API Usage](api_usage.md)
 - [Configuration File Usage](config_file_usage.md)
 - [Backend Usage](backend_usage.md)
-- [Test Group Configuration Usage](test_group_config_usage.md)
+- [Configuration File Usage](config_file_usage.md)
 - [Script Usage](script_usage.md)

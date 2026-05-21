@@ -98,6 +98,34 @@ def test_test_group_iterator_without_sweep_produces_one_config():
         assert it.has_next() is False
 
 
+def test_test_group_iterator_resolves_relations_from_file_path():
+    group = {
+        "base_config": {
+            "backend": "pytorch",
+            "relations": "./relations.json",
+        }
+    }
+    relations = [
+        {"effect": "y", "cause": "x1", "zero": True},
+        {"effect": "y", "cause": "x2", "min_abs_sum": 0.2},
+    ]
+
+    with tempfile.TemporaryDirectory() as tmp:
+        tmp_path = Path(tmp)
+        group_path = tmp_path / "group.json"
+        rel_path = tmp_path / "relations.json"
+        group_path.write_text(json.dumps(group), encoding="utf-8")
+        rel_path.write_text(json.dumps(relations), encoding="utf-8")
+
+        it = TestGroupConfigIterator.from_file(group_path)
+        cfg = it.next()
+
+    assert ("y", "x1") in cfg["relations"]
+    assert ("y", "x2") in cfg["relations"]
+    assert cfg["relations"][("y", "x1")]["zero"] is True
+    assert cfg["relations"][("y", "x2")]["min_abs_sum"] == 0.2
+
+
 def test_builder_config_loader_keeps_callback_specs_for_backend_resolution():
     cfg = {
         "backend": "pytorch",

@@ -99,5 +99,5 @@ Covers key functionality:
 - [Backend usage](backend_usage.md)
 - [Components loading](componets_loading.md)
 - [Data preprocessing](data_preprocessing.md)
-- [Test group configuration](test_group_config_usage.md)
+- [Configuration files](config_file_usage.md)
 - [Script usage](script_usage.md)

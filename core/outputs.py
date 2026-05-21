@@ -22,6 +22,7 @@ class MultitaskGrangerOutput:
 	lag_engine: LagEngine
 	X_scaler: Any
 	y_scaler: Any
+	preparation_time_seconds: float = 0.0
 	prepared_data: Any = None
 
 

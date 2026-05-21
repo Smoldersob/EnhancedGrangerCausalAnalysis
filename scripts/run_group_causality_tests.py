@@ -35,11 +35,12 @@ Results in output_dir:
 from __future__ import annotations
 
 import argparse
+import os
 import re
 import sys
 import time
 from pathlib import Path
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Tuple
 
 import pandas as pd
 
@@ -64,6 +65,83 @@ def _sanitize_token(value: Any) -> str:
 def _short_param_name(param_name: str) -> str:
     """Extract last segment from dotted parameter name (e.g., 'model_config.epochs' -> 'epochs')."""
     return param_name.split(".")[-1]
+
+
+def _freeze_for_signature(value: Any) -> Any:
+    """Convert nested config values into hashable signature components."""
+    if isinstance(value, dict):
+        return tuple(sorted((str(key), _freeze_for_signature(item)) for key, item in value.items()))
+    if isinstance(value, list):
+        return tuple(_freeze_for_signature(item) for item in value)
+    if isinstance(value, tuple):
+        return tuple(_freeze_for_signature(item) for item in value)
+    if hasattr(value, "__dict__"):
+        public_items = {
+            key: item
+            for key, item in vars(value).items()
+            if not key.startswith("_")
+        }
+        if public_items:
+            return (type(value).__name__, _freeze_for_signature(public_items))
+    return value
+
+
+def _data_signature(data_frames: List[pd.DataFrame]) -> Tuple[Any, ...]:
+    """Build a lightweight signature for the loaded inputs."""
+    return tuple((tuple(frame.columns), frame.shape) for frame in data_frames)
+
+
+def _preparation_signature(cfg: Dict[str, Any], data_frames: List[pd.DataFrame]) -> Tuple[Any, ...]:
+    """Build a cache key for prepared data that changes with lag or selector settings."""
+    return (
+        _data_signature(data_frames),
+        _freeze_for_signature(cfg.get("effects")),
+        _freeze_for_signature(cfg.get("lag_config")),
+        _freeze_for_signature(cfg.get("lag_selector")),
+        _freeze_for_signature(cfg.get("x_scaler")),
+        _freeze_for_signature(cfg.get("y_scaler")),
+        _freeze_for_signature(cfg.get("backend_sample_fraction", 1.0)),
+        _freeze_for_signature(cfg.get("backend_max_samples")),
+    )
+
+
+def _apply_compute_device(cfg: Dict[str, Any]) -> None:
+    """Apply a CPU/GPU preference from group config before model creation."""
+    device_spec = cfg.get("compute_device", cfg.get("device"))
+    if device_spec is None:
+        return
+
+    backend = str(cfg.get("backend", "")).strip().lower()
+    device_text = str(device_spec).strip().lower()
+    if not device_text:
+        return
+
+    if backend == "tensorflow":
+        if device_text in {"cpu", "cpu-only"}:
+            os.environ["CGA_TF_FORCE_CPU"] = "1"
+            os.environ["CGA_TF_USE_GPU"] = "0"
+        elif device_text in {"gpu", "cuda"} or device_text.startswith("cuda"):
+            os.environ["CGA_TF_FORCE_CPU"] = "0"
+            os.environ["CGA_TF_USE_GPU"] = "1"
+        elif device_text == "auto":
+            os.environ.pop("CGA_TF_FORCE_CPU", None)
+            os.environ.pop("CGA_TF_USE_GPU", None)
+        return
+
+    if backend == "pytorch":
+        model_cfg = cfg.get("model_config")
+        if not isinstance(model_cfg, dict):
+            model_cfg = {}
+            cfg["model_config"] = model_cfg
+        if "device" not in model_cfg:
+            if device_text in {"gpu", "cuda"}:
+                model_cfg["device"] = "cuda"
+            elif device_text.startswith("cuda"):
+                model_cfg["device"] = device_spec
+            elif device_text == "cpu":
+                model_cfg["device"] = "cpu"
+            elif device_text != "auto":
+                model_cfg["device"] = device_spec
 
 
 def _build_result_filename(case_idx: int, backend: str, param_names: List[str], case_values: List[Any], suffix: str = "causality") -> str:
@@ -258,6 +336,7 @@ def run_from_config(script_config_path: str | Path, save_mode: str = "minimum") 
 
     # Iterate through test group configurations
     iterator = TestGroupConfigIterator.from_file(group_config_path)
+    prepared_data_cache: Dict[Tuple[Any, ...], Any] = {}
     
     summary_rows: List[Dict[str, Any]] = []
     case_idx = 0
@@ -269,9 +348,18 @@ def run_from_config(script_config_path: str | Path, save_mode: str = "minimum") 
 
     while iterator.has_next():
         cfg = iterator.next()
+        _apply_compute_device(cfg)
         case_values = cases[case_idx] if case_idx < len(cases) else []
         
         backend = str(cfg.get("backend", "unknown"))
+        reuse_data = bool(cfg.get("reuse_data"))
+        prep_signature = _preparation_signature(cfg, data_frames)
+        cached_prepared_data_entry = prepared_data_cache.get(prep_signature) if reuse_data else None
+        cached_prepared_data = None
+        cached_preparation_time = 0.0
+        if isinstance(cached_prepared_data_entry, dict):
+            cached_prepared_data = cached_prepared_data_entry.get("prepared_data")
+            cached_preparation_time = float(cached_prepared_data_entry.get("preparation_time_seconds", 0.0))
         
         # Build filenames for all result matrices
         base_filename = _build_result_filename(case_idx, backend, param_names, case_values)
@@ -300,7 +388,10 @@ def run_from_config(script_config_path: str | Path, save_mode: str = "minimum") 
                 elif name in {"randomnormalinitializer", "randomnormal", "random_normal", "random"}:
                     cfg["initializer"] = init_initializers.RandomNormalInitializer
 
-            out = MultitaskGrangerBuilder().from_config(cfg).data(data_frames).fit()
+            builder = MultitaskGrangerBuilder().from_config(cfg).data(data_frames)
+            if cached_prepared_data is not None:
+                builder.prepared_data(cached_prepared_data)
+            out = builder.fit()
             
             # Extract and save all result matrices
             causality_df = out.results.result(threshold=threshold, with_sign=True)
@@ -310,6 +401,8 @@ def run_from_config(script_config_path: str | Path, save_mode: str = "minimum") 
 
             # Measure per-case execution time excluding file-save operations.
             elapsed_s = time.perf_counter() - start
+            if cached_prepared_data is not None:
+                elapsed_s += cached_preparation_time
             total_time += elapsed_s
             
             causality_df.to_csv(causality_path)
@@ -317,6 +410,12 @@ def run_from_config(script_config_path: str | Path, save_mode: str = "minimum") 
                 p_value_df.to_csv(p_value_path)
                 f_test_df.to_csv(f_test_path)
                 sign_df.to_csv(sign_path)
+
+            if reuse_data and out.prepared_data is not None:
+                prepared_data_cache[prep_signature] = {
+                    "prepared_data": out.prepared_data,
+                    "preparation_time_seconds": out.preparation_time_seconds,
+                }
             
             # Compute metrics against ground truth
             metrics = MetricCalculator(str(ground_truth_path), str(causality_path)).evaluate()

@@ -365,9 +365,11 @@ class MultiTaskGrangerAPI:
 
 		relations_map = dict(relations or {})
 
+		preparation_time_seconds = 0.0
 		if prepared_data is not None:
 			prepared = prepared_data
 		else:
+			prep_start = time.perf_counter()
 			prepared = self._prepare_data(
 				data=data,
 				effects=effects_list,
@@ -379,6 +381,7 @@ class MultiTaskGrangerAPI:
 				x_scaler=x_scaler,
 				y_scaler=y_scaler,
 			)
+			preparation_time_seconds = time.perf_counter() - prep_start
 
 		strategy = BackendFactory.get_strategy(self.backend)
 
@@ -607,6 +610,7 @@ class MultiTaskGrangerAPI:
 			lag_engine=prepared.engine,
 			X_scaler=prepared.x_scaler,
 			y_scaler=prepared.y_scaler,
+			preparation_time_seconds=preparation_time_seconds,
 			prepared_data=prepared_data_output,
 		)
 

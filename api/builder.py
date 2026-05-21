@@ -13,6 +13,16 @@ from .config_loader import BuilderConfigLoader
 from .orchestrator import MultiTaskGrangerAPI
 
 
+def _normalize_optional_name_list(values: Optional[Sequence[str]]) -> Optional[List[str]]:
+	"""Return None for empty lists so callers fall back to all columns."""
+	if values is None:
+		return None
+	if isinstance(values, str):
+		return [values]
+	items = list(values)
+	return items if items else None
+
+
 class MultitaskGrangerBuilder:
 	"""
 	Fluent builder for MultiTaskGrangerAPI.
@@ -66,9 +76,9 @@ class MultitaskGrangerBuilder:
 		effects: Optional[Sequence[str]] = None,
 		tested_causes: Optional[Sequence[str]] = None,
 	) -> "MultitaskGrangerBuilder":
-		self._fit_kwargs["causes"] = list(causes) if causes is not None else None
-		self._fit_kwargs["effects"] = list(effects) if effects is not None else None
-		self._fit_kwargs["tested_causes"] = list(tested_causes) if tested_causes is not None else None
+		self._fit_kwargs["causes"] = _normalize_optional_name_list(causes)
+		self._fit_kwargs["effects"] = _normalize_optional_name_list(effects)
+		self._fit_kwargs["tested_causes"] = _normalize_optional_name_list(tested_causes)
 		return self
 
 	def relations(
@@ -170,7 +180,7 @@ class MultitaskGrangerBuilder:
 				if key in {"regularizer_spec", "hiperoptimalization_conf", "model_config"} and value is not None:
 					self._fit_kwargs[key] = dict(value)
 				elif key in {"causes", "effects", "tested_causes"} and value is not None:
-					self._fit_kwargs[key] = list(value)
+					self._fit_kwargs[key] = _normalize_optional_name_list(value)
 				elif key == "relations" and value is not None:
 					self._fit_kwargs[key] = dict(value)
 				else:

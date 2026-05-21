@@ -1,0 +1,12 @@
+[
+  {
+    "effect": "y",
+    "cause": "x2",
+    "zero": true
+  },
+  {
+    "effect": "y",
+    "cause": "x1",
+    "min_abs_sum": 0.05
+  }
+]

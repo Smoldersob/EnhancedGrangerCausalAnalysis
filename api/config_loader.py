@@ -257,8 +257,70 @@ class BuilderConfigLoader:
 
 	@staticmethod
 	def load_file(path: str | Path) -> Dict[str, Any]:
-		raw = BuilderConfigLoader._read_mapping(path)
+		cfg_path = Path(path).resolve()
+		raw = BuilderConfigLoader._read_mapping(cfg_path)
+		raw = BuilderConfigLoader._resolve_config_references(raw, cfg_path.parent)
 		return BuilderConfigLoader.normalize_builder_config(raw)
+
+	@staticmethod
+	def _resolve_config_references(config: Mapping[str, Any], base_dir: Path) -> Dict[str, Any]:
+		"""Resolve file-backed references embedded in a config mapping."""
+		resolved = copy.deepcopy(dict(config))
+		if "relations" in resolved:
+			resolved["relations"] = BuilderConfigLoader._resolve_relations_reference(
+				resolved["relations"],
+				base_dir,
+			)
+		return resolved
+
+	@staticmethod
+	def _resolve_relations_reference(raw_relations: Any, base_dir: Path) -> Any:
+		"""Load relation rules from an external file when the config stores a path."""
+		if raw_relations is None:
+			return None
+
+		if isinstance(raw_relations, str):
+			relations_path = Path(raw_relations)
+			if not relations_path.is_absolute():
+				relations_path = (base_dir / relations_path).resolve()
+			if not relations_path.exists():
+				raise DataValidationError(f"Relations file does not exist: {relations_path}")
+			return BuilderConfigLoader._read_any_file(relations_path)
+
+		if isinstance(raw_relations, Mapping) and set(raw_relations.keys()) <= {"path"}:
+			relations_path = Path(raw_relations["path"])
+			if not relations_path.is_absolute():
+				relations_path = (base_dir / relations_path).resolve()
+			if not relations_path.exists():
+				raise DataValidationError(f"Relations file does not exist: {relations_path}")
+			return BuilderConfigLoader._read_any_file(relations_path)
+
+		return raw_relations
+
+	@staticmethod
+	def _read_any_file(path: str | Path) -> Any:
+		"""Read JSON/YAML data without enforcing top-level mapping shape."""
+		cfg_path = Path(path)
+		if not cfg_path.exists():
+			raise DataValidationError(f"Config file does not exist: {cfg_path}")
+
+		suffix = cfg_path.suffix.lower()
+		text = cfg_path.read_text(encoding="utf-8")
+
+		if suffix == ".json":
+			return json.loads(text)
+		if suffix in {".yml", ".yaml"}:
+			try:
+				import yaml  # type: ignore
+			except Exception as exc:  # pragma: no cover - optional runtime dependency
+				raise DataValidationError(
+					"YAML support requires PyYAML. Install with: pip install pyyaml"
+				) from exc
+			return yaml.safe_load(text)
+
+		raise DataValidationError(
+			f"Unsupported config extension '{suffix}'. Use .json, .yml or .yaml"
+		)
 
 	@staticmethod
 	def normalize_builder_config(config: Mapping[str, Any]) -> Dict[str, Any]:
@@ -359,15 +421,17 @@ class TestGroupConfigIterator:
 	}
 	"""
 
-	def __init__(self, configs: Sequence[Dict[str, Any]]) -> None:
+	def __init__(self, configs: Sequence[Dict[str, Any]], base_dir: Optional[Path] = None) -> None:
 		self._configs: List[Dict[str, Any]] = [copy.deepcopy(c) for c in configs]
 		self._index = 0
+		self._base_dir = Path(base_dir).resolve() if base_dir is not None else None
 
 	@classmethod
 	def from_file(cls, path: str | Path) -> "TestGroupConfigIterator":
-		raw = BuilderConfigLoader._read_mapping(path)
+		group_path = Path(path).resolve()
+		raw = BuilderConfigLoader._read_mapping(group_path)
 		configs = cls._expand(raw)
-		return cls(configs)
+		return cls(configs, base_dir=group_path.parent)
 
 	def has_next(self) -> bool:
 		return self._index < len(self._configs)
@@ -378,6 +442,8 @@ class TestGroupConfigIterator:
 
 		cfg = copy.deepcopy(self._configs[self._index])
 		self._index += 1
+		if self._base_dir is not None:
+			cfg = BuilderConfigLoader._resolve_config_references(cfg, self._base_dir)
 		return BuilderConfigLoader.normalize_builder_config(cfg)
 
 	@staticmethod

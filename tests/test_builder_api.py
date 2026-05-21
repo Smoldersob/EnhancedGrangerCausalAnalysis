@@ -89,10 +89,48 @@ def test_builder_from_config_and_fluent_forward_to_orchestrator_fit():
         builder_module.MultiTaskGrangerAPI = old_api
 
 
+def test_builder_from_config_treats_empty_variable_lists_as_none():
+    captured = {}
+
+    class DummyAPI:
+        def __init__(self, backend=None, stationarity_transformer=None, reuse_data=False):
+            captured["backend"] = backend
+
+        def fit(self, data, **kwargs):
+            captured["kwargs"] = kwargs
+            return {"ok": True}
+
+    old_api = builder_module.MultiTaskGrangerAPI
+    builder_module.MultiTaskGrangerAPI = DummyAPI
+    try:
+        df = pd.DataFrame(
+            {
+                "x1": [1.0, 2.0, 3.0, 4.0],
+                "x2": [0.5, 0.7, 0.8, 1.0],
+            }
+        )
+
+        MultitaskGrangerBuilder(backend="pytorch").from_config(
+            {
+                "causes": [],
+                "effects": [],
+                "tested_causes": [],
+            }
+        ).data(df).fit()
+
+        kwargs = captured["kwargs"]
+        assert kwargs["causes"] is None
+        assert kwargs["effects"] is None
+        assert kwargs["tested_causes"] is None
+    finally:
+        builder_module.MultiTaskGrangerAPI = old_api
+
+
 if __name__ == "__main__":
     tests = [
         test_builder_requires_data_before_fit,
         test_builder_from_config_and_fluent_forward_to_orchestrator_fit,
+        test_builder_from_config_treats_empty_variable_lists_as_none,
     ]
 
     print("\n" + "=" * 80)

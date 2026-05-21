@@ -81,7 +81,7 @@ The script performs the following workflow:
 
 - **`base_config`** — Starting configuration merged with each sweep case. Supports all builder parameters:
   - `backend`, `lag_config`, `lag_selector`, `model_config`, `regularizer`, `callbacks`, `relations`, etc.
-  - See [Configuration File Usage](config_file_usage.md) for full format.
+  - See [Configuration File Usage](config_file_usage.md) for the full builder/group config format and the supported sweep fields.
 
 - **`sweep.param_names`** — List of dotted parameter names to vary (e.g., `"model_config.epochs"`)
 
@@ -96,7 +96,7 @@ sweep cases:
   [3] epochs=20, max_lag=12  (vary both)
 ```
 
-For details on sweep expansion, see [Test Group Configuration Usage](test_group_config_usage.md).
+For details on sweep expansion, supported sweep fields, and `reuse_data` / `compute_device` handling, see [Configuration File Usage](config_file_usage.md).
 
 ## Usage
 
@@ -412,7 +412,6 @@ Check:
 ## References
 
 - [API Usage Guide](api_usage.md) — Detailed API documentation
-- [Configuration File Usage](config_file_usage.md) — How to structure builder configs
-- [Test Group Configuration Usage](test_group_config_usage.md) — Sweep parameter expansion
+- [Configuration File Usage](config_file_usage.md) — How to structure builder and group configs
 - [Backend Usage](backend_usage.md) — Backend-specific setup and components
 

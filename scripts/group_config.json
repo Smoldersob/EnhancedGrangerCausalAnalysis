@@ -1,6 +1,7 @@
 {
   "base_config": {
     "backend": "tensorflow",
+    "compute_device": "gpu",
     "x_scaler": "standard",
     "y_scaler": "standard",
     "causes": ["x1", "x2"],
@@ -14,18 +15,7 @@
       "type": "ic",
       "use_bic": true
     },
-    "relations": [
-      {
-        "effect": "y",
-        "cause": "x2",
-        "zero": true
-      },
-      {
-        "effect": "y",
-        "cause": "x1",
-        "min_abs_sum": 0.05
-      }
-    ],
+    "relations": "./group_relations.json",
     "callbacks": [
       {
         "type": "early_stopping",
