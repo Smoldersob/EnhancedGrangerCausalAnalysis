@@ -3,7 +3,7 @@ from __future__ import annotations
 import importlib
 from typing import Any
 
-from .__version__ import __version__
+__version__ = '2.2.0'
 
 _LAZY_SUBMODULES = {
     "api",

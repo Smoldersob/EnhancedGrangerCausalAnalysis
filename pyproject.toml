@@ -30,7 +30,7 @@ dev = ["pytest"]
 include-package-data = true
 
 [tool.setuptools.dynamic]
-version = { attr = "__version__.__version__" }
+version = { attr = "__version__" }
 
 [tool.setuptools.packages.find]
 where = [".."]
