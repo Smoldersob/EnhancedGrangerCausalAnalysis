@@ -1,0 +1,42 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "complex_granger_analysis"
+dynamic = ["version"]
+description = "Granger-causality workflows for multivariate time series"
+readme = "README.md"
+requires-python = ">=3.10"
+license = { file = "LICENSE.md" }
+authors = [
+  { name = "Smoldersob" }
+]
+dependencies = [
+  "numpy",
+  "pandas",
+  "statsmodels",
+  "scikit-learn",
+  "scipy",
+  "joblib",
+]
+
+[project.optional-dependencies]
+torch = ["torch"]
+tensorflow = ["tensorflow"]
+dev = ["pytest"]
+
+[tool.setuptools]
+include-package-data = true
+
+[tool.setuptools.dynamic]
+version = { attr = "__version__.__version__" }
+
+[tool.setuptools.packages.find]
+where = [".."]
+include = ["complex_granger_analysis*"]
+exclude = ["complex_granger_analysis.tests*"]
+
+[tool.setuptools.package-data]
+complex_granger_analysis = ["py.typed"]
+"complex_granger_analysis.scripts" = ["*.json", "*.csv"]

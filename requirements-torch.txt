@@ -1,9 +1,12 @@
-numpy
-pandas
-importlib
-matplotlib
-statsmodels
-scikit-learn
-scipy
-joblib
-torch
+numpy==2.3.5
+pandas==2.3.3
+scikit-learn==1.8.0
+statsmodels==0.14.6
+scipy==1.16.3
+joblib==1.5.3
+
+# PyTorch stack (use plain package names so pip/conda can select appropriate build)
+torch==2.9.1
+torchvision==0.24.1
+torch_tb_profiler==0.4.3
+triton==3.5.1

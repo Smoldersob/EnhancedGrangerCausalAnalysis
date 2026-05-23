@@ -1,16 +1,9 @@
 import numpy as np
 import pandas as pd
-import sys
-from pathlib import Path
 
-# Allow running this file directly from its nested location
-PROJECT_ROOT = Path(__file__).resolve().parents[2]
-if str(PROJECT_ROOT) not in sys.path:
-    sys.path.insert(0, str(PROJECT_ROOT))
-
-from complex_granger_analysis.core.lag_config import LagConfiguration
-from complex_granger_analysis.preprocessing.lag.lag_engine import LagEngine
-from complex_granger_analysis.preprocessing.lag.lag_selectors import BaseLagSelector
+from ..core.lag_config import LagConfiguration
+from ..preprocessing.lag.lag_engine import LagEngine
+from ..preprocessing.lag.lag_selectors import BaseLagSelector
 
 
 class FixedMatrixSelector(BaseLagSelector):
@@ -59,12 +52,11 @@ def _run_engine(custom_lags=None, custom_pair_lags=None):
     engine = LagEngine(config=cfg, selector=selector)
 
     # Always use the same variable order in all tests.
-    df = pd.DataFrame(
-        {
-            "x1": np.linspace(0.0, 1.0, 20),
-            "x2": np.linspace(1.0, 0.0, 20),
-        }
-    )
+    # Construct DataFrame via column stack to avoid pandas StringArray edge-cases
+    x1 = np.linspace(0.0, 1.0, 20)
+    x2 = np.linspace(1.0, 0.0, 20)
+    df = pd.DataFrame(np.column_stack([x1, x2]))
+    df.columns = pd.Index(["x1", "x2"], dtype=object)
     engine.prepare([df], effects=["x1", "x2"])
     return engine
 

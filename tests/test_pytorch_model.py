@@ -1,4 +1,3 @@
-import sys
 import traceback
 from tempfile import TemporaryDirectory
 from pathlib import Path
@@ -6,24 +5,17 @@ from importlib.util import find_spec
 
 import numpy as np
 
-# Allow running this file directly from its nested location, e.g.:
-# python complex_granger_analysis/tests/test_pytorch_model.py
-PROJECT_ROOT = Path(__file__).resolve().parents[2]
-if str(PROJECT_ROOT) not in sys.path:
-    sys.path.insert(0, str(PROJECT_ROOT))
-
-from complex_granger_analysis.core.exceptions import TrainingError
-from complex_granger_analysis.backends.callbacks import (
+from ..core.exceptions import TrainingError
+from ..backends.callbacks import (
     ConvergenceCheck,
     EarlyStopping,
     ReduceLearningRate,
     TorchTensorBoardCallback,
 )
-from complex_granger_analysis.backends.models.pytorch_model import PyTorchGrangerModel
+from ..backends.models.pytorch_model import PyTorchGrangerModel
 
 
-class SkipTest(Exception):
-    """Local skip marker for optional runtime dependencies."""
+from unittest import SkipTest
 
 
 def _assert_raises(exc_type, fn, *args, **kwargs):
@@ -41,8 +33,13 @@ def _assert_raises(exc_type, fn, *args, **kwargs):
 
 
 def _require_torch():
-    if find_spec("torch") is None:
-        raise SkipTest("PyTorch is not installed")
+    # Try importing torch to detect runtime import failures (some installs
+    # have import-time runtime errors). Skip if import fails.
+    try:
+        import importlib
+        importlib.import_module("torch")
+    except Exception:
+        raise SkipTest("PyTorch is not installed or failed to import")
 
 
 def test_pytorch_model_initialize_fit_and_omit_variables():
@@ -96,7 +93,11 @@ def test_pytorch_model_hyperoptimize_returns_message():
 
     assert isinstance(result, dict)
     assert "message" in result
-    assert "nie posiada parametrów do hiperoptymalizacji" in result["message"]
+    # Accept either the old Polish message or the current English message.
+    assert (
+        "nie posiada parametrów do hiperoptymalizacji" in result["message"]
+        or "does not have parameters" in result["message"]
+    )
 
 
 def test_pytorch_model_supports_custom_optimizer_and_loss_strings():

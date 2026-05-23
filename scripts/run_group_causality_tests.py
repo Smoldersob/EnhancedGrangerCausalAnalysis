@@ -44,14 +44,10 @@ from typing import Any, Dict, List, Tuple
 
 import pandas as pd
 
-REPO_ROOT = Path(__file__).resolve().parents[2]
-if str(REPO_ROOT) not in sys.path:
-    sys.path.insert(0, str(REPO_ROOT))
-
-from complex_granger_analysis.api import MultitaskGrangerBuilder, TestGroupConfigIterator
-from complex_granger_analysis.api.config_loader import BuilderConfigLoader
-from complex_granger_analysis.utilities.metric_calculator import MetricCalculator
-from complex_granger_analysis import initializers as init_initializers
+from ..api import MultitaskGrangerBuilder, TestGroupConfigIterator
+from ..api.config_loader import BuilderConfigLoader
+from ..utilities.metric_calculator import MetricCalculator
+from .. import initializers as init_initializers
 
 
 def _sanitize_token(value: Any) -> str:

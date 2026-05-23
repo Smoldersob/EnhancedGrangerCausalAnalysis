@@ -1,18 +1,10 @@
-import sys
 import traceback
-from pathlib import Path
-
-# Allow running this file directly from its nested location, e.g.:
-# python complex_granger_analysis/tests/tests_lag_selectors.py
-PROJECT_ROOT = Path(__file__).resolve().parents[2]
-if str(PROJECT_ROOT) not in sys.path:
-    sys.path.insert(0, str(PROJECT_ROOT))
 
 import numpy as np
 import pandas as pd
-from complex_granger_analysis.core.lag_config import LagConfiguration
-from complex_granger_analysis.preprocessing.lag.lag_selectors import ICLagSelector, CVLagSelector
-from complex_granger_analysis.preprocessing.lag.lag_engine import LagEngine
+from ..core.lag_config import LagConfiguration
+from ..preprocessing.lag.lag_selectors import ICLagSelector, CVLagSelector
+from ..preprocessing.lag.lag_engine import LagEngine
 
 # ===========================================================================
 # Tests for the delta_min and backward pruning mechanism

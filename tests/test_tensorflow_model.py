@@ -1,34 +1,31 @@
 import os
-import sys
 import traceback
 from pathlib import Path
 from importlib.util import find_spec
 
 import numpy as np
 
+
 # Keras backend selection should happen before TensorFlow/Keras imports.
 os.environ["KERAS_BACKEND"] = "tensorflow"
 
-# Allow running this file directly from its nested location, e.g.:
-# python complex_granger_analysis/tests/test_tensorflow_model.py
-PROJECT_ROOT = Path(__file__).resolve().parents[2]
-if str(PROJECT_ROOT) not in sys.path:
-    sys.path.insert(0, str(PROJECT_ROOT))
-
-from complex_granger_analysis.core.exceptions import TrainingError
-from complex_granger_analysis.backends.models.tensorflow_model import TensorFlowGrangerModel
-from complex_granger_analysis.backends.regularizers.tensorflow_regularizers import (
+from ..core.exceptions import TrainingError
+from ..backends.models.tensorflow_model import TensorFlowGrangerModel
+from ..backends.regularizers.tensorflow_regularizers import (
     KerasL1Regularizer,
     KerasLagDependentL1Regularizer,
 )
-from complex_granger_analysis.backends.constraints import (
+from ..backends.constraints import (
     build_tensorflow_constraint_from_relations,
     process_user_relations,
 )
 
 
-class SkipTest(Exception):
-    """Local skip marker for optional runtime dependencies."""
+import unittest
+
+# Use unittest.SkipTest so both direct runs and pytest record optional-backend
+# tests as skipped without failing collection.
+SkipTest = unittest.SkipTest
 
 
 def _assert_raises(exc_type, fn, *args, **kwargs):
@@ -311,7 +308,7 @@ def test_tensorflow_constraint_rejects_invalid_kernel_shape():
     _require_tensorflow()
 
     import tensorflow as tf
-    from complex_granger_analysis.core.exceptions import ConstraintConfigurationError
+    from ..core.exceptions import ConstraintConfigurationError
 
     constraint = build_tensorflow_constraint_from_relations(
         relations={

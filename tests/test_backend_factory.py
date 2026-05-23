@@ -1,19 +1,10 @@
-import sys
 import traceback
-from pathlib import Path
 from importlib.util import find_spec
 
 import numpy as np
 
-PROJECT_ROOT = Path(__file__).resolve().parents[2]
-if str(PROJECT_ROOT) not in sys.path:
-    sys.path.insert(0, str(PROJECT_ROOT))
-
-from complex_granger_analysis.backends import BackendFactory
-
-
-class SkipTest(Exception):
-    pass
+from ..backends import BackendFactory
+from unittest import SkipTest
 
 
 def test_backend_factory_lists_available_backends():
@@ -33,10 +24,18 @@ def test_backend_factory_tensorflow_strategy():
 
     assert strategy is not None
     assert strategy.is_available()
-
-    hyperparams = strategy.get_model_hyperparameters()
-    assert "epochs" in hyperparams
-    assert "batch_size" in hyperparams
+    # Strategy interface no longer exposes `get_model_hyperparameters`.
+    # Verify the strategy can build a model with expected training kwargs instead.
+    model = strategy.build_model(
+        n_features=4,
+        n_outputs=1,
+        regularizer=None,
+        constraint=None,
+        scaler=None,
+        epochs=2,
+        batch_size=8,
+    )
+    assert model is not None
 
 
 def test_backend_factory_pytorch_strategy():
@@ -48,10 +47,17 @@ def test_backend_factory_pytorch_strategy():
 
     assert strategy is not None
     assert strategy.is_available()
-
-    hyperparams = strategy.get_model_hyperparameters()
-    assert "epochs" in hyperparams
-    assert "learning_rate" in hyperparams
+    # Verify strategy can build a model accepting standard training kwargs.
+    model = strategy.build_model(
+        n_features=4,
+        n_outputs=1,
+        regularizer=None,
+        constraint=None,
+        scaler=None,
+        epochs=2,
+        learning_rate=0.01,
+    )
+    assert model is not None
 
 
 def test_backend_factory_sklearn_strategy():
@@ -63,9 +69,16 @@ def test_backend_factory_sklearn_strategy():
 
     assert strategy is not None
     assert strategy.is_available()
-
-    hyperparams = strategy.get_model_hyperparameters()
-    assert "max_iter" in hyperparams
+    # Verify strategy can build a sklearn-compatible model using max_iter.
+    model = strategy.build_model(
+        n_features=3,
+        n_outputs=1,
+        regularizer=None,
+        constraint=None,
+        scaler=None,
+        max_iter=10,
+    )
+    assert model is not None
 
 
 def test_backend_factory_get_preferred_backend():

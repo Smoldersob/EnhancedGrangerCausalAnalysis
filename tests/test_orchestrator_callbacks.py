@@ -1,23 +1,16 @@
-import sys
 import traceback
-from pathlib import Path
 
 import numpy as np
 import pandas as pd
 
-PROJECT_ROOT = Path(__file__).resolve().parents[2]
-if str(PROJECT_ROOT) not in sys.path:
-    sys.path.insert(0, str(PROJECT_ROOT))
-
-import complex_granger_analysis.api.orchestrator as orchestrator_module
-from complex_granger_analysis.api.orchestrator import MultiTaskGrangerAPI
-from complex_granger_analysis.core.lag_config import LagConfiguration
-from complex_granger_analysis.preprocessing.scaling import _BaseScaler
-from complex_granger_analysis.preprocessing.stationarity import StationarityTransformer
+from ..api import orchestrator as orchestrator_module
+from ..api.orchestrator import MultiTaskGrangerAPI
+from ..core.lag_config import LagConfiguration
+from ..preprocessing.scaling import _BaseScaler
+from ..preprocessing.stationarity import StationarityTransformer
 
 
-class SkipTest(Exception):
-    pass
+from unittest import SkipTest
 
 
 class _DummyCallback:
@@ -116,12 +109,10 @@ def test_orchestrator_clones_callbacks_with_run_names_for_base_and_references():
     try:
         api = MultiTaskGrangerAPI(backend="dummy")
 
-        data = pd.DataFrame(
-            {
-                "x": np.linspace(0.0, 1.0, 20),
-                "y": np.linspace(1.0, 0.0, 20),
-            }
-        )
+        x = np.linspace(0.0, 1.0, 20)
+        y = np.linspace(1.0, 0.0, 20)
+        data = pd.DataFrame(np.column_stack([x, y]))
+        data.columns = pd.Index(("x", "y"), dtype=object)
 
         api.fit(
             data=data,
@@ -147,12 +138,10 @@ def test_orchestrator_uses_default_stationarity_and_reuses_prepared_data_explici
     orchestrator_module.BackendFactory.get_strategy = staticmethod(lambda backend: _DummyStrategy())
 
     try:
-        data = pd.DataFrame(
-            {
-                "x": np.linspace(0.0, 1.0, 20),
-                "y": np.linspace(1.0, 0.0, 20),
-            }
-        )
+        x = np.linspace(0.0, 1.0, 20)
+        y = np.linspace(1.0, 0.0, 20)
+        data = pd.DataFrame(np.column_stack([x, y]))
+        data.columns = pd.Index(("x", "y"), dtype=object)
 
         api_default = MultiTaskGrangerAPI(backend="dummy")
         assert isinstance(api_default._stationarity_transformer, StationarityTransformer)
@@ -190,12 +179,10 @@ def test_orchestrator_accepts_custom_scaler_class():
 
     try:
         api = MultiTaskGrangerAPI(backend="dummy")
-        data = pd.DataFrame(
-            {
-                "x": np.linspace(0.0, 1.0, 20),
-                "y": np.linspace(1.0, 0.0, 20),
-            }
-        )
+        x = np.linspace(0.0, 1.0, 20)
+        y = np.linspace(1.0, 0.0, 20)
+        data = pd.DataFrame(np.column_stack([x, y]))
+        data.columns = pd.Index(("x", "y"), dtype=object)
 
         prepared = api._prepare_data(
             data=data,

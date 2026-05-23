@@ -1,16 +1,10 @@
-import sys
 import traceback
-from pathlib import Path
 from importlib.util import find_spec
 
 import numpy as np
 
-PROJECT_ROOT = Path(__file__).resolve().parents[2]
-if str(PROJECT_ROOT) not in sys.path:
-    sys.path.insert(0, str(PROJECT_ROOT))
-
 if find_spec("pandas") is not None:
-    from complex_granger_analysis.results.granger_results import GrangerAnalysisResults
+    from ..results.granger_results import GrangerAnalysisResults
 else:
     GrangerAnalysisResults = None
 

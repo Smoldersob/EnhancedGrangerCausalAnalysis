@@ -1,22 +1,14 @@
-import sys
 import traceback
-from pathlib import Path
 
 import numpy as np
 import pandas as pd
 
-# Allow running this file directly from its nested location, e.g.:
-# python complex_granger_analysis/tests/stationarity_mech_tests.py
-PROJECT_ROOT = Path(__file__).resolve().parents[2]
-if str(PROJECT_ROOT) not in sys.path:
-    sys.path.insert(0, str(PROJECT_ROOT))
-
-from complex_granger_analysis.preprocessing.stationarity.tests import (
+from ..preprocessing.stationarity.tests import (
     apply_differencing,
     static_adfuller_order,
     static_kpss_order,
 )
-from complex_granger_analysis.preprocessing.stationarity.transformer import (
+from ..preprocessing.stationarity.transformer import (
     StationarityTransformer,
 )
 

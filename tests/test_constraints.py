@@ -1,27 +1,21 @@
-import sys
 import traceback
-from pathlib import Path
 from importlib.util import find_spec
 
 import numpy as np
 
-PROJECT_ROOT = Path(__file__).resolve().parents[2]
-if str(PROJECT_ROOT) not in sys.path:
-    sys.path.insert(0, str(PROJECT_ROOT))
-
-from complex_granger_analysis.backends.constraints import (
+from ..backends.constraints import (
     build_numpy_constraint_from_relations,
 )
 
 if find_spec("torch") is not None:
-    from complex_granger_analysis.backends.constraints import (
+    from ..backends.constraints import (
         build_pytorch_constraint_from_relations,
     )
 else:
     build_pytorch_constraint_from_relations = None
 
 if find_spec("sklearn") is not None:
-    from complex_granger_analysis.backends.models.scikit_model import ScikitConstrainedGrangerModel
+    from ..backends.models.scikit_model import ScikitConstrainedGrangerModel
 else:
     ScikitConstrainedGrangerModel = None
 
@@ -98,7 +92,7 @@ def test_pytorch_constraint_enforces_mask_and_min_abs_sum_and_model_compatibilit
     _require_torch()
 
     import torch
-    from complex_granger_analysis.backends.models.pytorch_model import PyTorchGrangerModel
+    from ..backends.models.pytorch_model import PyTorchGrangerModel
 
     constraint = build_pytorch_constraint_from_relations(
         relations={

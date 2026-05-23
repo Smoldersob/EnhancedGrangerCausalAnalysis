@@ -1,28 +1,25 @@
-import os
-import sys
 import traceback
-from pathlib import Path
 from importlib.util import find_spec
 
 import numpy as np
 
-PROJECT_ROOT = Path(__file__).resolve().parents[2]
-if str(PROJECT_ROOT) not in sys.path:
-    sys.path.insert(0, str(PROJECT_ROOT))
-
-from complex_granger_analysis.backends.regularizers.numpy_regularizers import (
+from ..backends.regularizers.numpy_regularizers import (
     NumpyL1Regularizer,
     NumpyLagDependentL1Regularizer,
 )
 
 
-class SkipTest(Exception):
-    """Local skip marker for optional runtime dependencies."""
+from unittest import SkipTest
 
 
 def _require_torch():
-    if find_spec("torch") is None:
-        raise SkipTest("PyTorch is not installed")
+    # Try importing torch to detect runtime import failures (some installs raise
+    # at import time even if the package metadata is present). Skip if import fails.
+    try:
+        import importlib
+        importlib.import_module("torch")
+    except Exception:
+        raise SkipTest("PyTorch is not installed or failed to import")
 
 
 def test_numpy_l1_regularizer_returns_penalty_and_gradient():
@@ -88,7 +85,7 @@ def test_pytorch_regularizers_basic_behavior():
     _require_torch()
 
     import torch
-    from complex_granger_analysis.backends.regularizers.pytorch_regularizers import (
+    from ..backends.regularizers.pytorch_regularizers import (
         PyTorchL1Regularizer,
         PyTorchLagDependentL1Regularizer,
     )
@@ -119,7 +116,7 @@ def test_pytorch_lag_dependent_regularizer_shifted_lag_window_uses_absolute_lag_
     _require_torch()
 
     import torch
-    from complex_granger_analysis.backends.regularizers.pytorch_regularizers import (
+    from ..backends.regularizers.pytorch_regularizers import (
         PyTorchLagDependentL1Regularizer,
     )
 

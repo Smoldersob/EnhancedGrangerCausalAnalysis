@@ -7,19 +7,13 @@ Wymaga:
 - custom_lags zmienia wymiary zmiennych
 - maska zmienia się odpowiednio
 """
-import sys
-from pathlib import Path
-
-# Allow running this file directly from its nested location
-PROJECT_ROOT = Path(__file__).resolve().parents[2]
-if str(PROJECT_ROOT) not in sys.path:
-    sys.path.insert(0, str(PROJECT_ROOT))
 
 import numpy as np
 import pandas as pd
-from complex_granger_analysis.preprocessing.lag.lag_selectors import ICLagSelector
-from complex_granger_analysis.core.lag_config import LagConfiguration
-from complex_granger_analysis.preprocessing.lag.lag_engine import LagEngine
+
+from ..core.lag_config import LagConfiguration
+from ..preprocessing.lag.lag_engine import LagEngine
+from ..preprocessing.lag.lag_selectors import ICLagSelector
 
 
 def _col_offsets_from_lag_order(engine: LagEngine) -> np.ndarray:

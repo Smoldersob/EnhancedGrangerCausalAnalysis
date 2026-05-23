@@ -1,0 +1,1 @@
+"""Packaged script entry points and bundled config/data files."""

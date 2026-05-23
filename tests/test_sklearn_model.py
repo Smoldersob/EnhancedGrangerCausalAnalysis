@@ -1,17 +1,11 @@
-import sys
 import traceback
-from pathlib import Path
 
 import numpy as np
 
 # Allow running this file directly from its nested location, e.g.:
 # python complex_granger_analysis/tests/test_sklearn_model.py
-PROJECT_ROOT = Path(__file__).resolve().parents[2]
-if str(PROJECT_ROOT) not in sys.path:
-    sys.path.insert(0, str(PROJECT_ROOT))
-
-from complex_granger_analysis.core.exceptions import TrainingError
-from complex_granger_analysis.backends.models.scikit_model import SklearnGrangerModel
+from ..core.exceptions import TrainingError
+from ..backends.models.scikit_model import ScikitConstrainedGrangerModel
 
 
 def _assert_raises(exc_type, fn, *args, **kwargs):
@@ -34,7 +28,7 @@ def test_sklearn_model_initialize_fit_and_omit_variables():
     W = rng.normal(size=(8, 2)).astype(np.float64)
     y = X @ W
 
-    model = SklearnGrangerModel(fit_intercept=True)
+    model = ScikitConstrainedGrangerModel(fit_intercept=True)
     model.initialize(X, lags=3, targets=y)
 
     # Check initial mask is all ones
@@ -58,18 +52,23 @@ def test_sklearn_model_initialize_fit_and_omit_variables():
 
 def test_sklearn_model_initialize_requires_targets():
     X = np.random.randn(15, 6)
-    model = SklearnGrangerModel()
+    model = ScikitConstrainedGrangerModel()
 
     _assert_raises(TrainingError, model.initialize, X, 2)
 
 
 def test_sklearn_model_hyperoptimize_returns_message():
-    model = SklearnGrangerModel()
+    model = ScikitConstrainedGrangerModel()
     result = model.hyperoptimize({"alpha": [0.1, 1.0]}, n_trials=5)
 
     assert isinstance(result, dict)
     assert "message" in result
-    assert "nie posiada parametrów do hiperoptymalizacji" in result["message"]
+    # Accept either the original Polish message or the current English message.
+    msg = result["message"].lower()
+    assert (
+        "nie posiada parametrów do hiperoptymalizacji" in msg
+        or "does not have parameters for hyperoptimization" in msg
+    )
 
 
 def test_sklearn_model_set_and_get_weights():
@@ -77,7 +76,7 @@ def test_sklearn_model_set_and_get_weights():
     X = rng.normal(size=(30, 4)).astype(np.float64)
     y = rng.normal(size=(30, 1)).astype(np.float64)
 
-    model = SklearnGrangerModel()
+    model = ScikitConstrainedGrangerModel()
     model.initialize(X, lags=1, targets=y)
     model.fit()
 

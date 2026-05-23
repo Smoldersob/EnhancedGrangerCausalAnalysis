@@ -1,29 +1,32 @@
-import sys
 import traceback
-from pathlib import Path
 from importlib.util import find_spec
 
 import numpy as np
 import pandas as pd
 
-PROJECT_ROOT = Path(__file__).resolve().parents[2]
-if str(PROJECT_ROOT) not in sys.path:
-    sys.path.insert(0, str(PROJECT_ROOT))
-
-from complex_granger_analysis.api.orchestrator import MultiTaskGrangerAPI
-from complex_granger_analysis.core.lag_config import LagConfiguration
-from complex_granger_analysis.preprocessing.stationarity import StationarityTransformer
+from ..api.orchestrator import MultiTaskGrangerAPI
+from ..core.lag_config import LagConfiguration
+from ..preprocessing.stationarity import StationarityTransformer
 
 
-class SkipTest(Exception):
-    pass
+from unittest import SkipTest
 
 
 def _require_pytorch_stack() -> None:
-    if find_spec("torch") is None:
-        raise SkipTest("PyTorch is not installed")
-    if find_spec("pandas") is None:
-        raise SkipTest("pandas is not installed")
+    # Attempt actual imports to detect runtime import errors (some torch builds
+    # raise during import even when the package is present). Skip the test if
+    # import fails for any reason.
+    try:
+        import importlib
+        importlib.import_module("torch")
+    except Exception:
+        raise SkipTest("PyTorch is not installed or failed to import")
+
+    try:
+        import importlib
+        importlib.import_module("pandas")
+    except Exception:
+        raise SkipTest("pandas is not installed or failed to import")
 
 
 def _make_demo_data(n_rows: int = 120) -> pd.DataFrame:
@@ -35,7 +38,9 @@ def _make_demo_data(n_rows: int = 120) -> pd.DataFrame:
         # Lightweight causal structure: x(t-1), x(t-2) influence y(t)
         y[t] = 0.6 * x[t - 1] - 0.25 * x[t - 2] + 0.05 * rng.normal()
 
-    return pd.DataFrame({"x": x, "y": y})
+    df = pd.DataFrame(np.column_stack([x, y]), dtype=np.float64, columns=pd.Index(("x", "y")))
+    df.columns = ("x", "y")
+    return df
 
 
 def test_pytorch_regularization_hyperopt_runs_in_orchestrator():
