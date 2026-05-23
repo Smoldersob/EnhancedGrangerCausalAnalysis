@@ -15,7 +15,9 @@ It can:
 - validate and normalize backend aliases,
 - preserve backend-specific callback specs for later resolution,
 - normalize relation-based constraint declarations into the `relations` mapping,
-- move backend defaults from a backend spec into `model_config` when present.
+- move backend defaults from a backend spec into `model_config` when present,
+- normalize `initializer` strings to initializer classes (e.g., `"ols"`, `"zeros"`, `"random_normal"`),
+- normalize `compute_device` strings to backend-specific device configuration.
 
 The loader also accepts `relations` as a file path when you want to keep constraint rules in a separate JSON/YAML file.
 
@@ -41,6 +43,40 @@ or
 ```
 
 The backend spec form is useful when you want to keep loader-level settings close to the config file while still letting the backend strategy build the concrete runtime objects.
+
+## Variable Selection (causes, effects, tested_causes)
+
+Three optional fields control which variables are used in the analysis:
+
+- **`causes`** — The full set of predictor variables available to the model. If omitted or set to `null`, all columns in the data are used.
+- **`effects`** — The output variables to predict. If omitted or set to `null`, all columns in the data are used.
+- **`tested_causes`** — A subset of `causes` for which Granger causality is formally tested (via the reference loop). If omitted or set to `null`, defaults to the value of `causes`.
+
+### Behavior when omitted or `null`
+
+```
+causes=null       → all columns
+effects=null      → all columns
+tested_causes=null → defaults to causes (which could be all columns if causes=null)
+```
+
+This distinction is useful when you want the model to see all available context (full `causes`) but test causality only for a specific subset (`tested_causes`), saving computation while preserving model accuracy.
+
+### Example with variable selection
+
+```json
+{
+  "causes": ["u", "f1", "f2", "x1", "x2"],
+  "effects": ["x3", "x4"],
+  "tested_causes": ["f1", "f2"],
+  "model_config": { "epochs": 50 }
+}
+```
+
+In this case:
+- The model uses 5 input variables: `u`, `f1`, `f2`, `x1`, `x2`.
+- It predicts 2 outputs: `x3`, `x4`.
+- Causality is tested only for `f1→x3`, `f1→x4`, `f2→x3`, `f2→x4`, saving time on the reference loop for `u`, `x1`, `x2`.
 
 ## Example configuration
 
@@ -122,7 +158,7 @@ Important fields:
 - `sweep.param_names` uses dotted keys for nested values.
 - `sweep.cases` must match the order and length of `param_names`.
 
-The group iterator expands the file into concrete builder configs and then normalizes them.
+The group iterator expands the file into specific builder configs and then normalizes them.
 
 ## What can and cannot be swept
 
@@ -145,11 +181,26 @@ You can sweep these fields:
   - Supported: yes.
   - Examples: `lag_config.max_lag`, `lag_config.use_lag_zero`.
 
+- `causes`, `effects`, `tested_causes`
+  - Supported: yes.
+  - You can sweep these as lists of variable names.
+  - Examples: `causes: ["u", "f1", "x1"]`, `effects: ["x3"]`, `tested_causes: ["f1"]`.
+  - Defaults: if not specified or set to `null`, `causes` and `effects` default to all columns in data; `tested_causes` defaults to `causes`.
+  - Useful for comparing the impact of different variable subsets on causality results without retraining on multiple datasets.
+
 - `compute_device`
   - Supported: yes.
   - Examples: `compute_device: "cpu"`, `compute_device: "gpu"`, `compute_device: "auto"`.
   - For PyTorch this is forwarded to `model_config.device`; for TensorFlow it maps to the runtime CPU/GPU environment flags.
   - `auto` is supported: it leaves backend defaults in place, so PyTorch auto-selects CUDA when available and TensorFlow uses its normal runtime device selection.
+
+- `initializer`
+  - Supported: yes.
+  - String specs are automatically normalized to initializer classes via `BuilderConfigLoader`.
+  - Supported strings (case-insensitive): `"ols"`, `"zeros"`, `"random_normal"` and their aliases (`"olsinitializer"`, `"zero"`, `"zerosinitializer"`, `"randomnormal"`, `"random"`, `"randomnormalinitializer"`).
+  - Examples: `initializer: "ols"`, `initializer: "zeros"`, `initializer: "random_normal"`.
+  - You can also pass an initializer object/class directly from Python code (already resolved).
+  - `null` is accepted and means no custom weight initialization; each backend uses its defaults (PyTorch: Kaiming, TensorFlow: Glorot, scikit-learn: zeros).
 
 - `relations`
   - Supported: yes.
@@ -192,11 +243,6 @@ You can sweep these fields:
   - Not supported: `callbacks.0.patience`, `relations.0.min_abs_sum`.
   - Use whole-object/list replacement in `cases` values.
 
-- `initializer` as plain string in generic iterator/loader flow is not normalized automatically.
-  - The orchestrator expects callable/class initializer.
-  - In `scripts/run_group_causality_tests.py`, there is an additional script-level mapping from known strings (`ols`, `zeros`, `random...`) to initializer classes.
-  - Outside that script-level mapping, pass initializer object/class directly from Python code (not JSON string).
-
 ### Practical recommendation
 
 For sweep dimensions with many list/object internals (`callbacks`, complex `relations`), treat each case value as a full replacement object.
@@ -223,9 +269,9 @@ Then pass the normalized mapping to `MultitaskGrangerBuilder.from_config(...)`.
 
 ## Constraints
 
-Constraints dla analiz Grangera podaje się przez `relations`. To jest mapowanie par `(effect, cause)` na reguły ograniczeń, a loader dopuszcza także JSON-friendly zapis stringowy lub listę obiektów.
+Constraints for Granger analysis are specified via `relations`. This is a mapping of `(effect, cause)` pairs to constraint rules, and the loader also accepts JSON-friendly string notation or a list of objects.
 
-Przykłady:
+Examples:
 
 ```json
 {
@@ -236,7 +282,7 @@ Przykłady:
 }
 ```
 
-oraz:
+and:
 
 ```json
 {
@@ -247,7 +293,7 @@ oraz:
 }
 ```
 
-To jest spójne z opisem w [components loading](components_loading.md): `relations` zawiera reguły, a backend strategy zamienia je na backend-native constraint object.
+This is consistent with the description in [components loading](components_loading.md): `relations` contains the rules, and the backend strategy translates them into backend-native constraint objects.
 
 ## `reuse_data`
 

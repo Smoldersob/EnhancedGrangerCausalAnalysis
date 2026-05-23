@@ -7,7 +7,7 @@ import pandas as pd
 
 # Allow running this file directly from its nested location
 from ..api import BuilderConfigLoader, TestGroupConfigIterator
-from ..api.builder import MultitaskGrangerBuilder
+from ..api.builder import MultiTaskGrangerBuilder
 from ..api import orchestrator as orchestrator_module
 from ..core.lag_config import LagConfiguration
 from ..preprocessing.lag.lag_selectors import ICLagSelector
@@ -37,39 +37,6 @@ def test_builder_config_loader_json_and_lag_config_conversion():
         assert loaded["model_config"]["epochs"] == 10
 
 
-def test_test_group_iterator_next_and_has_next():
-    template_path = Path(__file__).with_name("group_config.json")
-    it = TestGroupConfigIterator.from_file(template_path)
-
-    assert it.has_next() is True
-    c1 = it.next()
-    assert c1["backend"] == "tensorflow"
-    assert c1["reuse_data"] is True
-    assert c1["model_config"]["optimizer"] == "adam"
-    assert c1["model_config"]["learning_rate"] == 0.001
-    assert c1["model_config"]["epochs"] == 5
-    assert isinstance(c1["lag_config"], LagConfiguration)
-    assert c1["lag_config"].max_lag == 8
-
-    assert it.has_next() is True
-    c2 = it.next()
-    assert c2["model_config"]["optimizer"] == "adam"
-    assert c2["model_config"]["learning_rate"] == 0.0005
-    assert c2["model_config"]["epochs"] == 5
-    assert isinstance(c2["lag_config"], LagConfiguration)
-    assert c2["lag_config"].max_lag == 10
-
-    assert it.has_next() is True
-    c3 = it.next()
-    assert c3["model_config"]["optimizer"] == "adam"
-    assert c3["model_config"]["learning_rate"] == 0.0002
-    assert c3["model_config"]["epochs"] == 5
-    assert isinstance(c3["lag_config"], LagConfiguration)
-    assert c3["lag_config"].max_lag == 12
-
-    assert it.has_next() is False
-
-
 def test_test_group_iterator_without_sweep_produces_one_config():
     group = {
         "base_config": {
@@ -84,13 +51,13 @@ def test_test_group_iterator_without_sweep_produces_one_config():
         p.write_text(json.dumps(group), encoding="utf-8")
 
         it = TestGroupConfigIterator.from_file(p)
+        configs = list(it)
 
-        assert it.has_next() is True
-        cfg = it.next()
+        assert len(configs) == 1
+        cfg = configs[0]
         assert cfg["backend"] == "pytorch"
         assert isinstance(cfg["lag_config"], LagConfiguration)
         assert cfg["lag_config"].max_lag == 6
-        assert it.has_next() is False
 
 
 def test_test_group_iterator_resolves_relations_from_file_path():
@@ -113,8 +80,10 @@ def test_test_group_iterator_resolves_relations_from_file_path():
         rel_path.write_text(json.dumps(relations), encoding="utf-8")
 
         it = TestGroupConfigIterator.from_file(group_path)
-        cfg = it.next()
+        configs = list(it)
 
+    assert len(configs) == 1
+    cfg = configs[0]
     assert ("y", "x1") in cfg["relations"]
     assert ("y", "x2") in cfg["relations"]
     assert cfg["relations"][("y", "x1")]["zero"] is True
@@ -294,7 +263,7 @@ def test_builder_config_loader_and_builder_orchestrator_integration_with_backend
                 }
             )
 
-            out = MultitaskGrangerBuilder().from_file(p).data(df).fit()
+            out = MultiTaskGrangerBuilder().from_file(p).data(df).fit()
 
         assert out is not None
         assert len(strategy.build_calls) >= 2
@@ -307,11 +276,48 @@ def test_builder_config_loader_and_builder_orchestrator_integration_with_backend
         orchestrator_module.BackendFactory.get_strategy = old_get_strategy
 
 
+def test_test_group_iterator_implements_iterator_protocol():
+    """Test that TestGroupConfigIterator implements the Python iterator protocol."""
+    template_path = Path(__file__).with_name("group_config.json")
+    it = TestGroupConfigIterator.from_file(template_path)
+
+    # Test __iter__ returns self
+    assert iter(it) is it
+
+    # Test __next__ works in for loop
+    configs = []
+    for cfg in it:
+        configs.append(cfg)
+        assert isinstance(cfg, dict)
+        assert "backend" in cfg
+        assert "lag_config" in cfg
+
+    # Should have collected 3 configs from sweep
+    assert len(configs) == 3
+
+    # Test that iteration can be done multiple times (new iterator)
+    it2 = TestGroupConfigIterator.from_file(template_path)
+    count = 0
+    for _ in it2:
+        count += 1
+    assert count == 3
+
+    # Test StopIteration is raised when exhausted
+    it3 = TestGroupConfigIterator.from_file(template_path)
+    for _ in it3:
+        pass
+    try:
+        next(it3)
+        assert False, "Should have raised StopIteration"
+    except StopIteration:
+        pass
+
+
 if __name__ == "__main__":
     tests = [
         test_builder_config_loader_json_and_lag_config_conversion,
-        test_test_group_iterator_next_and_has_next,
         test_test_group_iterator_without_sweep_produces_one_config,
+        test_test_group_iterator_implements_iterator_protocol,
         test_builder_config_loader_keeps_callback_specs_for_backend_resolution,
         test_builder_config_loader_rejects_unsupported_types,
         test_builder_config_loader_keeps_tensorflow_callback_specs_raw_for_backend_resolution,

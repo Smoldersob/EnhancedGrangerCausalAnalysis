@@ -40,6 +40,14 @@ output = api.fit(
 ) -> MultitaskGrangerOutput
 ```
 
+**Variable Selection Parameters:**
+
+- **`causes`** — Predictor variables available to the model. If `None`, all columns are used.
+- **`effects`** — Target variables to predict. If `None`, all columns are used.
+- **`tested_causes`** — A subset of `causes` for which Granger causality is formally tested. If `None`, defaults to all of `causes`.
+
+The distinction is important: `causes` define what the model can *see*, while `tested_causes` define which relationships are *analyzed*. This allows you to include contextual variables without explicitly testing their causality, reducing computation while maintaining model fidelity.
+
 **Output:**
 ```python
 MultitaskGrangerOutput(
@@ -260,8 +268,7 @@ df = pd.read_csv("data.csv", index_col=0)
 it = TestGroupConfigIterator.from_file("group_config.json")
 
 results = []
-while it.has_next():
-    cfg = it.next()
+for cfg in it:
     print(f"Running: epochs={cfg['model_config']['epochs']}, max_lag={cfg['lag_config'].max_lag}")
     
     output = MultitaskGrangerBuilder().from_config(cfg).data(df).fit()
@@ -389,10 +396,6 @@ df = pd.read_csv("data.csv", index_col=0)
 it = TestGroupConfigIterator.from_file("group_config.json")
 
 for i, cfg in enumerate(it):
-    if not it.has_next():
-        # On last config
-        pass
-    
     output = MultitaskGrangerBuilder().from_config(cfg).data(df).fit()
     print(f"Test {i}: {output.results.causality_matrix.data}")
 ```

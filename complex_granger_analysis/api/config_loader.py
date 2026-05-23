@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import copy
 import json
+import os
 from pathlib import Path
 from typing import Any, Dict, List, Mapping, Optional, Sequence, Tuple
 
@@ -14,6 +15,11 @@ try:
 	from ..backends.callbacks import TorchTensorBoardCallback  # type: ignore
 except Exception:  # pragma: no cover - optional callback
 	TorchTensorBoardCallback = None  # type: ignore[assignment]
+
+try:
+	from .. import initializers as init_module  # type: ignore
+except Exception:  # pragma: no cover - optional dependency
+	init_module = None  # type: ignore[assignment]
 
 
 _RELATION_KEY_SEPARATORS = ("->", "|", ",", ":")
@@ -233,6 +239,91 @@ def _normalize_backend(raw_backend: Any) -> Tuple[Optional[str], Dict[str, Any]]
 	return canonical, dict(backend_params)
 
 
+def _normalize_initializer_spec(raw_initializer: Any) -> Any:
+	"""Resolve initializer spec (string or object) into initializer class or instance.
+	
+	Supported string formats (case-insensitive):
+	- "ols", "olsinitializer": OLSInitializer
+	- "zeros", "zero", "zerosinitializer": ZerosInitializer
+	- "random_normal", "randomnormal", "random", "randomnormalinitializer": RandomNormalInitializer
+	
+	Returns:
+	- String or object specs are resolved to actual initializer classes
+	- None/null returns None
+	"""
+	if raw_initializer is None:
+		return None
+	
+	# Already an object (class or instance) - return as-is
+	if not isinstance(raw_initializer, str):
+		return raw_initializer
+	
+	if init_module is None:
+		raise DataValidationError(
+			"Initializer specs require the initializers module. "
+			"Check that complex_granger_analysis is properly installed."
+		)
+	
+	name = raw_initializer.strip().lower()
+	
+	if name in {"ols", "olsinitializer"}:
+		return init_module.OLSInitializer
+	if name in {"zeros", "zero", "zerosinitializer"}:
+		return init_module.ZerosInitializer
+	if name in {"random_normal", "randomnormal", "random", "randomnormalinitializer"}:
+		return init_module.RandomNormalInitializer
+	
+	raise DataValidationError(
+		f"Unsupported initializer type '{raw_initializer}'. "
+		"Supported: ols, zeros, random_normal (or class instances)"
+	)
+
+
+def _normalize_compute_device(raw_device: Any, backend_name: Optional[str]) -> Dict[str, Any]:
+	"""Normalize compute device spec into backend-specific environment setup.
+	
+	This function updates os.environ for TensorFlow and returns device config for PyTorch.
+	
+	Supported formats:
+	- None/"auto": Leave as-is (auto-detect)
+	- "cpu"/"cpu-only": Force CPU mode
+	- "gpu"/"cuda": Use GPU
+	- "cuda:0", "cuda:1", etc.: Specific GPU device
+	
+	Returns:
+	Dict with potential "device" key for PyTorch model_config, or empty dict for TF.
+	"""
+	if raw_device is None:
+		return {}
+	
+	device_spec = str(raw_device).strip().lower()
+	if not device_spec or device_spec == "auto":
+		return {}
+	
+	# TensorFlow device setup via environment variables
+	if backend_name == "tensorflow":
+		if device_spec in {"cpu", "cpu-only"}:
+			os.environ["CGA_TF_FORCE_CPU"] = "1"
+			os.environ["CGA_TF_USE_GPU"] = "0"
+		elif device_spec in {"gpu", "cuda"} or device_spec.startswith("cuda"):
+			os.environ["CGA_TF_FORCE_CPU"] = "0"
+			os.environ["CGA_TF_USE_GPU"] = "1"
+		return {}
+	
+	# PyTorch device setup via model_config
+	if backend_name == "pytorch":
+		if device_spec in {"gpu", "cuda"}:
+			return {"device": "cuda"}
+		elif device_spec.startswith("cuda"):
+			return {"device": device_spec}
+		elif device_spec == "cpu":
+			return {"device": "cpu"}
+		# else: pass through unknown device specs
+		return {"device": device_spec} if device_spec != "auto" else {}
+	
+	return {}
+
+
 def _normalize_regularizer_spec(raw_regularizer: Any) -> Dict[str, Any]:
 	"""Normalize regularizer spec aliases into backend-ready regularizer_spec mapping."""
 	type_name, params = _extract_typed_spec(raw_regularizer, context="regularizer")
@@ -375,6 +466,27 @@ class BuilderConfigLoader:
 		if "regularizer_spec" in out and out.get("regularizer_spec") is not None:
 			out["regularizer_spec"] = _normalize_regularizer_spec(out.get("regularizer_spec"))
 
+		# Normalize initializer spec (string or object → initializer class)
+		if "initializer" in out and out.get("initializer") is not None:
+			out["initializer"] = _normalize_initializer_spec(out.get("initializer"))
+
+		# Normalize compute device spec and merge into model_config for PyTorch
+		if "compute_device" in out or "device" in out:
+			device_spec = out.pop("compute_device", out.pop("device", None))
+			device_config = _normalize_compute_device(device_spec, backend_name)
+			if device_config and backend_name == "pytorch":
+				model_cfg_raw = out.get("model_config")
+				if model_cfg_raw is None:
+					model_cfg: Dict[str, Any] = {}
+				elif isinstance(model_cfg_raw, Mapping):
+					model_cfg = dict(model_cfg_raw)
+				else:
+					raise DataValidationError("model_config must be an object")
+				
+				for key, value in device_config.items():
+					model_cfg.setdefault(key, value)
+				out["model_config"] = model_cfg
+
 		return out
 
 	@staticmethod
@@ -433,12 +545,14 @@ class TestGroupConfigIterator:
 		configs = cls._expand(raw)
 		return cls(configs, base_dir=group_path.parent)
 
-	def has_next(self) -> bool:
-		return self._index < len(self._configs)
+	def __iter__(self) -> "TestGroupConfigIterator":
+		"""Return self as the iterator object (implements iterator protocol)."""
+		return self
 
-	def next(self) -> Dict[str, Any]:
-		if not self.has_next():
-			raise StopIteration("No more test configurations")
+	def __next__(self) -> Dict[str, Any]:
+		"""Return the next configuration or raise StopIteration (implements iterator protocol)."""
+		if self._index >= len(self._configs):
+			raise StopIteration
 
 		cfg = copy.deepcopy(self._configs[self._index])
 		self._index += 1

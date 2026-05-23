@@ -96,7 +96,12 @@ sweep cases:
   [3] epochs=20, max_lag=12  (vary both)
 ```
 
-For details on sweep expansion, supported sweep fields, and `reuse_data` / `compute_device` handling, see [Configuration File Usage](config_file_usage.md).
+For details on sweep expansion, supported sweep fields, and `reuse_data` / `compute_device` / `initializer` handling, see [Configuration File Usage](config_file_usage.md).
+
+**Automatic Normalization:**
+- String `initializer` specs (e.g., `"ols"`, `"zeros"`, `"random_normal"`) are automatically normalized to initializer classes by `BuilderConfigLoader`.
+- String `compute_device` specs (e.g., `"cpu"`, `"gpu"`) are automatically normalized to backend-specific device configuration.
+- This means you can use string values in the group config file without any script-level mapping.
 
 ## Usage
 

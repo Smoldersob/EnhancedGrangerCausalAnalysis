@@ -35,7 +35,6 @@ Results in output_dir:
 from __future__ import annotations
 
 import argparse
-import os
 import re
 import sys
 import time
@@ -43,11 +42,9 @@ from pathlib import Path
 from typing import Any, Dict, List, Tuple
 
 import pandas as pd
-
 from ..api import MultiTaskGrangerBuilder, TestGroupConfigIterator
 from ..api.config_loader import BuilderConfigLoader
 from ..utilities.metric_calculator import MetricCalculator
-from .. import initializers as init_initializers
 
 
 def _sanitize_token(value: Any) -> str:
@@ -101,43 +98,21 @@ def _preparation_signature(cfg: Dict[str, Any], data_frames: List[pd.DataFrame])
     )
 
 
-def _apply_compute_device(cfg: Dict[str, Any]) -> None:
-    """Apply a CPU/GPU preference from group config before model creation."""
-    device_spec = cfg.get("compute_device", cfg.get("device"))
-    if device_spec is None:
-        return
-
-    backend = str(cfg.get("backend", "")).strip().lower()
-    device_text = str(device_spec).strip().lower()
-    if not device_text:
-        return
-
-    if backend == "tensorflow":
-        if device_text in {"cpu", "cpu-only"}:
-            os.environ["CGA_TF_FORCE_CPU"] = "1"
-            os.environ["CGA_TF_USE_GPU"] = "0"
-        elif device_text in {"gpu", "cuda"} or device_text.startswith("cuda"):
-            os.environ["CGA_TF_FORCE_CPU"] = "0"
-            os.environ["CGA_TF_USE_GPU"] = "1"
-        elif device_text == "auto":
-            os.environ.pop("CGA_TF_FORCE_CPU", None)
-            os.environ.pop("CGA_TF_USE_GPU", None)
-        return
-
-    if backend == "pytorch":
-        model_cfg = cfg.get("model_config")
-        if not isinstance(model_cfg, dict):
-            model_cfg = {}
-            cfg["model_config"] = model_cfg
-        if "device" not in model_cfg:
-            if device_text in {"gpu", "cuda"}:
-                model_cfg["device"] = "cuda"
-            elif device_text.startswith("cuda"):
-                model_cfg["device"] = device_spec
-            elif device_text == "cpu":
-                model_cfg["device"] = "cpu"
-            elif device_text != "auto":
-                model_cfg["device"] = device_spec
+def _resolve_path(base_dir: Path, raw_path: str | Path) -> Path:
+    """
+    Resolve relative path against base_dir, or return absolute path as-is.
+    
+    Args:
+        base_dir: reference directory for relative paths
+        raw_path: relative or absolute path
+    
+    Returns:
+        Resolved absolute Path
+    """
+    p = Path(raw_path)
+    if p.is_absolute():
+        return p
+    return (base_dir / p).resolve()
 
 
 def _build_result_filename(case_idx: int, backend: str, param_names: List[str], case_values: List[Any], suffix: str = "causality") -> str:
@@ -342,9 +317,7 @@ def run_from_config(script_config_path: str | Path, save_mode: str = "minimum") 
     print(f"Running test cases...")
     print(f"{'='*70}\n")
 
-    while iterator.has_next():
-        cfg = iterator.next()
-        _apply_compute_device(cfg)
+    for cfg in iterator:
         case_values = cases[case_idx] if case_idx < len(cases) else []
         
         backend = str(cfg.get("backend", "unknown"))
@@ -373,17 +346,6 @@ def run_from_config(script_config_path: str | Path, save_mode: str = "minimum") 
         # Run Granger analysis
         start = time.perf_counter()
         try:
-            # Resolve initializer string (from JSON) into actual initializer class when provided
-            init_spec = cfg.get("initializer")
-            if isinstance(init_spec, str):
-                name = init_spec.strip().lower()
-                if name in {"olsinitializer", "ols"}:
-                    cfg["initializer"] = init_initializers.OLSInitializer
-                elif name in {"zerosinitializer", "zeros", "zero"}:
-                    cfg["initializer"] = init_initializers.ZerosInitializer
-                elif name in {"randomnormalinitializer", "randomnormal", "random_normal", "random"}:
-                    cfg["initializer"] = init_initializers.RandomNormalInitializer
-
             builder = MultiTaskGrangerBuilder().from_config(cfg).data(data_frames)
             if cached_prepared_data is not None:
                 builder.prepared_data(cached_prepared_data)
