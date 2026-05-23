@@ -35,5 +35,4 @@ include = ["complex_granger_analysis*"]
 exclude = ["complex_granger_analysis.tests*"]
 
 [tool.setuptools.package-data]
-complex_granger_analysis = ["py.typed"]
 "complex_granger_analysis.scripts" = ["*.json", "*.csv"]
