@@ -10,6 +10,7 @@ Wymaga:
 
 import numpy as np
 import pandas as pd
+import sys
 
 from ..core.lag_config import LagConfiguration
 from ..preprocessing.lag.lag_engine import LagEngine

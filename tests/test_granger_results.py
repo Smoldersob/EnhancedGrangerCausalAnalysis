@@ -124,7 +124,7 @@ def test_granger_results_stores_base_and_reference_weights_and_predictions():
 
 if __name__ == "__main__":
     tests = [
-        test_granger_results_updates_sign_and_p_value_with_legacy_scheme,
+        test_granger_results_updates_sign_and_p_value_with_prediction_inputs,
         test_granger_results_stores_base_and_reference_weights_and_predictions,
     ]
 
