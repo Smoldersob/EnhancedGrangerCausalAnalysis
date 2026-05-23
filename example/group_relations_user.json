@@ -1,0 +1,22 @@
+[
+  {
+    "effect": "x1",
+    "cause": "x1",
+    "zero": true
+  },
+  {
+    "effect": "x1",
+    "cause": "x2",
+    "min_abs_sum": 0.05
+  },
+  {
+    "effect": "x2",
+    "cause": "x1",
+    "min_abs_sum": 0.05
+  },
+  {
+    "effect": "x2",
+    "cause": "x2",
+    "zero": true
+  }
+]

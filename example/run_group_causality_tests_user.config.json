@@ -1,0 +1,14 @@
+{
+  "output_dir": "./results_user0",
+  "ground_truth_path": "./gt.csv",
+  "group_config_path": "./group_config_user.json",
+  "threshold": 0.01,
+  "data": {
+    "csv_paths": [
+      "./PID_no_fault.csv",
+      "./PID_fault1.csv",
+      "./PID_fault2.csv"
+    ],
+    "index_col": 0
+  }
+}
