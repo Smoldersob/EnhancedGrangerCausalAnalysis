@@ -32,7 +32,7 @@ include-package-data = true
 [tool.setuptools.packages.find]
 where = ["."]
 include = ["complex_granger_analysis*"]
-exclude = ["complex_granger_analysis.tests*"
+exclude = ["complex_granger_analysis.tests*"]
 
 [tool.setuptools.package-data]
 complex_granger_analysis = ["py.typed"]
