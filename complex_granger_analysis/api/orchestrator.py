@@ -14,7 +14,7 @@ import time
 from ..backends import BackendFactory
 from ..core.exceptions import DataValidationError
 from ..core.lag_config import LagConfiguration
-from ..core.outputs import MultitaskGrangerOutput
+from ..core.outputs import MultiTaskGrangerOutput
 from ..preprocessing.lag.lag_engine import LagEngine
 from ..preprocessing.stationarity import StationarityTransformer
 from ..preprocessing.scaling import IdentityScaler, MaxAbsScaler, MinMaxScaler, RobustScaler, StandardScaler, _BaseScaler
@@ -348,7 +348,7 @@ class MultiTaskGrangerAPI:
 		hiperoptimalization_conf: Optional[Dict[str, Any]] = None,
 		initializer: Optional[Any] = None,
 		model_config: Optional[Dict[str, Any]] = None,
-	) -> MultitaskGrangerOutput:
+	) -> MultiTaskGrangerOutput:
 		data_list = _to_dataframe_list(data)
 		all_columns = list(data_list[0].columns)
 
@@ -603,7 +603,7 @@ class MultiTaskGrangerAPI:
 		prepared_data_output = prepared if (self._reuse_data or prepared_data is not None) else None
 		self._prepared_data = prepared
 
-		return MultitaskGrangerOutput(
+		return MultiTaskGrangerOutput(
 			results=results,
 			base_model=base_model,
 			reference_models=reference_models,

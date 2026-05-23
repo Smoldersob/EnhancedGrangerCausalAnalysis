@@ -12,7 +12,7 @@ from ..results.granger_results import GrangerAnalysisResults
 
 
 @dataclass
-class MultitaskGrangerOutput:
+class MultiTaskGrangerOutput:
 	"""Output container returned by MultiTaskGrangerAPI.fit()."""
 
 	results: GrangerAnalysisResults

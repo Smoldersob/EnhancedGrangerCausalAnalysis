@@ -95,7 +95,6 @@ Covers key functionality:
 ## Related Documentation
 
 - [API usage](api_usage.md)
-- [Configuration files](config_file_usage.md)
 - [Backend usage](backend_usage.md)
 - [Components loading](componets_loading.md)
 - [Data preprocessing](data_preprocessing.md)

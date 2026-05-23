@@ -221,9 +221,9 @@ cfg = BuilderConfigLoader.load_file("config.json")
 
 Then pass the normalized mapping to `MultitaskGrangerBuilder.from_config(...)`.
 
-## Constrainty
+## Constraints
 
-Constrainty dla analiz Grangera podaje się przez `relations`. To jest mapowanie par `(effect, cause)` na reguły ograniczeń, a loader dopuszcza także JSON-friendly zapis stringowy lub listę obiektów.
+Constraints dla analiz Grangera podaje się przez `relations`. To jest mapowanie par `(effect, cause)` na reguły ograniczeń, a loader dopuszcza także JSON-friendly zapis stringowy lub listę obiektów.
 
 Przykłady:
 

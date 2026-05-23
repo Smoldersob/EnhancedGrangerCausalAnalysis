@@ -44,7 +44,7 @@ from typing import Any, Dict, List, Tuple
 
 import pandas as pd
 
-from ..api import MultitaskGrangerBuilder, TestGroupConfigIterator
+from ..api import MultiTaskGrangerBuilder, TestGroupConfigIterator
 from ..api.config_loader import BuilderConfigLoader
 from ..utilities.metric_calculator import MetricCalculator
 from .. import initializers as init_initializers
@@ -384,7 +384,7 @@ def run_from_config(script_config_path: str | Path, save_mode: str = "minimum") 
                 elif name in {"randomnormalinitializer", "randomnormal", "random_normal", "random"}:
                     cfg["initializer"] = init_initializers.RandomNormalInitializer
 
-            builder = MultitaskGrangerBuilder().from_config(cfg).data(data_frames)
+            builder = MultiTaskGrangerBuilder().from_config(cfg).data(data_frames)
             if cached_prepared_data is not None:
                 builder.prepared_data(cached_prepared_data)
             out = builder.fit()

@@ -319,7 +319,7 @@ print(causality_matrix.data)
 | **Regularization** | ✓ Yes (L1, lag-dependent) | ✓ Yes | ✗ No |
 | **Callbacks** | ✓ Yes | ✓ Yes | ✗ No |
 | **Config files** | ✓ Yes (from_file, from_config) | ✗ Manual dicts | ✗ Manual dicts |
-| **Backend choice** | "pytorch" \| "tensorflow" \| "sklearn" | Same | Fixed (statsmodels) |
+| **Backend choice** | "pytorch" \ "tensorflow" \ "sklearn" | "pytorch" \ "tensorflow" \ "sklearn" | Fixed (statsmodels) |
 | **Hyperopt** | ✓ Yes | ✓ Yes | ✗ No |
 | **Use case** | Config-driven workflows | Fine-grained control | Quick exploration |
 

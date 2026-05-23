@@ -7,7 +7,7 @@ import pandas as pd
 
 from ..core.exceptions import DataValidationError
 from ..core.lag_config import LagConfiguration
-from ..core.outputs import MultitaskGrangerOutput
+from ..core.outputs import MultiTaskGrangerOutput
 from ..preprocessing.stationarity import StationarityTransformer
 from .config_loader import BuilderConfigLoader
 from .orchestrator import MultiTaskGrangerAPI
@@ -23,7 +23,7 @@ def _normalize_optional_name_list(values: Optional[Sequence[str]]) -> Optional[L
 	return items if items else None
 
 
-class MultitaskGrangerBuilder:
+class MultiTaskGrangerBuilder:
 	"""
 	Fluent builder for MultiTaskGrangerAPI.
 
@@ -62,11 +62,11 @@ class MultitaskGrangerBuilder:
 			"prepared_data": None,
 		}
 
-	def backend(self, backend_name: Optional[str]) -> "MultitaskGrangerBuilder":
+	def backend(self, backend_name: Optional[str]) -> "MultiTaskGrangerBuilder":
 		self._backend = backend_name
 		return self
 
-	def data(self, data: pd.DataFrame | Sequence[pd.DataFrame]) -> "MultitaskGrangerBuilder":
+	def data(self, data: pd.DataFrame | Sequence[pd.DataFrame]) -> "MultiTaskGrangerBuilder":
 		self._data = data
 		return self
 
@@ -75,7 +75,7 @@ class MultitaskGrangerBuilder:
 		causes: Optional[Sequence[str]] = None,
 		effects: Optional[Sequence[str]] = None,
 		tested_causes: Optional[Sequence[str]] = None,
-	) -> "MultitaskGrangerBuilder":
+	) -> "MultiTaskGrangerBuilder":
 		self._fit_kwargs["causes"] = _normalize_optional_name_list(causes)
 		self._fit_kwargs["effects"] = _normalize_optional_name_list(effects)
 		self._fit_kwargs["tested_causes"] = _normalize_optional_name_list(tested_causes)
@@ -84,7 +84,7 @@ class MultitaskGrangerBuilder:
 	def relations(
 		self,
 		relations: Optional[Mapping[Tuple[str, str], Any]],
-	) -> "MultitaskGrangerBuilder":
+	) -> "MultiTaskGrangerBuilder":
 		self._fit_kwargs["relations"] = dict(relations) if relations is not None else None
 		return self
 
@@ -92,7 +92,7 @@ class MultitaskGrangerBuilder:
 		self,
 		lag_config: Optional[LagConfiguration] = None,
 		lag_selector: Optional[Any] = None,
-	) -> "MultitaskGrangerBuilder":
+	) -> "MultiTaskGrangerBuilder":
 		self._fit_kwargs["lag_config"] = lag_config
 		self._fit_kwargs["lag_selector"] = lag_selector
 		return self
@@ -100,11 +100,11 @@ class MultitaskGrangerBuilder:
 	def stationarity(
 		self,
 		transformer: Any = None,
-	) -> "MultitaskGrangerBuilder":
+	) -> "MultiTaskGrangerBuilder":
 		self._stationarity_transformer = transformer or StationarityTransformer()
 		return self
 
-	def reuse_data(self, value: bool = True) -> "MultitaskGrangerBuilder":
+	def reuse_data(self, value: bool = True) -> "MultiTaskGrangerBuilder":
 		self._reuse_data = bool(value)
 		return self
 
@@ -112,7 +112,7 @@ class MultitaskGrangerBuilder:
 		self,
 		x_scaler: Optional[Any] = "standard",
 		y_scaler: Optional[Any] = "standard",
-	) -> "MultitaskGrangerBuilder":
+	) -> "MultiTaskGrangerBuilder":
 		self._fit_kwargs["x_scaler"] = x_scaler
 		self._fit_kwargs["y_scaler"] = y_scaler
 		return self
@@ -121,7 +121,7 @@ class MultitaskGrangerBuilder:
 		self,
 		backend_sample_fraction: float = 1.0,
 		backend_max_samples: Optional[int] = None,
-	) -> "MultitaskGrangerBuilder":
+	) -> "MultiTaskGrangerBuilder":
 		self._fit_kwargs["backend_sample_fraction"] = float(backend_sample_fraction)
 		self._fit_kwargs["backend_max_samples"] = backend_max_samples
 		return self
@@ -130,12 +130,12 @@ class MultitaskGrangerBuilder:
 		self,
 		regularizer: Optional[Any] = None,
 		regularizer_spec: Optional[Dict[str, Any]] = None,
-	) -> "MultitaskGrangerBuilder":
+	) -> "MultiTaskGrangerBuilder":
 		self._fit_kwargs["regularizer"] = regularizer
 		self._fit_kwargs["regularizer_spec"] = dict(regularizer_spec) if regularizer_spec is not None else None
 		return self
 
-	def callbacks(self, callbacks: Optional[Sequence[Any]] = None) -> "MultitaskGrangerBuilder":
+	def callbacks(self, callbacks: Optional[Sequence[Any]] = None) -> "MultiTaskGrangerBuilder":
 		self._fit_kwargs["callbacks"] = list(callbacks) if callbacks is not None else None
 		return self
 
@@ -143,24 +143,24 @@ class MultitaskGrangerBuilder:
 		self,
 		state: Optional[str] = None,
 		config: Optional[Dict[str, Any]] = None,
-	) -> "MultitaskGrangerBuilder":
+	) -> "MultiTaskGrangerBuilder":
 		self._fit_kwargs["hiperoptimalization_state"] = state
 		self._fit_kwargs["hiperoptimalization_conf"] = dict(config) if config is not None else None
 		return self
 
-	def initializer(self, initializer: Optional[Any]) -> "MultitaskGrangerBuilder":
+	def initializer(self, initializer: Optional[Any]) -> "MultiTaskGrangerBuilder":
 		self._fit_kwargs["initializer"] = initializer
 		return self
 
-	def prepared_data(self, prepared_data: Optional[Any]) -> "MultitaskGrangerBuilder":
+	def prepared_data(self, prepared_data: Optional[Any]) -> "MultiTaskGrangerBuilder":
 		self._fit_kwargs["prepared_data"] = prepared_data
 		return self
 
-	def model(self, model_config: Optional[Dict[str, Any]] = None) -> "MultitaskGrangerBuilder":
+	def model(self, model_config: Optional[Dict[str, Any]] = None) -> "MultiTaskGrangerBuilder":
 		self._fit_kwargs["model_config"] = dict(model_config) if model_config is not None else None
 		return self
 
-	def from_config(self, config: Mapping[str, Any]) -> "MultitaskGrangerBuilder":
+	def from_config(self, config: Mapping[str, Any]) -> "MultiTaskGrangerBuilder":
 		"""Load builder state from a config mapping using orchestrator fit keys."""
 		if "backend" in config:
 			self._backend = config.get("backend")
@@ -188,12 +188,12 @@ class MultitaskGrangerBuilder:
 
 		return self
 
-	def from_file(self, path: str | Path) -> "MultitaskGrangerBuilder":
+	def from_file(self, path: str | Path) -> "MultiTaskGrangerBuilder":
 		"""Load builder state from a JSON/YAML config file."""
 		cfg = BuilderConfigLoader.load_file(path)
 		return self.from_config(cfg)
 
-	def fit(self) -> MultitaskGrangerOutput:
+	def fit(self) -> MultiTaskGrangerOutput:
 		if self._data is None:
 			raise DataValidationError("Builder requires data(...) before fit()")
 
@@ -211,6 +211,6 @@ class MultitaskGrangerBuilder:
 				setattr(api, "_reuse_data", self._reuse_data)
 		return api.fit(self._data, **self._fit_kwargs)
 
-	def run(self) -> MultitaskGrangerOutput:
+	def run(self) -> MultiTaskGrangerOutput:
 		"""Alias for fit()."""
 		return self.fit()
