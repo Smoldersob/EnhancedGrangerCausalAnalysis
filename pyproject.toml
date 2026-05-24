@@ -1,5 +1,5 @@
 [build-system]
-requires = ["setuptools>=68", "wheel"]
+requires = ["setuptools==68", "wheel"]
 build-backend = "setuptools.build_meta"
 
 [project]
@@ -7,41 +7,41 @@ name = "complex_granger_analysis"
 version = "2.2.0"
 description = "Granger-causality workflows for multivariate time series"
 readme = "README.md"
-requires-python = ">=3.10"
+requires-python = "==3.10"
 license = { file = "LICENSE.md" }
 authors = [
   { name = "Smoldersob" }
 ]
 dependencies = [
-  "numpy>=2.3.5",
-  "pandas>=2.3.3",
-  "matplotlib>=3.10.8",
-  "statsmodels>=0.14.6",
-  "scikit-learn>=1.8.0",
-  "scipy>=1.16.3",
-  "joblib>=1.5.3",
+  "numpy==2.3.5",
+  "pandas==2.3.3",
+  "matplotlib==3.10.8",
+  "statsmodels==0.14.6",
+  "scikit-learn==1.8.0",
+  "scipy==1.16.3",
+  "joblib==1.5.3",
 ]
 
 [project.optional-dependencies]
 torch = [
-  "torch>=2.9.1",
-  "torchvision>=0.24.1",
-  "torch_tb_profiler>=0.4.3",
-  "triton>=3.5.1",
+  "torch==2.9.1",
+  "torchvision==0.24.1",
+  "torch_tb_profiler==0.4.3",
+  "triton==3.5.1",
 ]
 tensorflow = [
-  "tensorflow>=2.20.0",
-  "keras>=3.13.0",
-  "tensorboard>=2.20.0",
+  "tensorflow==2.20.0",
+  "keras==3.13.0",
+  "tensorboard==2.20.0",
 ]
 full = [
-  "torch>=2.9.1",
-  "torchvision>=0.24.1",
-  "torch_tb_profiler>=0.4.3",
-  "triton>=3.5.1",
-  "tensorflow>=2.20.0",
-  "keras>=3.13.0",
-  "tensorboard>=2.20.0",
+  "torch==2.9.1",
+  "torchvision==0.24.1",
+  "torch_tb_profiler==0.4.3",
+  "triton==3.5.1",
+  "tensorflow==2.20.0",
+  "keras==3.13.0",
+  "tensorboard==2.20.0",
 ]
 dev = ["pytest"]
 
