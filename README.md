@@ -147,6 +147,13 @@ pip install -e ".[tensorflow]"
 pip install -r requirements-tensorflow.txt
 ```
 
+To install repo with backend dependencies via pip you need to use:
+
+```bash
+pip install "complex_granger_analysis[full] @ git+ssh://git@github.com/Smoldersob/complex_granger_analysis.git"
+```
+There are three optional dependencies version torch,tensorflow and full.
+
 ### Installing all dependencies (full environment)
 
 To install all dependencies for both PyTorch and TensorFlow backends in one go:
