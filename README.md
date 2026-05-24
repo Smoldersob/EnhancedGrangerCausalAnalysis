@@ -107,19 +107,57 @@ Details:
 
 ## Installation
 
+### Using pip (for private repository)
+
+Since this repository is currently private, you need to install it via SSH. Ensure you have SSH keys configured for GitHub, then:
+
 ```bash
-git clone https://github.com/Smoldersob/complex_granger_analysis.git
-cd complex_granger_analysis
-pip install -r requirements.txt
+pip install git+ssh://git@github.com/Smoldersob/complex_granger_analysis.git
 ```
 
-Optional backend packages:
+Or clone first and install from your local copy:
 
 ```bash
+git clone git@github.com:Smoldersob/complex_granger_analysis.git
+cd complex_granger_analysis
+pip install .
+```
+
+### Installing with specific backends
+
+To install with only core dependencies:
+
+```bash
+pip install .
+```
+
+To install with PyTorch backend:
+
+```bash
+pip install -e ".[torch]"
+# or install requirements manually:
 pip install -r requirements-torch.txt
-# or
+```
+
+To install with TensorFlow backend:
+
+```bash
+pip install -e ".[tensorflow]"
+# or install requirements manually:
 pip install -r requirements-tensorflow.txt
 ```
+
+### Installing all dependencies (full environment)
+
+To install all dependencies for both PyTorch and TensorFlow backends in one go:
+
+```bash
+pip install -e ".[full]"
+# or install requirements manually:
+pip install -r requirements-full.txt
+```
+
+The `requirements-full.txt` file contains all packages from core, PyTorch, and TensorFlow dependencies, suitable for development or testing multiple backends.
 
 ## Development
 
