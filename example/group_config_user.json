@@ -9,10 +9,10 @@
     "tested_causes": ["x1", "x2", "u1", "e1", "u", "f1", "f2"],
     "lag_config": {"max_lag": 6, "use_lag_zero": false},
     "lag_selector": {"type": "ic", "use_bic": true},
-    "relations": "./example/group_relations_user.json",
+    "relations": "group_relations_user.json",
     "callbacks": [
-      {"type": "early_stopping", "patience": 10, "min_delta": 0.0, "restore_best_weights": true},
-      {"type": "reduce_lr_on_plateau", "factor": 0.5, "patience": 5, "min_lr": 1e-06}
+      {"type": "early_stopping", "patience": 10, "min_delta": 0.0, "restore_best_weights": true, "monitor": "loss"},
+      {"type": "reduce_lr", "factor": 0.5, "patience": 5, "min_lr": 1e-06, "monitor": "loss"}
     ],
     "initializer": "OLSInitializer",
     "model_config": {"learning_rate": 0.001, "batch_size": 32, "epochs": 50}

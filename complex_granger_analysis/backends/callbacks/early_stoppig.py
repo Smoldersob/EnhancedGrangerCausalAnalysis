@@ -16,6 +16,7 @@ class EarlyStopping(Callback):
 		patience: int = 20,
 		min_delta: float = 0.0,
 		restore_best_weights: bool = True,
+		monitor: str = "loss",
 	) -> None:
 		if patience <= 0:
 			raise TrainingConfigurationError("patience must be a positive integer")

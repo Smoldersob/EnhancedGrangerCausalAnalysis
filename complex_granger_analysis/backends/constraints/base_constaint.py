@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import warnings
 from typing import List, Mapping, Optional, Sequence, Tuple
 
 import numpy as np
@@ -129,9 +130,14 @@ def process_user_relations(
 		assert min_abs is not None
 		active = feature_indices[mask[out_idx, feature_indices] > 0.0]
 		if active.size == 0:
-			raise ConstraintConfigurationError(
-				f"Cannot enforce min_abs_sum for ({out_name}, {in_name}) because all relation weights are masked to zero"
+			warnings.warn(
+				f"Skipping min_abs_sum rule for ({out_name}, {in_name}): "
+				f"all relation weights are masked to zero (likely due to lag selection). "
+				f"This relation will not be constrained.",
+				UserWarning,
+				stacklevel=3,
 			)
+			continue
 		rules.append(
 			MinAbsSumRule(
 				output_index=int(out_idx),

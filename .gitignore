@@ -5,3 +5,4 @@ __pycache__/
 *.pyd
 evn/
 venv/
+*.egg-info/

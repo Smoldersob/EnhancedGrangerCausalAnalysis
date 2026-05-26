@@ -17,6 +17,7 @@ class ReduceLearningRate(Callback):
 		factor: float = 0.5,
 		min_lr: float = 1e-8,
 		min_delta: float = 0.0,
+		monitor="loss",
 	) -> None:
 		if patience <= 0:
 			raise TrainingConfigurationError("patience must be a positive integer")
