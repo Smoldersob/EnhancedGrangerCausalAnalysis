@@ -59,7 +59,7 @@ When not specified, backend selection prefers: PyTorch -> TensorFlow -> scikit-l
 
 Backend-specific component resolution (callbacks, regularizers, constraints) is documented in:
 - [docs/backend_usage.md](docs/backend_usage.md)
-- [docs/componets_loading.md](docs/componets_loading.md)
+- [docs/components_loading.md](docs/components_loading.md)
 
 ## Quick Example (Orchestrator)
 
@@ -76,7 +76,7 @@ api = MultiTaskGrangerAPI(backend="pytorch", reuse_data=True)
 output = api.fit(
     data=df,
     causes=["u", "f1", "f2"],
-    effects=["x1", "x2", "x3", "x4"],
+    effects=["x1", "x2", "u1", "e1"],
     tested_causes=["u", "f1", "f2"],
     lag_config=LagConfiguration(max_lag=12, use_lag_zero=False),
     relations={

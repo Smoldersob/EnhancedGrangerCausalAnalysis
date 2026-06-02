@@ -1,4 +1,4 @@
-# Components Info
+# Components Loading
 
 This document lists supported component types and dictionary names used to build components in each backend.
 
