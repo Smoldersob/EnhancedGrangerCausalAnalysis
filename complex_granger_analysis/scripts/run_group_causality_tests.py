@@ -42,9 +42,16 @@ from pathlib import Path
 from typing import Any, Dict, List, Tuple
 
 import pandas as pd
-from ..api import MultiTaskGrangerBuilder, TestGroupConfigIterator
-from ..api.config_loader import BuilderConfigLoader
-from ..utilities.metric_calculator import MetricCalculator
+
+try:
+    from ..api import MultiTaskGrangerBuilder, TestGroupConfigIterator
+    from ..api.config_loader import BuilderConfigLoader
+    from ..utilities.metric_calculator import MetricCalculator
+except ImportError:  # pragma: no cover - direct script execution fallback
+    sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
+    from complex_granger_analysis.api import MultiTaskGrangerBuilder, TestGroupConfigIterator
+    from complex_granger_analysis.api.config_loader import BuilderConfigLoader
+    from complex_granger_analysis.utilities.metric_calculator import MetricCalculator
 
 
 def _sanitize_token(value: Any) -> str:
@@ -137,6 +144,8 @@ def _build_result_filename(case_idx: int, backend: str, param_names: List[str], 
         parts.append(_sanitize_token(backend))
     
     for p, v in zip(param_names, case_values):
+        if p == "backend":
+            continue
         parts.append(_sanitize_token(_short_param_name(p)))
         parts.append(_sanitize_token(v))
     
