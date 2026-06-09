@@ -189,14 +189,8 @@ def _load_dataframes(cfg: Dict[str, Any]) -> List[pd.DataFrame]:
                 f"CSV input file not found: {csv_path}. "
                 "Update 'data.csv_paths' in script config or provide --config with valid paths."
             )
-        try:
-            frames.append(pd.read_csv(csv_path, sep=';', index_col=index_col))
-        except:
-            try:
-                frames.append(pd.read_csv(csv_path, index_col=index_col))
-            except Exception as e:
-                raise ValueError(f"Error reading CSV file {csv_path}: {e}")
-
+        frames.append(pd.read_csv(csv_path, sep=None,index_col=None, engine="python"))
+        
     return frames
 
 
