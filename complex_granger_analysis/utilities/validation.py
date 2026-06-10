@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from logging import warning
 from typing import Iterable, List, Sequence, Tuple
 
 import numpy as np
@@ -114,8 +115,8 @@ def validate_lag_bounds(min_lags: np.ndarray, max_lags: np.ndarray) -> None:
 	if np.any(min_lags < 0) or np.any(max_lags < 0):
 		raise LagConfigurationError("Lag values must be non-negative")
 	if np.any(min_lags > max_lags):
-		raise LagConfigurationError("Each min_lag must be <= corresponding max_lag")
-
+		warning("Each min_lag must be <= corresponding max_lag. Changing max_lags to match min_lags")
+		max_lags = np.maximum(max_lags, min_lags)
 
 __all__ = [
 	"validate_dataframe_list",
