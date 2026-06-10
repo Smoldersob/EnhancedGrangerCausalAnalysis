@@ -56,7 +56,7 @@ class StationarityTransformer:
         validated, _ = validate_dataframe_list(
             data_list,
             require_same_columns=True,
-            require_same_shape=True,
+            require_same_shape=False,
             allow_superset_columns=True,
             copy=True,
         )

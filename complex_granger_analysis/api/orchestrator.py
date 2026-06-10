@@ -276,7 +276,7 @@ class MultiTaskGrangerAPI:
 		data_list = _to_dataframe_list(data)
 		all_columns = list(data_list[0].columns)
 		effects_list = list(effects) if effects is not None else all_columns
-
+		
 		stationarity = stationarity_transformer or self._stationarity_transformer
 		data_stationary = stationarity.fit_transform(data_list)
 
