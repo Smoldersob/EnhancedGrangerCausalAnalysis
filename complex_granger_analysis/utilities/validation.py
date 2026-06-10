@@ -88,7 +88,6 @@ def validate_dataframe_list(
 
 	return validated, ref_columns
 
-validate_lag_bounds
 def validate_columns_present(
 	available_columns: Iterable[str],
 	required_columns: Iterable[str],
