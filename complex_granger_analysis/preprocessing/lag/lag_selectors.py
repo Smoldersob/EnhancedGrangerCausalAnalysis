@@ -38,10 +38,12 @@ class BaseLagSelector(ABC):
 
     def __init__(self,
                  max_lag: int|None=None,
+                 min_lag: int = 1,
                  center: bool = True,
                  use_lag_zero: bool = False,
                  target_indices: Optional[Sequence[int]] = None):
         self.max_lag = max_lag
+        self.min_lag = min_lag
         self.center = center
         self.use_lag_zero = use_lag_zero
         self.target_indices = None if target_indices is None else list(target_indices)
@@ -68,6 +70,10 @@ class BaseLagSelector(ABC):
         if self.max_lag is None:
             self.max_lag = 10  # Default value if not specified
             warnings.warn("max_lag not specified; defaulting to max_lag=10.")
+        if self.min_lag < 0:
+            raise ValueError("min_lag must be non-negative.")
+        if self.min_lag > self.max_lag:
+            raise ValueError("min_lag cannot exceed max_lag.")
         X_proc = self._preprocess(X)
         T, D = X_proc.shape
 
@@ -387,9 +393,9 @@ class ICLagSelector(BaseLagSelector):
         T, D = X.shape
 
         # 1) AR lag selection
-        best_ar_lag = 0
+        best_ar_lag = self.min_lag
         best_ar_score = np.inf
-        for lag in range(0, self.max_lag + 1):
+        for lag in range(self.min_lag, self.max_lag + 1):
             y, Phi = self._design_matrix_arx(X, target_idx, lag, 0, target_idx)
             score = self._ic_score_linear(y, Phi)
             if score < best_ar_score:
@@ -403,9 +409,9 @@ class ICLagSelector(BaseLagSelector):
                 # AR handled separately
                 continue
 
-            best_lag = 0
+            best_lag = self.min_lag
             best_score = best_ar_score
-            for lag in range(0, self.max_lag + 1):
+            for lag in range(self.min_lag, self.max_lag + 1):
                 y, Phi = self._design_matrix_arx(
                     X, target_idx, best_ar_lag, lag, pred_idx
                 )
@@ -673,9 +679,9 @@ class CVLagSelector(ICLagSelector):
         T, D = X.shape
 
         # 1) AR lag selection
-        best_ar_lag = 0
+        best_ar_lag = self.min_lag
         best_ar_score = np.inf
-        for lag in range(0, self.max_lag + 1):
+        for lag in range(self.min_lag, self.max_lag + 1):
             y, Phi = self._design_matrix_arx(X, target_idx, lag, 0, target_idx)
             score = self._cv_score_linear(y, Phi)
             if score < best_ar_score:
@@ -688,9 +694,9 @@ class CVLagSelector(ICLagSelector):
             if pred_idx == target_idx:
                 continue
 
-            best_lag = 0
+            best_lag = self.min_lag
             best_score = best_ar_score
-            for lag in range(0, self.max_lag + 1):
+            for lag in range(self.min_lag, self.max_lag + 1):
                 y, Phi = self._design_matrix_arx(
                     X, target_idx, best_ar_lag, lag, pred_idx
                 )

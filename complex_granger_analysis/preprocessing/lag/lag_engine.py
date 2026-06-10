@@ -335,6 +335,8 @@ class LagEngine:
         # Configure the selector with engine-level settings
         if hasattr(self.selector, "max_lag") and self.selector.max_lag is None:
             self.selector.max_lag = self.config.max_lag
+        if hasattr(self.selector, "min_lag"):
+            self.selector.min_lag = self.config.use_lag_zero*1
         if hasattr(self.selector, "n_jobs"):
             self.selector.n_jobs = self.n_jobs
 
