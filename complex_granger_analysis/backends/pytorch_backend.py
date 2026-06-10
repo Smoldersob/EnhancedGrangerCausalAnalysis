@@ -33,8 +33,22 @@ class PyTorchBackendStrategy(BackendStrategy):
 		n_outputs: int,
 		regularizer: Optional[Any] = None,
 		constraint: Optional[Any] = None,
+		seed: Optional[int] = None,
 		**config,
 	):
+		if seed is not None:
+			import numpy as np
+			import random
+			np.random.seed(seed)
+			random.seed(seed)
+
+			try:
+				import torch
+				torch.manual_seed(seed)
+				if torch.cuda.is_available():
+					torch.cuda.manual_seed_all(seed)
+			except ImportError:
+				pass
 		from .models.pytorch_model import PyTorchGrangerModel
 		config = self._consume_loading_verbose(config)
 		if self._object_loader is not None:

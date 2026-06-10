@@ -32,8 +32,22 @@ class ScikitBackendStrategy(BackendStrategy):
 		n_outputs: int,
 		regularizer: Optional[Any] = None,
 		constraint: Optional[Any] = None,
+		seed: Optional[int] = None,
 		**config,
 	):
+		if seed is not None:
+			import numpy as np
+			import random
+			np.random.seed(seed)
+			random.seed(seed)
+
+			try:
+				import torch
+				torch.manual_seed(seed)
+				if torch.cuda.is_available():
+					torch.cuda.manual_seed_all(seed)
+			except ImportError:
+				pass
 		from .models.scikit_model import ScikitConstrainedGrangerModel
 		config = self._consume_loading_verbose(config)
 		self._object_loader.set_loading_verbose(self._loading_verbose)

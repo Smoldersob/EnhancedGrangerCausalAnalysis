@@ -178,7 +178,7 @@ def _load_dataframes(cfg: Dict[str, Any]) -> List[pd.DataFrame]:
         csv_paths = [csv_paths]
     if not isinstance(csv_paths, list) or not csv_paths:
         raise ValueError("script config data.csv_paths must be a non-empty list")
-
+    
     index_col = data_cfg.get("index_col", None)
     frames: List[pd.DataFrame] = []
     
@@ -189,7 +189,7 @@ def _load_dataframes(cfg: Dict[str, Any]) -> List[pd.DataFrame]:
                 f"CSV input file not found: {csv_path}. "
                 "Update 'data.csv_paths' in script config or provide --config with valid paths."
             )
-        frames.append(pd.read_csv(csv_path, sep=None,index_col=None, engine="python"))
+        frames.append(pd.read_csv(csv_path, sep=None,index_col=index_col, engine="python"))
         
     return frames
 
