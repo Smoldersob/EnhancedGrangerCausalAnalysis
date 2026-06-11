@@ -445,66 +445,122 @@ class ICLagSelector(BaseLagSelector):
 
         return y, Phi
 
-    def _prune_lags_for_target(self,
-                               X: np.ndarray,
-                               target_idx: int,
-                               ar_lag: int,
-                               pred_lags: np.ndarray) -> Tuple[int, np.ndarray]:
+    def _prune_lags_for_target(
+        self,
+        X: np.ndarray,
+        target_idx: int,
+        ar_lag: int,
+        pred_lags: np.ndarray,
+    ) -> Tuple[int, np.ndarray]:
         """
         Backward pruning for one target.
 
-        Starts from selected per-predictor maximum lags and iteratively removes
-        one active lag at a time if the score deterioration stays within the
-        configured pruning tolerance.
+        Important invariants:
+        - Any active lag is always >= self.min_lag.
+        - Predictors are either completely inactive (lag == 0 from selection),
+        or have a lag in [self.min_lag, initial_selected_lag].
+        - Pruning never reduces a non-zero lag below self.min_lag.
         """
         T, D = X.shape
 
-        active: list[tuple[int, int]] = []
-        for j in range(D):
-            lag = int(pred_lags[j])
-            if lag > 0:
-                active.append((j, lag))
+        pred_lags = np.asarray(pred_lags, dtype=int).copy()
 
-        if ar_lag > 0 and int(pred_lags[target_idx]) == 0:
-            active.append((target_idx, int(ar_lag)))
+        def build_active_pairs(curr_ar_lag: int, curr_pred_lags: np.ndarray) -> list[tuple[int, int]]:
+            pairs: list[tuple[int, int]] = []
 
-        if not active:
-            return ar_lag, pred_lags
+            # AR term (diagonal)
+            if curr_ar_lag > 0:
+                if curr_ar_lag < self.min_lag:
+                    raise ValueError(
+                        f"AR lag for target {target_idx} fell below min_lag={self.min_lag}."
+                    )
+                pairs.append((target_idx, int(curr_ar_lag)))
 
-        y_full, Phi_full = self._build_design_for_target(X, target_idx, active)
-        full_score = self._score_linear(y_full, Phi_full)
+            # External predictors
+            for j in range(D):
+                if j == target_idx:
+                    continue
+                lag = int(curr_pred_lags[j])
+                if lag == 0:
+                    continue  # Inactive predictor
+                if lag < self.min_lag:
+                    raise ValueError(
+                        f"Predictor lag for pair ({target_idx}, {j}) "
+                        f"fell below min_lag={self.min_lag}."
+                    )
+                pairs.append((j, lag))
+
+            return pairs
+
+        # Start from current selection
+        current_ar_lag = int(ar_lag)
+        current_pred_lags = pred_lags.copy()
+        current_pred_lags[target_idx] = current_ar_lag
+
+        active_pairs = build_active_pairs(current_ar_lag, current_pred_lags)
+        if not active_pairs:
+            # Nothing to prune
+            return current_ar_lag, current_pred_lags
+
+        y_full, Phi_full = self._build_design_for_target(X, target_idx, active_pairs)
+        current_score = self._score_linear(y_full, Phi_full)
 
         improved = True
-        while improved and len(active) > 0:
+        while improved:
             improved = False
-            best_candidate_score = full_score
-            best_to_remove = None
+            best_candidate_score = current_score
+            best_candidate: Optional[Tuple[int, np.ndarray]] = None
 
-            for idx_to_remove in range(len(active)):
-                candidate = active[:idx_to_remove] + active[idx_to_remove + 1:]
-                y_c, Phi_c = self._build_design_for_target(X, target_idx, candidate)
+            for j in range(D):
+                # Propose a one-step shrink for predictor j (or AR term if j==target)
+                cand_ar = current_ar_lag
+                cand_pred = current_pred_lags.copy()
+
+                if j == target_idx:
+                    # AR term: can only shrink if > min_lag
+                    curr_lag = current_ar_lag
+                    if curr_lag <= self.min_lag:
+                        continue
+                    cand_lag = curr_lag - 1
+                    # Enforce lower bound
+                    if cand_lag < self.min_lag:
+                        cand_lag = self.min_lag
+                    cand_ar = cand_lag
+                    cand_pred[target_idx] = cand_lag
+                else:
+                    curr_lag = int(current_pred_lags[j])
+                    if curr_lag == 0:
+                        # Predictor was never selected; nothing to prune
+                        continue
+                    if curr_lag <= self.min_lag:
+                        # Already at minimum allowed lag; cannot shrink further
+                        continue
+                    cand_lag = curr_lag - 1
+                    if cand_lag < self.min_lag:
+                        cand_lag = self.min_lag
+                    cand_pred[j] = cand_lag
+
+                candidate_pairs = build_active_pairs(cand_ar, cand_pred)
+                if not candidate_pairs:
+                    # Should not happen with the above constraints, but be safe
+                    continue
+
+                y_c, Phi_c = self._build_design_for_target(X, target_idx, candidate_pairs)
                 score_c = self._score_linear(y_c, Phi_c)
 
-                if self._is_prune_candidate(score_c, full_score):
-                    if best_to_remove is None or score_c < best_candidate_score:
+                if self._is_prune_candidate(score_c, current_score):
+                    if best_candidate is None or score_c < best_candidate_score:
                         best_candidate_score = score_c
-                        best_to_remove = idx_to_remove
+                        best_candidate = (cand_ar, cand_pred)
 
-            if best_to_remove is not None:
-                active.pop(best_to_remove)
-                full_score = best_candidate_score
+            if best_candidate is not None:
+                current_ar_lag, current_pred_lags = best_candidate
+                current_score = best_candidate_score
                 improved = True
 
-        new_pred_lags = np.zeros_like(pred_lags)
-        new_ar_lag = 0
-        for j, lag in active:
-            if j == target_idx:
-                new_ar_lag = lag
-                new_pred_lags[j] = lag
-            else:
-                new_pred_lags[j] = lag
-
-        return new_ar_lag, new_pred_lags
+        # Keep diagonal consistent with AR lag
+        current_pred_lags[target_idx] = current_ar_lag
+        return int(current_ar_lag), current_pred_lags.astype(int)
 
     def _select_lags(self,
                      X: np.ndarray,
@@ -538,11 +594,12 @@ class ICLagSelector(BaseLagSelector):
                     ar_lag=ar_lags[i],
                     pred_lags=pred_lag_matrix[i, :]
                 )
+                pred_i[i] = ar_i
                 new_ar[i] = ar_i
                 new_pred[i, :] = pred_i
             ar_lags[:] = new_ar
             pred_lag_matrix[:, :] = new_pred
-
+        
 
 # ======================================================================
 # CV-BASED SELECTOR
