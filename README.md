@@ -1,10 +1,10 @@
-# Complex Granger Analysis
+# EnhancedGrangerCausalAnalysis
 
-Complex Granger Analysis is a compact framework for advanced Granger-causality workflows on multivariate time series.
+EnhancedGrangerCausalAnalysis is a compact framework for advanced Granger-causality workflows on multivariate time series.
 
 It extends classic pair-wise Granger tests with configurable multitask modeling, backend abstraction, constraint-aware training, and config-driven experiment sweeps.
 
-Current package version: `2.1.0`
+Current package version: `2.2.0`
 
 ## Architecture at a glance
 
@@ -66,8 +66,8 @@ Backend-specific component resolution (callbacks, regularizers, constraints) is 
 ```python
 import pandas as pd
 
-from complex_granger_analysis.api import MultiTaskGrangerAPI
-from complex_granger_analysis.core.lag_config import LagConfiguration
+from enhanced_granger_analysis.api import MultiTaskGrangerAPI
+from enhanced_granger_analysis.core.lag_config import LagConfiguration
 
 df = pd.read_csv("example/PID_no_fault.csv", sep=";", index_col=0)
 
@@ -112,14 +112,14 @@ Details:
 Since this repository is currently private, you need to install it via SSH. Ensure you have SSH keys configured for GitHub, then:
 
 ```bash
-pip install git+ssh://git@github.com/Smoldersob/complex_granger_analysis.git
+pip install git+ssh://git@github.com/Smoldersob/EnhancedGrangerCausalAnalysis.git
 ```
 
 Or clone first and install from your local copy:
 
 ```bash
-git clone git@github.com:Smoldersob/complex_granger_analysis.git
-cd complex_granger_analysis
+git clone git@github.com:Smoldersob/EnhancedGrangerCausalAnalysis.git
+cd EnhancedGrangerCausalAnalysis
 pip install .
 ```
 
@@ -150,7 +150,7 @@ pip install -r requirements-tensorflow.txt
 To install repo with backend dependencies via pip you need to use:
 
 ```bash
-pip install "complex_granger_analysis[full] @ git+ssh://git@github.com/Smoldersob/complex_granger_analysis.git"
+pip install "enhanced_granger_analysis[full] @ git+ssh://git@github.com/Smoldersob/EnhancedGrangerCausalAnalysis.git"
 ```
 There are three optional dependencies version torch,tensorflow and full.
 

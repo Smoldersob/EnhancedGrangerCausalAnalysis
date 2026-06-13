@@ -49,9 +49,9 @@ try:
     from ..utilities.metric_calculator import MetricCalculator
 except ImportError:  # pragma: no cover - direct script execution fallback
     sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
-    from complex_granger_analysis.api import MultiTaskGrangerBuilder, TestGroupConfigIterator
-    from complex_granger_analysis.api.config_loader import BuilderConfigLoader
-    from complex_granger_analysis.utilities.metric_calculator import MetricCalculator
+    from enhanced_granger_analysis.api import MultiTaskGrangerBuilder, TestGroupConfigIterator
+    from enhanced_granger_analysis.api.config_loader import BuilderConfigLoader
+    from enhanced_granger_analysis.utilities.metric_calculator import MetricCalculator
 
 
 def _sanitize_token(value: Any) -> str:

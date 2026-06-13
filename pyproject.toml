@@ -3,7 +3,7 @@ requires = ["setuptools==68", "wheel"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "complex_granger_analysis"
+name = "enhanced_granger_analysis"
 version = "2.2.0"
 description = "Granger-causality workflows for multivariate time series"
 readme = "README.md"
@@ -50,8 +50,8 @@ include-package-data = true
 
 [tool.setuptools.packages.find]
 where = ["."]
-include = ["complex_granger_analysis*"]
-exclude = ["complex_granger_analysis.tests*"]
+include = ["enhanced_granger_analysis*"]
+exclude = ["enhanced_granger_analysis.tests*"]
 
 [tool.setuptools.package-data]
-"complex_granger_analysis.scripts" = ["*.json", "*.csv"]
+"enhanced_granger_analysis.scripts" = ["*.json", "*.csv"]
