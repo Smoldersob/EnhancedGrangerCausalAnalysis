@@ -7,7 +7,7 @@ This document explains how to work with backends using `BackendFactory`, how to 
 Simple examples:
 
 ```python
-from complex_granger_analysis import BackendFactory
+from enhanced_granger_analysis import BackendFactory
 
 # Explicit backend
 strategy = BackendFactory.get_strategy("pytorch")
@@ -79,7 +79,7 @@ strategy.resolve_callbacks([
 Mixed callback format is also supported (dictionary specs + callback objects/classes in one list).
 
 ```python
-from complex_granger_analysis.backends.callbacks.common_callbacks import EarlyStoppingCallback
+from enhanced_granger_analysis.backends.callbacks.common_callbacks import EarlyStoppingCallback
 
 mixed_callbacks = strategy.resolve_callbacks([
     {"type": "early_stopping", "patience": 4},

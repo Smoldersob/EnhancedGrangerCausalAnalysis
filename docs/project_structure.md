@@ -1,12 +1,12 @@
 # Project Structure
 
-This document describes the repository layout and the role of each major package and module. The installable Python package lives in `complex_granger_analysis/` inside the repository root.
+This document describes the repository layout and the role of each major package and module. The installable Python package lives in `enhanced_granger_analysis/` inside the repository root.
 
 ## Repository Layout
 
 ```text
-complex_granger_analysis/
-├── complex_granger_analysis/   # Installable package source
+enhanced_granger_analysis/
+├── enhanced_granger_analysis/   # Installable package source
 │   ├── api/                    # Public API: builder, orchestrator, simple API, config loading
 │   ├── backends/               # Backend strategies and backend-specific implementations
 │   ├── core/                   # Core configs, protocols, exceptions, output dataclasses

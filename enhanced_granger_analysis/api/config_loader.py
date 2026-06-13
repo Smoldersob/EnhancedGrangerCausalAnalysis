@@ -261,7 +261,7 @@ def _normalize_initializer_spec(raw_initializer: Any) -> Any:
 	if init_module is None:
 		raise DataValidationError(
 			"Initializer specs require the initializers module. "
-			"Check that complex_granger_analysis is properly installed."
+			"Check that enhanced_granger_analysis is properly installed."
 		)
 	
 	name = raw_initializer.strip().lower()

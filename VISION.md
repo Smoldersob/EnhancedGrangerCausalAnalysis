@@ -1,7 +1,7 @@
-# Vision for Complex Granger Analysis Library
+# Vision for Enhanced Granger Causal Analysis Library
 
 ## Overview
-The Complex Granger Analysis Library aims to provide a comprehensive, flexible, and efficient toolkit for Granger causality analysis in multivariate time series data. Building on the foundation of the current implementation, which supports multiple machine learning frameworks (TensorFlow, PyTorch, Scikit-learn, and Statsmodels), the vision is to evolve this library into a state-of-the-art solution that combines robustness, extensibility, and ease of use for researchers and practitioners in fields such as econometrics, neuroscience, and engineering.
+The Enhanced Granger Causal Analysis Library aims to provide a comprehensive, flexible, and efficient toolkit for Granger causality analysis in multivariate time series data. Building on the foundation of the current implementation, which supports multiple machine learning frameworks (TensorFlow, PyTorch, Scikit-learn, and Statsmodels), the vision is to evolve this library into a state-of-the-art solution that combines robustness, extensibility, and ease of use for researchers and practitioners in fields such as econometrics, neuroscience, and engineering.
 
 This vision document outlines the current strengths and weaknesses of the implementation, proposes key improvements, and sets a roadmap for future development.
 

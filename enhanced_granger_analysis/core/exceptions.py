@@ -1,4 +1,4 @@
-"""Domain-specific exceptions for the complex_granger_analysis package.
+"""Domain-specific exceptions for the enhanced_granger_analysis package.
 
 The hierarchy is intentionally granular so calling code can either:
 1) catch a broad library-level error (``ExtendedGrangerError``), or

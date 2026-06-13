@@ -245,13 +245,13 @@ You can sweep these fields:
 
 ### Practical recommendation
 
-For sweep dimensions with many list/object internals (`callbacks`, complex `relations`), treat each case value as a full replacement object.
+For sweep dimensions with many list/object internals (`callbacks`, `relations`), treat each case value as a full replacement object.
 For scalar and simple nested options (`model_config.*`, `lag_config.*`, `lag_selector.*`, `x_scaler`, `y_scaler`, `backend`), dotted keys are the most robust approach.
 
 ## How to load and use it
 
 ```python
-from complex_granger_analysis.api import BuilderConfigLoader, MultitaskGrangerBuilder
+from enhanced_granger_analysis.api import BuilderConfigLoader, MultitaskGrangerBuilder
 
 cfg = BuilderConfigLoader.load_file("config.json")
 output = MultitaskGrangerBuilder().from_config(cfg).data(df).fit()
@@ -260,7 +260,7 @@ output = MultitaskGrangerBuilder().from_config(cfg).data(df).fit()
 You can also load the raw mapping first and then adapt it yourself if needed:
 
 ```python
-from complex_granger_analysis.api import BuilderConfigLoader
+from enhanced_granger_analysis.api import BuilderConfigLoader
 
 cfg = BuilderConfigLoader.load_file("config.json")
 ```

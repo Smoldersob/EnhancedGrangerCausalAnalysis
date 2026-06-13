@@ -1,6 +1,6 @@
 # API Usage Guide
 
-This document provides a comprehensive guide to the main API elements available in `complex_granger_analysis` for building, configuring, and running Granger causality tests. It covers available components, their applications, simple test patterns, and the key distinctions between the builder, orchestrator, and simple Granger implementations.
+This document provides a comprehensive guide to the main API elements available in `enhanced_granger_analysis` for building, configuring, and running Granger causality tests. It covers available components, their applications, simple test patterns, and the key distinctions between the builder, orchestrator, and simple Granger implementations.
 
 ## Overview
 
@@ -103,8 +103,8 @@ output = builder.fit()  # or .run()
 **In Practice:**
 
 ```python
-from complex_granger_analysis.api import MultitaskGrangerBuilder
-from complex_granger_analysis.core.lag_config import LagConfiguration
+from enhanced_granger_analysis.api import MultitaskGrangerBuilder
+from enhanced_granger_analysis.core.lag_config import LagConfiguration
 import pandas as pd
 
 df = pd.read_csv("data.csv", index_col=0)
@@ -138,7 +138,7 @@ print(causality_matrix.data)  # DataFrame with signed causality indicators
 **Key Method:**
 
 ```python
-from complex_granger_analysis.api import SimpleGrangerAPI
+from enhanced_granger_analysis.api import SimpleGrangerAPI
 
 api = SimpleGrangerAPI()
 output = api.fit(
@@ -164,7 +164,7 @@ SimpleGrangerOutput(
 **In Practice:**
 
 ```python
-from complex_granger_analysis.api import SimpleGrangerAPI
+from enhanced_granger_analysis.api import SimpleGrangerAPI
 import pandas as pd
 
 df = pd.read_csv("data.csv", index_col=0)
@@ -225,7 +225,7 @@ print(output.p_value)
 **In Practice:**
 
 ```python
-from complex_granger_analysis.api import BuilderConfigLoader, MultitaskGrangerBuilder
+from enhanced_granger_analysis.api import BuilderConfigLoader, MultitaskGrangerBuilder
 import pandas as pd
 
 df = pd.read_csv("data.csv", index_col=0)
@@ -261,7 +261,7 @@ For details on configuration structure, see [Configuration File Usage](config_fi
 **In Practice:**
 
 ```python
-from complex_granger_analysis.api import TestGroupConfigIterator, MultitaskGrangerBuilder
+from enhanced_granger_analysis.api import TestGroupConfigIterator, MultitaskGrangerBuilder
 import pandas as pd
 
 df = pd.read_csv("data.csv", index_col=0)
@@ -344,7 +344,7 @@ print(causality_matrix.data)
 ```python
 import pandas as pd
 import numpy as np
-from complex_granger_analysis.api import MultitaskGrangerBuilder
+from enhanced_granger_analysis.api import MultitaskGrangerBuilder
 
 # Create synthetic dataset
 np.random.seed(42)
@@ -368,7 +368,7 @@ print(output.results.causality_matrix.data)
 ### Test with Config File
 
 ```python
-from complex_granger_analysis.api import BuilderConfigLoader, MultitaskGrangerBuilder
+from enhanced_granger_analysis.api import BuilderConfigLoader, MultitaskGrangerBuilder
 import pandas as pd
 
 df = pd.read_csv("data.csv", index_col=0)
@@ -389,7 +389,7 @@ print(output.results.p_value_matrix)
 ### Test with Sweep (Multiple Configurations)
 
 ```python
-from complex_granger_analysis.api import TestGroupConfigIterator, MultitaskGrangerBuilder
+from enhanced_granger_analysis.api import TestGroupConfigIterator, MultitaskGrangerBuilder
 import pandas as pd
 
 df = pd.read_csv("data.csv", index_col=0)
@@ -403,8 +403,8 @@ for i, cfg in enumerate(it):
 ### Test with Relations (Constraints)
 
 ```python
-from complex_granger_analysis.api import MultitaskGrangerBuilder
-from complex_granger_analysis.core.lag_config import LagConfiguration
+from enhanced_granger_analysis.api import MultitaskGrangerBuilder
+from enhanced_granger_analysis.core.lag_config import LagConfiguration
 import pandas as pd
 
 df = pd.read_csv("data.csv", index_col=0)
@@ -430,7 +430,7 @@ relations = {
 ### Quick Exploration with SimpleGrangerAPI
 
 ```python
-from complex_granger_analysis.api import SimpleGrangerAPI
+from enhanced_granger_analysis.api import SimpleGrangerAPI
 import pandas as pd
 
 df = pd.read_csv("data.csv", index_col=0)

@@ -1,5 +1,5 @@
 """
-Scaling implementations compatible with :class:`complex_granger_analysis.core.protocols.Scaler`.
+Scaling implementations compatible with :class:`enhanced_granger_analysis.core.protocols.Scaler`.
 
 The module provides common deterministic scaling strategies for multivariate
 time series data represented as 2D arrays: ``(n_samples, n_features)``.

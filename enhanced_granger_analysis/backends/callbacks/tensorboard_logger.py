@@ -16,7 +16,7 @@ class TorchTensorBoardCallback(Callback):
 
 	def __init__(
 		self,
-		log_dir: str = "runs/complex_granger_analysis",
+		log_dir: str = "runs/enhanced_granger_analysis",
 		log_every_n_epochs: int = 1,
 		flush_secs: int = 30,
 		track_weight_histograms: bool = False,

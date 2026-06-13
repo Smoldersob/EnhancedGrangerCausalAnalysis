@@ -1,13 +1,13 @@
-# Contributing to Complex Granger Analysis Library
+# Contributing to Enhanced Granger Causal Analysis Library
 
-Thank you for your interest in contributing to the Complex Granger Analysis Library! We welcome contributions from the community to help improve and expand this project.
+Thank you for your interest in contributing to the Enhanced Granger Causal Analysis Library! We welcome contributions from the community to help improve and expand this project.
 
 ## How to Contribute
 
 Since this project is maintained by a small team, contributions are primarily handled through the following channels:
 
 ### Reporting Issues
-- **Bug Reports**: If you encounter a bug, please create a detailed issue on [GitHub Issues](https://github.com/Smoldersob/complex_granger_analysis/issues). Include:
+- **Bug Reports**: If you encounter a bug, please create a detailed issue on [GitHub Issues](https://github.com/Smoldersob/enhanced_granger_analysis/issues). Include:
   - A clear description of the issue.
   - Steps to reproduce the problem.
   - Expected vs. actual behavior.

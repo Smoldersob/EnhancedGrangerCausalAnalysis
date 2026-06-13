@@ -23,10 +23,10 @@ The example below shows all preprocessing stages explicitly before model fitting
 ```python
 import pandas as pd
 
-from complex_granger_analysis.core.lag_config import LagConfiguration
-from complex_granger_analysis.preprocessing.stationarity import StationarityTransformer
-from complex_granger_analysis.preprocessing.lag import LagEngine, ICLagSelector
-from complex_granger_analysis.preprocessing.scaling import StandardScaler
+from enhanced_granger_analysis.core.lag_config import LagConfiguration
+from enhanced_granger_analysis.preprocessing.stationarity import StationarityTransformer
+from enhanced_granger_analysis.preprocessing.lag import LagEngine, ICLagSelector
+from enhanced_granger_analysis.preprocessing.scaling import StandardScaler
 
 # One or more datasets with the same schema
 df = pd.read_csv("example/PID_no_fault.csv", sep=";", index_col=0)

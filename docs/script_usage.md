@@ -294,11 +294,11 @@ python run_group_causality_tests.py --config run_group_causality_tests.config.js
 Output:
 ```
 ======================================================================
-Loading script config from: /home/user/my_pro/complex_granger_analysis/scripts/run_group_causality_tests.config.json
-Output directory: /home/user/my_pro/complex_granger_analysis/scripts/results
+Loading script config from: /home/user/my_pro/enhanced_granger_analysis/scripts/run_group_causality_tests.config.json
+Output directory: /home/user/my_pro/enhanced_granger_analysis/scripts/results
 Loading data from CSV files...
   ✓ Loaded 1 DataFrame(s)
-Loading group config from: /home/user/my_pro/complex_granger_analysis/scripts/group_config.json
+Loading group config from: /home/user/my_pro/enhanced_granger_analysis/scripts/group_config.json
   Sweep: 3 configuration case(s)
     - max_iter
 
@@ -314,7 +314,7 @@ Running test cases...
         ✓ Completed in 1.95s | Accuracy: 0.900 | F1: 0.923
 
 ======================================================================
-Saved summary to: /home/user/my_pro/complex_granger_analysis/scripts/results/summary.csv
+Saved summary to: /home/user/my_pro/enhanced_granger_analysis/scripts/results/summary.csv
 Total execution time: 4.03s across 3 case(s)
 Average time per case: 1.34s
 ======================================================================
