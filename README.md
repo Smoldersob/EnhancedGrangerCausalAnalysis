@@ -107,64 +107,86 @@ Details:
 
 ## Installation
 
-### Using pip (for private repository)
+### Prerequisites
 
-Since this repository is currently private, you need to install it via SSH. Ensure you have SSH keys configured for GitHub, then:
+- Python 3.9+ is recommended.
+- Git must be installed and available on your `PATH`.
+- Using a virtual environment such as `venv` or `conda` is recommended.
+
+### Install from the public Git repository
+
+If the repository is public on GitHub, it can be installed directly with `pip` over HTTPS:
 
 ```bash
-pip install git+ssh://git@github.com/Smoldersob/EnhancedGrangerCausalAnalysis.git
+pip install "enhanced_granger_analysis @ git+https://github.com/Smoldersob/EnhancedGrangerCausalAnalysis.git"
 ```
 
-Or clone first and install from your local copy:
+This installs the package directly from the repository without publishing it to PyPI. Currently this repo has no PyPI support.
+
+### Clone and install locally
+
+If local development or source inspection is preferred:
 
 ```bash
-git clone git@github.com:Smoldersob/EnhancedGrangerCausalAnalysis.git
+git clone https://github.com/Smoldersob/EnhancedGrangerCausalAnalysis.git
 cd EnhancedGrangerCausalAnalysis
 pip install .
 ```
 
-### Installing with specific backends
-
-To install with only core dependencies:
+For an editable install:
 
 ```bash
+pip install -e .
+```
+
+### Optional backend dependencies
+
+The project exposes three optional dependency sets:
+
+- `torch`
+- `tensorflow`
+- `full`
+
+These extras can be installed from a local clone:
+
+```bash
+# core only
 pip install .
+
+# PyTorch backend
+pip install ".[torch]"
+
+# TensorFlow backend
+pip install ".[tensorflow]"
+
+# all optional dependencies
+pip install ".[full]"
 ```
 
-To install with PyTorch backend:
+They can also be installed directly from the public GitHub repository. Pip requires the package name to be provided when requesting extras from a VCS URL; extras cannot be requested with a bare Git URL alone.
 
 ```bash
-pip install -e ".[torch]"
-# or install requirements manually:
+# core + PyTorch backend
+pip install "enhanced_granger_analysis[torch] @ git+https://github.com/Smoldersob/EnhancedGrangerCausalAnalysis.git"
+
+# core + TensorFlow backend
+pip install "enhanced_granger_analysis[tensorflow] @ git+https://github.com/Smoldersob/EnhancedGrangerCausalAnalysis.git"
+
+# full environment
+pip install "enhanced_granger_analysis[full] @ git+https://github.com/Smoldersob/EnhancedGrangerCausalAnalysis.git"
+```
+
+### Requirements files
+
+If the repository keeps backend-specific requirements files, they can still be used after cloning:
+
+```bash
 pip install -r requirements-torch.txt
-```
-
-To install with TensorFlow backend:
-
-```bash
-pip install -e ".[tensorflow]"
-# or install requirements manually:
 pip install -r requirements-tensorflow.txt
-```
-
-To install repo with backend dependencies via pip you need to use:
-
-```bash
-pip install "enhanced_granger_analysis[full] @ git+ssh://git@github.com/Smoldersob/EnhancedGrangerCausalAnalysis.git"
-```
-There are three optional dependencies version torch,tensorflow and full.
-
-### Installing all dependencies (full environment)
-
-To install all dependencies for both PyTorch and TensorFlow backends in one go:
-
-```bash
-pip install -e ".[full]"
-# or install requirements manually:
 pip install -r requirements-full.txt
 ```
 
-The `requirements-full.txt` file contains all packages from core, PyTorch, and TensorFlow dependencies, suitable for development or testing multiple backends.
+Use this option when a fully explicit environment is preferred over extras.
 
 ## Development
 

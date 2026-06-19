@@ -282,7 +282,7 @@ def run_from_config(script_config_path: str | Path, save_mode: str = "minimum") 
             "Update 'group_config_path' in script config."
         )
 
-    # Resolve CSV paths
+    # Resolve CSV paths_build_result_filename
     data_cfg = script_cfg.get("data")
     if isinstance(data_cfg, dict):
         csv_paths = data_cfg.get("csv_paths")
@@ -361,7 +361,7 @@ def run_from_config(script_config_path: str | Path, save_mode: str = "minimum") 
             out = builder.fit()
             
             # Extract and save all result matrices
-            causality_df = out.results.result(threshold=threshold, with_sign=True)
+            causality_df = out.results.result(threshold=threshold, with_sign=False)
             p_value_df = out.results.p_value
             f_test_df = out.results.F_test
             sign_df = out.results.sign
