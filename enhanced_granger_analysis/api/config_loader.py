@@ -157,43 +157,6 @@ def _build_lag_selector_from_spec(
 		"Unsupported lag_selector type. Supported: ic, cv, var"
 	)
 
-
-def _build_callback_from_spec(raw_callback: Any) -> Any:
-	"""Instantiate supported built-in callbacks from config spec."""
-	type_name, params = _extract_typed_spec(raw_callback, context="callback")
-
-	if type_name in {"early_stopping", "earlystopping", "early_stoping"}:
-		return EarlyStopping(**params)
-	if type_name in {"reduce_lr", "reduce_learning_rate", "reducelearningrate", "reduce_lr_on_plateau"}:
-		return ReduceLearningRate(**params)
-	if type_name in {"convergence_check", "convergencecheck"}:
-		return ConvergenceCheck(**params)
-	if type_name in {"torch_tensorboard", "tensorboard", "tensorboard_logger"}:
-		if TorchTensorBoardCallback is None:
-			raise DataValidationError(
-				"Callback 'torch_tensorboard' is unavailable. Install PyTorch to enable it."
-			)
-		return TorchTensorBoardCallback(**params)
-
-	raise DataValidationError(
-		"Unsupported callback type. Supported: early_stopping, reduce_lr, convergence_check, torch_tensorboard"
-	)
-
-
-def _normalize_callbacks(raw_callbacks: Any) -> List[Any]:
-	"""Normalize callback config into callback object instances."""
-	if raw_callbacks is None:
-		return []
-
-	if isinstance(raw_callbacks, (str, Mapping)):
-		return [_build_callback_from_spec(raw_callbacks)]
-
-	if isinstance(raw_callbacks, Sequence) and not isinstance(raw_callbacks, (str, bytes)):
-		return [_build_callback_from_spec(cb) for cb in raw_callbacks]
-
-	raise DataValidationError("callbacks must be a callback spec object/string or a list of specs")
-
-
 def _normalize_callbacks_for_backend(raw_callbacks: Any, backend_name: Optional[str]) -> List[Any]:
 	"""Normalize callback specs and delegate object creation to backend strategies.
 
@@ -324,20 +287,6 @@ def _normalize_compute_device(raw_device: Any, backend_name: Optional[str]) -> D
 	return {}
 
 
-def _normalize_regularizer_spec(raw_regularizer: Any) -> Dict[str, Any]:
-	"""Normalize regularizer spec aliases into backend-ready regularizer_spec mapping."""
-	type_name, params = _extract_typed_spec(raw_regularizer, context="regularizer")
-	params = dict(params)
-	params["type"] = type_name
-
-	if params["type"] not in {"l1", "lag_dependent_l1"}:
-		raise DataValidationError(
-			"Unsupported regularizer type. Supported: l1, lag_dependent_l1"
-		)
-
-	return params
-
-
 class BuilderConfigLoader:
 	"""Load and normalize builder configuration from JSON/YAML files."""
 
@@ -455,16 +404,6 @@ class BuilderConfigLoader:
 				out.get("callbacks"),
 				backend_name=backend_name,
 			)
-
-		if "regularizer" in out and out.get("regularizer") is not None:
-			if "regularizer_spec" in out and out.get("regularizer_spec") is not None:
-				raise DataValidationError(
-					"Provide only one of 'regularizer' or 'regularizer_spec' in config"
-				)
-			out["regularizer_spec"] = _normalize_regularizer_spec(out.pop("regularizer"))
-
-		if "regularizer_spec" in out and out.get("regularizer_spec") is not None:
-			out["regularizer_spec"] = _normalize_regularizer_spec(out.get("regularizer_spec"))
 
 		# Normalize initializer spec (string or object → initializer class)
 		if "initializer" in out and out.get("initializer") is not None:

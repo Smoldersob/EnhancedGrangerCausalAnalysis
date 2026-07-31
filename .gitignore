@@ -6,3 +6,4 @@ __pycache__/
 evn/
 venv/
 *.egg-info/
+.vscode/

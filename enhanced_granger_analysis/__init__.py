@@ -11,6 +11,7 @@ _LAZY_SUBMODULES = {
     "utilities",
     "results",
     "initializers",
+    "hiperopt",
 }
 
 _LAZY_SYMBOLS = {
@@ -26,6 +27,7 @@ _LAZY_SYMBOLS = {
 __all__ = [
     "__version__",
     "api",
+    "hiperopt",
     "preprocessing",
     "backends",
     "core",

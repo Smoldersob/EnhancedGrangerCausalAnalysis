@@ -1,11 +1,10 @@
 from __future__ import annotations
 
 import copy
-import itertools
 import os
 import re
 from dataclasses import dataclass
-from typing import Any, Dict, List, Literal, Mapping, Optional, Sequence, Tuple
+from typing import Any, Dict, List, Mapping, Optional, Sequence, Tuple
 
 import numpy as np
 import pandas as pd
@@ -19,6 +18,7 @@ from ..preprocessing.lag.lag_engine import LagEngine
 from ..preprocessing.stationarity import StationarityTransformer
 from ..preprocessing.scaling import IdentityScaler, MaxAbsScaler, MinMaxScaler, RobustScaler, StandardScaler, _BaseScaler
 from ..results.granger_results import GrangerAnalysisResults
+from ..hiperopt.hyperoptimization import MultiTaskGrangerHyperparameterOptimizer
 
 
 @dataclass(frozen=True)
@@ -72,37 +72,6 @@ def _reduce_backend_load(
 
 	idx = np.arange(n_keep, dtype=int)
 	return X_scaled[idx], y_scaled[idx], X_raw[idx], y_raw[idx]
-
-
-def _expand_grid(param_grid: Mapping[str, Sequence[Any]]) -> List[Dict[str, Any]]:
-	"""Expand parameter grid into cartesian product list."""
-	if not param_grid:
-		return []
-	keys = list(param_grid.keys())
-	values = [list(param_grid[k]) for k in keys]
-	if any(len(v) == 0 for v in values):
-		raise ValueError("All param_grid entries must contain at least one value")
-	return [dict(zip(keys, combo)) for combo in itertools.product(*values)]
-
-
-def _extract_score_from_fit_result(fit_result: Any) -> float:
-	"""Return scalar score used by hyperoptimization (lower is better)."""
-	if isinstance(fit_result, dict) and "test_statistic" in fit_result:
-		try:
-			return float(fit_result["test_statistic"])
-		except (TypeError, ValueError):
-			pass
-	return float("inf")
-
-
-def _short_training_config(model_config: Mapping[str, Any]) -> Dict[str, Any]:
-	"""Build a short-run config for hyperoptimization trial training."""
-	short_cfg = dict(model_config)
-	if "epochs" in short_cfg:
-		short_cfg["epochs"] = max(3, int(short_cfg["epochs"] // 5))
-	if "max_iter" in short_cfg:
-		short_cfg["max_iter"] = max(10, int(short_cfg["max_iter"] // 5))
-	return short_cfg
 
 
 def _create_scaler(name: Optional[Any]) -> Any:
@@ -344,7 +313,7 @@ class MultiTaskGrangerAPI:
 		regularizer: Optional[Any] = None,
 		regularizer_spec: Optional[Dict[str, Any]] = None,
 		callbacks: Optional[Sequence[Any]] = None,
-		hiperoptimalization_state: Optional[Literal["model", "regularization"]] = None,
+		hiperoptimalization_state: Optional[str] = None,
 		hiperoptimalization_conf: Optional[Dict[str, Any]] = None,
 		initializer: Optional[Any] = None,
 		model_config: Optional[Dict[str, Any]] = None,
@@ -396,10 +365,6 @@ class MultiTaskGrangerAPI:
 			reg_spec_base.setdefault("max_lags_per_pred", lag_block_sizes)
 			reg_spec_base.setdefault("col_offsets", list(prepared.col_offsets[:-1].astype(int)))
 
-		reg_obj = regularizer
-		if reg_obj is None and reg_spec_base:
-			reg_obj = strategy.build_regularizer(reg_spec_base)
-
 		constraint_obj = strategy.build_constraint_from_relations(
 			relations=relations_map,
 			predictor_names=all_columns,
@@ -434,93 +399,37 @@ class MultiTaskGrangerAPI:
 			)
 
 		# Optional hyperoptimization before full base training.
-		hopt_conf = dict(hiperoptimalization_conf or {})
-		hopt_state = hiperoptimalization_state
-		if hopt_state is None:
-			hopt_state = hopt_conf.pop("type", hopt_conf.pop("mode", None))
-		else:
-			hopt_conf.pop("type", None)
-			hopt_conf.pop("mode", None)
-		if hopt_state is not None:
-			if hopt_state not in {"model", "regularization"}:
-				raise ValueError("hiperoptimalization_state must be one of: None, 'model', 'regularization'")
-			hopt_n_trials = int(hopt_conf.get("n_trials", 20))
-			hopt_grid = dict(hopt_conf.get("param_grid", hopt_conf))
-			if "n_trials" in hopt_grid:
-				hopt_grid.pop("n_trials")
-			short_cfg = _short_training_config(model_cfg)
+		if hiperoptimalization_conf is not None or hiperoptimalization_state is not None:
+			hopt_conf_effective = dict(hiperoptimalization_conf or {})
+			if hiperoptimalization_state is not None and "type" not in hopt_conf_effective and "mode" not in hopt_conf_effective:
+				hopt_conf_effective["type"] = hiperoptimalization_state
 
-			if hopt_state == "regularization":
-				candidates = _expand_grid(hopt_grid) if hopt_grid else []
-				if not candidates:
-					candidates = [{}]
+			hyper_optimizer = MultiTaskGrangerHyperparameterOptimizer(strategy=strategy)
+			hopt_result = hyper_optimizer.optimize(
+				config=hopt_conf_effective,
+				regularizer_spec=reg_spec_base,
+				model_config=model_cfg,
+				prepared=prepared,
+				constraint_obj=constraint_obj,
+				initializer_weights=initializer_weights,
+				run_cfg_factory=_run_cfg,
+				assign_initializer_weights=self._assign_initializer_weights,
+			)
+			hopt_applied = hopt_result.apply_to(
+				model_config=model_cfg,
+				regularizer_spec=reg_spec_base,
+			)
+			reg_spec_base = hopt_applied["regularizer_spec"]
+			model_cfg = hopt_applied["model_config"]
 
-				best_score = float("inf")
-				best_reg_obj = reg_obj
-				trial_reg_spec_base = dict(reg_spec_base)
-				if not trial_reg_spec_base and reg_obj is not None:
-					derived_trial_spec = _regularizer_spec_from_value(reg_obj)
-					if derived_trial_spec is not None:
-						trial_reg_spec_base = derived_trial_spec
+		if str(reg_spec_base.get("type", "")).lower() == "lag_dependent_l1":
+			lag_block_sizes = list((prepared.col_offsets[1:] - prepared.col_offsets[:-1]).astype(int))
+			reg_spec_base.setdefault("max_lags_per_pred", lag_block_sizes)
+			reg_spec_base.setdefault("col_offsets", list(prepared.col_offsets[:-1].astype(int)))
 
-				for trial_idx, params in enumerate(candidates[:hopt_n_trials], start=1):
-					trial_reg_spec = dict(trial_reg_spec_base)
-					trial_reg_spec.update(params)
-					if trial_reg_spec:
-						trial_reg = strategy.build_regularizer(trial_reg_spec)
-					else:
-						trial_reg = regularizer
-
-					trial_cfg = _run_cfg(f"hopt_regularization_trial_{trial_idx}")
-					trial_cfg.update(short_cfg)
-
-					trial_model = strategy.build_model(
-						n_features=prepared.X_train.shape[1],
-						n_outputs=prepared.y_train.shape[1],
-						regularizer=trial_reg,
-						constraint=constraint_obj,
-						scaler=None,
-						**trial_cfg,
-					)
-					trial_model.initialize(prepared.X_backend_scaled, targets=prepared.y_backend_scaled)
-					if initializer_weights is not None:
-						self._assign_initializer_weights(
-							model=trial_model,
-							weights=initializer_weights,
-						)
-					fit_result = trial_model.fit()
-					score = _extract_score_from_fit_result(fit_result)
-					if score < best_score:
-						best_score = score
-						best_reg_obj = trial_reg
-
-				reg_obj = best_reg_obj
-
-			elif hopt_state == "model":
-				probe_cfg = _run_cfg("hopt_model_probe")
-				probe_cfg.update(short_cfg)
-				probe_model = strategy.build_model(
-					n_features=prepared.X_train.shape[1],
-					n_outputs=prepared.y_train.shape[1],
-					regularizer=reg_obj,
-					constraint=constraint_obj,
-					scaler=None,
-					**probe_cfg,
-				)
-				probe_model.initialize(prepared.X_backend_scaled, targets=prepared.y_backend_scaled)
-				if initializer_weights is not None:
-					self._assign_initializer_weights(
-						model=probe_model,
-						weights=initializer_weights,
-					)
-				if hasattr(probe_model, "hyperoptimize"):
-					hopt_result = probe_model.hyperoptimize(
-						reg_param_grid=hopt_grid,
-						n_trials=hopt_n_trials,
-					)
-					best_params = hopt_result.get("best_params", {}) if isinstance(hopt_result, dict) else {}
-					if isinstance(best_params, dict):
-						model_cfg.update(best_params)
+		reg_obj = regularizer
+		if reg_spec_base:
+			reg_obj = strategy.build_regularizer(reg_spec_base)
 
 		base_cfg = _run_cfg("base_model")
 		base_model = strategy.build_model(
