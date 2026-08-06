@@ -58,6 +58,10 @@ class CausalityMatrices:
 	ref_error: CausalityMatrix
 	f_test: CausalityMatrix
 	p_value: CausalityMatrix
+	wald_test: CausalityMatrix
+	wald_p_value: CausalityMatrix
+	lr_test: CausalityMatrix
+	lr_p_value: CausalityMatrix
 	sign: CausalityMatrix
 
 	@classmethod
@@ -67,11 +71,25 @@ class CausalityMatrices:
 			ref_error=CausalityMatrix.zeros(effects, causes),
 			f_test=CausalityMatrix.ones(effects, causes),
 			p_value=CausalityMatrix.ones(effects, causes),
+			wald_test=CausalityMatrix.ones(effects, causes),
+			wald_p_value=CausalityMatrix.ones(effects, causes),
+			lr_test=CausalityMatrix.ones(effects, causes),
+			lr_p_value=CausalityMatrix.ones(effects, causes),
 			sign=CausalityMatrix.ones(effects, causes),
 		)
 
-	def result(self, threshold: float = 0.01, with_sign: bool = False) -> pd.DataFrame:
-		ans = self.p_value.threshold(threshold)
+	def _p_value_matrix(self, test: str) -> CausalityMatrix:
+		normalized = test.strip().lower()
+		if normalized in {"f", "f_test", "ftest"}:
+			return self.p_value
+		if normalized in {"wald", "wald_test"}:
+			return self.wald_p_value
+		if normalized in {"lr", "likelihood_ratio", "likelihood_ratio_test", "lrt", "lr_test"}:
+			return self.lr_p_value
+		raise CausalityMatrixError(f"Unknown test type: {test}")
+
+	def result(self, threshold: float = 0.01, with_sign: bool = False, test: str = "f") -> pd.DataFrame:
+		ans = self._p_value_matrix(test).threshold(threshold)
 		if with_sign:
 			signed = self.sign.data.copy()
 			ans = ans.astype(np.float64)

@@ -4,7 +4,7 @@ from typing import Tuple
 
 import numpy as np
 from numpy.typing import NDArray
-from scipy.stats import f
+from scipy.stats import chi2, f
 
 from ..core.exceptions import ResultsError
 
@@ -33,6 +33,24 @@ def residual_sum_of_squares(
 	return np.sum((true_2d - pred_2d) ** 2, axis=0)
 
 
+def error_values(
+	y_true: NDArray[np.float64],
+	y_base_pred: NDArray[np.float64],
+	y_ref_pred: NDArray[np.float64],
+) -> Tuple[NDArray[np.float64], NDArray[np.float64]]:
+	"""Compute normalized base and reference errors per output."""
+	y_true_2d = ensure_2d(y_true)
+	rss_base = residual_sum_of_squares(y_true_2d, y_base_pred)
+	rss_ref = residual_sum_of_squares(y_true_2d, y_ref_pred)
+
+	n_samples = y_true_2d.shape[0]
+	n_outputs = y_true_2d.shape[1]
+	scale = float(n_samples) * float(n_outputs)
+	base_error = rss_base / scale
+	ref_error = rss_ref / scale
+	return base_error, ref_error
+
+
 def f_test_value(
 	error_ref: NDArray[np.float64],
 	error_base: NDArray[np.float64],
@@ -59,6 +77,44 @@ def f_test_value(
 	return numerator / denominator
 
 
+def wald_test_value(
+	error_ref: NDArray[np.float64],
+	error_base: NDArray[np.float64],
+	lag_order: int,
+	rank: float,
+	n_samples: int,
+) -> NDArray[np.float64]:
+	"""Compute Wald statistic vector from reference and base model errors."""
+	if lag_order <= 0:
+		raise ResultsError("lag_order must be > 0")
+
+	err_ref = np.asarray(error_ref, dtype=np.float64)
+	err_base = np.asarray(error_base, dtype=np.float64)
+	if err_ref.shape != err_base.shape:
+		raise ResultsError("error_ref and error_base must have the same shape")
+
+	denominator = np.maximum(err_base, np.finfo(np.float64).eps)
+	numerator = (err_ref - err_base) * (float(n_samples) - float(rank))
+	return numerator / denominator
+
+
+def likelihood_ratio_test_value(
+	error_ref: NDArray[np.float64],
+	error_base: NDArray[np.float64],
+	n_samples: int,
+) -> NDArray[np.float64]:
+	"""Compute likelihood-ratio statistic vector from reference and base errors."""
+	err_ref = np.asarray(error_ref, dtype=np.float64)
+	err_base = np.asarray(error_base, dtype=np.float64)
+	if err_ref.shape != err_base.shape:
+		raise ResultsError("error_ref and error_base must have the same shape")
+
+	ratio = np.maximum(err_ref, np.finfo(np.float64).eps) / np.maximum(
+		err_base, np.finfo(np.float64).eps
+	)
+	return float(n_samples) * np.log(ratio)
+
+
 def p_value_from_f_test(
 	f_values: NDArray[np.float64],
 	lag_order: int,
@@ -72,32 +128,13 @@ def p_value_from_f_test(
 	return 1.0 - f.cdf(f_pos, lag_order, df_den)
 
 
-def error_and_p_values(
-	y_true: NDArray[np.float64],
-	y_base_pred: NDArray[np.float64],
-	y_ref_pred: NDArray[np.float64],
-	lag_order: int,
-	n_features: int,
-) -> Tuple[NDArray[np.float64], NDArray[np.float64], NDArray[np.float64], NDArray[np.float64]]:
-	"""
-	Compute base/ref errors together with F-stat and p-values per output.
+def p_value_from_chi_square_test(
+	test_values: NDArray[np.float64],
+	df: float,
+) -> NDArray[np.float64]:
+	"""Convert chi-square-style statistics to upper-tail p-values."""
+	df_safe = max(float(df), 1.0)
+	stat_pos = np.maximum(np.asarray(test_values, dtype=np.float64), 0.0)
+	return 1.0 - chi2.cdf(stat_pos, df_safe)
 
-	Returns
-	-------
-	(base_error, ref_error, f_values, p_values)
-	"""
-	y_true_2d = ensure_2d(y_true)
-	rss_base = residual_sum_of_squares(y_true_2d, y_base_pred)
-	rss_ref = residual_sum_of_squares(y_true_2d, y_ref_pred)
 
-	n_samples = y_true_2d.shape[0]
-	rank = float(n_features) / float(lag_order)
-	f_values = f_test_value(rss_ref, rss_base, lag_order=lag_order, rank=rank, n_samples=n_samples)
-	p_values = p_value_from_f_test(f_values, lag_order=lag_order, df_denominator=n_samples - rank)
-
-	# Legacy-compatible normalization used by previous implementation.
-	n_outputs = y_true_2d.shape[1]
-	scale = float(n_samples) * float(n_outputs)
-	base_error = rss_base / scale
-	ref_error = rss_ref / scale
-	return base_error, ref_error, f_values, p_values

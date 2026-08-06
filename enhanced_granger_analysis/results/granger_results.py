@@ -9,7 +9,15 @@ from numpy.typing import NDArray
 
 from ..core.exceptions import ResultsError
 from .causality_matrix import CausalityMatrices
-from .statistics import ensure_2d, error_and_p_values
+from .statistics import (
+	ensure_2d,
+	error_values,
+	f_test_value,
+	likelihood_ratio_test_value,
+	p_value_from_chi_square_test,
+	p_value_from_f_test,
+	wald_test_value,
+)
 
 
 @dataclass
@@ -171,26 +179,33 @@ class GrangerAnalysisResults:
 		start = int(col_offsets[cause_index])
 		end = int(col_offsets[cause_index + 1])
 		lag_order = max(end - start, 1)
+		rank = float(n_features) / float(lag_order)
+		n_samples = y_true_2d.shape[0]
 
-		base_error, ref_error, f_values, p_values = error_and_p_values(
-			y_true=y_true_2d,
-			y_base_pred=base_pred,
-			y_ref_pred=ref_pred,
-			lag_order=lag_order,
-			n_features=n_features,
-		)
+		base_error, ref_error = error_values(y_true=y_true_2d, y_base_pred=base_pred, y_ref_pred=ref_pred)
+		f_values = f_test_value(ref_error, base_error, lag_order=lag_order, rank=rank, n_samples=n_samples)
+		wald_values = wald_test_value(ref_error, base_error, lag_order=lag_order, rank=rank, n_samples=n_samples)
+		lr_values = likelihood_ratio_test_value(ref_error, base_error, n_samples=n_samples)
+
+		f_p_values = p_value_from_f_test(f_values, lag_order=lag_order, df_denominator=n_samples - rank)
+		wald_p_values = p_value_from_chi_square_test(wald_values, df=lag_order)
+		lr_p_values = p_value_from_chi_square_test(lr_values, df=lag_order)
 
 		self.matrices.base_error.set_column(cause, base_error)
 		self.matrices.ref_error.set_column(cause, ref_error)
 		self.matrices.f_test.set_column(cause, f_values)
-		self.matrices.p_value.set_column(cause, p_values)
+		self.matrices.p_value.set_column(cause, f_p_values)
+		self.matrices.wald_test.set_column(cause, wald_values)
+		self.matrices.wald_p_value.set_column(cause, wald_p_values)
+		self.matrices.lr_test.set_column(cause, lr_values)
+		self.matrices.lr_p_value.set_column(cause, lr_p_values)
 
 		sign_values = self._sign_from_block(base_w[:, start:end])
 		self.matrices.sign.set_column(cause, sign_values)
 
-	def result(self, threshold: float = 0.01, with_sign: bool = False) -> pd.DataFrame:
+	def result(self, threshold: float = 0.01, with_sign: bool = False, test: str = "f") -> pd.DataFrame:
 		"""Return binary/signed causality matrix derived from p-value table."""
-		return self.matrices.result(threshold=threshold, with_sign=with_sign)
+		return self.matrices.result(threshold=threshold, with_sign=with_sign, test=test)
 
 	@property
 	def base_error(self) -> pd.DataFrame:
@@ -207,6 +222,22 @@ class GrangerAnalysisResults:
 	@property
 	def p_value(self) -> pd.DataFrame:
 		return self.matrices.p_value.data
+
+	@property
+	def wald_test(self) -> pd.DataFrame:
+		return self.matrices.wald_test.data
+
+	@property
+	def wald_p_value(self) -> pd.DataFrame:
+		return self.matrices.wald_p_value.data
+
+	@property
+	def lr_test(self) -> pd.DataFrame:
+		return self.matrices.lr_test.data
+
+	@property
+	def lr_p_value(self) -> pd.DataFrame:
+		return self.matrices.lr_p_value.data
 
 	@property
 	def sign(self) -> pd.DataFrame:
