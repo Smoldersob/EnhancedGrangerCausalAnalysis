@@ -7,3 +7,4 @@ evn/
 venv/
 *.egg-info/
 .vscode/
+.idea/

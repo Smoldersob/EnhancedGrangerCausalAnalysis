@@ -56,12 +56,6 @@ class ScikitBackendStrategy(BackendStrategy):
 		constraint_resolved = self.build_constraint(constraint)
 		callbacks_resolved = self.resolve_callbacks(config.get("callbacks", None))
 		optimizer_resolved = self.resolve_optimizer(config.get("optimizer", None))
-		self.validate_components(
-			regularizer=regularizer_resolved,
-			constraint=constraint_resolved,
-			callbacks=callbacks_resolved,
-			optimizer=optimizer_resolved,
-		)
 
 		return ScikitConstrainedGrangerModel(
 			backend="sklearn",
@@ -117,16 +111,20 @@ class ScikitBackendStrategy(BackendStrategy):
 
 	def validate_components(
 		self,
-		regularizer: Optional[Any],
-		constraint: Optional[Any],
+		regularizer: Optional[Any]|None,
+		constraint: Optional[Any]|None,
 		callbacks: Optional[List[Any]] = None,
 		optimizer: Any = None,
 	) -> None:
+		self._object_loader.set_loading_verbose(True)
+		if callbacks is not None:
+			resolved_callbacks = self._object_loader.resolve_callbacks(callbacks)
+		if optimizer is not None:
+			_ = self._object_loader.resolve_optimizer(optimizer)
+		if regularizer is not None:
+			_ = self._object_loader.resolve_regularizer(regularizer)
+		if constraint is not None:
+			_ = self._object_loader.resolve_constraint(constraint)
 		self._object_loader.set_loading_verbose(self._loading_verbose)
-		resolved_callbacks = self._object_loader.resolve_callbacks(callbacks)
-		_ = self._object_loader.resolve_optimizer(optimizer)
-		_ = self._object_loader.resolve_regularizer(regularizer)
-		_ = self._object_loader.resolve_constraint(constraint)
-		self._log_loaded_component("callbacks", resolved_callbacks)
 
 

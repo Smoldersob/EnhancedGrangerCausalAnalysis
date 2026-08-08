@@ -209,7 +209,6 @@ class MultiTaskGrangerHyperparameterOptimizer:
 				n_outputs=prepared.y_train.shape[1],
 				regularizer=trial_reg,
 				constraint=constraint_obj,
-				scaler=None,
 				**trial_cfg,
 			)
 			trial_model.initialize(prepared.X_backend_scaled, targets=prepared.y_backend_scaled)

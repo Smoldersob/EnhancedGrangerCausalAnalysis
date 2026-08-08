@@ -65,7 +65,6 @@ class TensorFlowGrangerModel(BaseGrangerModel):
 			)
 
 		self.optimizer = optimizer
-		self.loss = loss
 		self._optimizer_spec = optimizer
 		self._loss_spec = loss
 

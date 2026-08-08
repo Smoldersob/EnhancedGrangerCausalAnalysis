@@ -437,7 +437,6 @@ class MultiTaskGrangerAPI:
 			n_outputs=prepared.y_train.shape[1],
 			regularizer=reg_obj,
 			constraint=constraint_obj,
-			scaler=None,
 			**base_cfg,
 		)
 		base_model.initialize(prepared.X_backend_scaled, targets=prepared.y_backend_scaled)
@@ -457,6 +456,15 @@ class MultiTaskGrangerAPI:
 		base_weight_matrix = np.asarray(base_weights[0], dtype=np.float64)
 
 		results = GrangerAnalysisResults(effects=effects_list, causes=tested_causes_list)
+		results.set_base_snapshot(
+			base_predictions=base_pred_scaled,
+			base_weights=base_weight_matrix
+		)
+		results.set_base_covariance(
+			x_train=prepared.X_backend_scaled,
+			y_true=prepared.y_backend_scaled,
+			y_pred=base_pred_scaled,
+		)
 		reference_models: Dict[str, Any] = {}
 
 		# Reuse a single reference model object; reinitialize state for each cause.
@@ -466,7 +474,6 @@ class MultiTaskGrangerAPI:
 			n_outputs=prepared.y_train.shape[1],
 			regularizer=reg_obj,
 			constraint=constraint_obj,
-			scaler=None,
 			**reference_cfg,
 		)
 		reference_needs_reinit = bool(getattr(reference_model, "needs_reinit", True))
@@ -561,6 +568,3 @@ class MultiTaskGrangerAPI:
 		kernel = np.asarray(weights[0], dtype=np.float64).copy()
 		bias = np.asarray(weights[1], dtype=np.float64).copy()
 		model.set_weights([kernel, bias])
-
-
-__all__ = ["MultiTaskGrangerAPI", "MultitaskGrangerOutput"]

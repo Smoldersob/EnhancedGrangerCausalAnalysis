@@ -1,5 +1,4 @@
-from __future__ import annotations
-
+import warnings
 from dataclasses import dataclass
 from typing import Dict, Iterable, List, Optional
 
@@ -12,6 +11,7 @@ from .causality_matrix import CausalityMatrices
 from .statistics import (
 	ensure_2d,
 	error_values,
+	estimate_weight_covariance,
 	f_test_value,
 	likelihood_ratio_test_value,
 	p_value_from_chi_square_test,
@@ -26,7 +26,6 @@ class ModelSnapshot:
 
 	predictions: NDArray[np.float64]
 	weights: NDArray[np.float64]
-
 
 class GrangerAnalysisResults:
 	"""
@@ -43,6 +42,23 @@ class GrangerAnalysisResults:
 
 		self.base_snapshot: Optional[ModelSnapshot] = None
 		self.reference_snapshots: Dict[str, ModelSnapshot] = {}
+		self._base_covariance: Optional[NDArray[np.float64]] = None
+
+	def set_base_covariance(
+		self,
+		x_train: NDArray[np.float64],
+		y_true: NDArray[np.float64],
+		y_pred: NDArray[np.float64],
+	) -> None:
+		"""Estimate and store the covariance matrix used by Wald tests."""
+		self._base_covariance = estimate_weight_covariance(x_train, y_true, y_pred)
+
+	def set_base_snapshot(
+		self,
+		base_predictions: NDArray[np.float64],
+		base_weights: NDArray[np.float64],
+	) -> None:
+		self.base_snapshot = ModelSnapshot(predictions=base_predictions, weights=base_weights)
 
 	def _extract_output_feature_weights(
 		self,
@@ -173,7 +189,6 @@ class GrangerAnalysisResults:
 		else:
 			raise ResultsError("Provide reference_weights")
 
-		self.base_snapshot = ModelSnapshot(predictions=base_pred, weights=base_w)
 		self.reference_snapshots[cause] = ModelSnapshot(predictions=ref_pred, weights=ref_w)
 
 		start = int(col_offsets[cause_index])
@@ -184,8 +199,14 @@ class GrangerAnalysisResults:
 
 		base_error, ref_error = error_values(y_true=y_true_2d, y_base_pred=base_pred, y_ref_pred=ref_pred)
 		f_values = f_test_value(ref_error, base_error, lag_order=lag_order, rank=rank, n_samples=n_samples)
-		wald_values = wald_test_value(ref_error, base_error, lag_order=lag_order, rank=rank, n_samples=n_samples)
 		lr_values = likelihood_ratio_test_value(ref_error, base_error, n_samples=n_samples)
+
+		if self.base_snapshot.covariance is None:
+			raise warnings.warn(
+				"Base covariance is not set. Call set_base_covariance(...) before update_cause() to compute Wald test values."
+			)
+		else:
+			wald_values = wald_test_value(base_w, self._base_covariance, start=start, end=end)
 
 		f_p_values = p_value_from_f_test(f_values, lag_order=lag_order, df_denominator=n_samples - rank)
 		wald_p_values = p_value_from_chi_square_test(wald_values, df=lag_order)
@@ -250,6 +271,12 @@ class GrangerAnalysisResults:
 	@property
 	def base_predictions(self) -> Optional[NDArray[np.float64]]:
 		return None if self.base_snapshot is None else self.base_snapshot.predictions
+
+	@property
+	def base_covariance(self) -> Optional[NDArray[np.float64]]:
+		if self.base_snapshot is not None and self.base_snapshot.covariance is not None:
+			return self.base_snapshot.covariance
+		return self._base_covariance
 
 	@property
 	def ref_weights(self) -> Dict[str, NDArray[np.float64]]:

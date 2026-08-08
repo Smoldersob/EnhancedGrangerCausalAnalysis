@@ -11,7 +11,7 @@ from .models.base_model import BaseGrangerModel
 
 class BackendStrategy(ABC):
 	"""Abstract interface for backend-specific Granger model orchestration."""
-
+	_object_loader:Any=None
 	def __init__(self, loading_verbose: bool = False) -> None:
 		self._loading_verbose = bool(loading_verbose)
 
@@ -66,15 +66,6 @@ class BackendStrategy(ABC):
 		return constraint_spec
 
 
-	def validate_components(
-		self,
-		regularizer: Optional[Any],
-		constraint: Optional[Any],
-		callbacks: Optional[List[Any]] = None,
-		optimizer: Any = None,
-	) -> None:
-		pass
-
 	def resolve_callbacks(self, callbacks: Optional[List[Any]]) -> Optional[List[Any]]:
 		"""Resolve callback specs to backend-native callback objects."""
 		return callbacks
@@ -82,3 +73,23 @@ class BackendStrategy(ABC):
 	def resolve_optimizer(self, optimizer: Any) -> Any:
 		"""Resolve optimizer spec to backend-native optimizer object/class."""
 		return optimizer
+
+	def validate_components(
+		self,
+		regularizer: Optional[Any],
+		constraint: Optional[Any],
+		callbacks: Optional[List[Any]] = None,
+		optimizer: Any = None,
+	) -> None:
+		if self._object_loader is None:
+			return
+		self._object_loader.set_loading_verbose(True)
+		if callbacks is not None:
+			resolved_callbacks = self._object_loader.resolve_callbacks(callbacks)
+		if optimizer is not None:
+			_ = self._object_loader.resolve_optimizer(optimizer)
+		if regularizer is not None:
+			_ = self._object_loader.resolve_regularizer(regularizer)
+		if constraint is not None:
+			_ = self._object_loader.resolve_constraint(constraint)
+		self._object_loader.set_loading_verbose(self._loading_verbose)

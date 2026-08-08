@@ -58,12 +58,6 @@ class PyTorchBackendStrategy(BackendStrategy):
 		constraint_resolved = self.build_constraint(constraint)
 		callbacks_resolved = self.resolve_callbacks(config.get("callbacks", None))
 		optimizer_resolved = self.resolve_optimizer(config.get("optimizer", "adam"))
-		self.validate_components(
-			regularizer=regularizer_resolved,
-			constraint=constraint_resolved,
-			callbacks=callbacks_resolved,
-			optimizer=optimizer_resolved,
-		)
 
 		return PyTorchGrangerModel(
 			backend="pytorch",
@@ -125,20 +119,3 @@ class PyTorchBackendStrategy(BackendStrategy):
 			return constraint_spec
 		self._object_loader.set_loading_verbose(self._loading_verbose)
 		return self._object_loader.resolve_constraint(constraint_spec)
-
-	def validate_components(
-		self,
-		regularizer: Optional[Any],
-		constraint: Optional[Any],
-		callbacks: Optional[List[Any]] = None,
-		optimizer: Any = None,
-	) -> None:
-		if self._object_loader is None:
-			return
-		self._object_loader.set_loading_verbose(self._loading_verbose)
-		resolved_callbacks = self._object_loader.resolve_callbacks(callbacks)
-		_ = self._object_loader.resolve_optimizer(optimizer)
-		_ = self._object_loader.resolve_regularizer(regularizer)
-		_ = self._object_loader.resolve_constraint(constraint)
-		self._log_loaded_component("callbacks", resolved_callbacks)
-

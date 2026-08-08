@@ -28,9 +28,9 @@ class BaseGrangerModel(ABC):
         
         Args:
             backend: Backend identifier ('sklearn', 'keras', 'custom', etc.)
-            scaler: Scaler instance implementing Scaler protocol
             regularizer: Regularizer instance implementing Regularizer protocol  
             constraint: Constraint instance implementing Constraint protocol
+            callbacks: List of callbacks implementing callback protocol
         """
         self.backend: str = backend
         self.regularizer: Optional[Regularizer] = regularizer
