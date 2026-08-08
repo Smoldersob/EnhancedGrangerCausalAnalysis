@@ -5,9 +5,10 @@ This script:
 1. Loads multiple datasets (DataFrames) from CSV files.
 2. Iterates through group configurations (sweep of parameter variations).
 3. For each configuration, runs Granger analysis via MultitaskGrangerBuilder.
+4. Allows selecting causality decision test via --test: f, wald, or lr.
 4. Saves results according to --save mode:
     - minimum: binary causality matrix + summary.csv
-    - matrices: binary, p-values, F-test, sign + summary.csv
+    - matrices: binary, p-values (for selected test), F/Wald/LR test values, sign + summary.csv
 5. Computes metrics against ground truth (TP, FP, accuracy, F1, etc.).
 6. Produces a summary CSV with timing and metrics for each test configuration.
 
@@ -29,7 +30,8 @@ Config structure (scripts/run_group_causality_tests.config.json):
 Results in output_dir:
     - minimum mode: case_XXX_causality.csv + summary.csv
     - matrices mode: case_XXX_causality.csv, case_XXX_p_value.csv,
-      case_XXX_f_test.csv, case_XXX_sign.csv + summary.csv
+    case_XXX_f_test.csv, case_XXX_wald_test.csv, case_XXX_lr_test.csv,
+    case_XXX_sign.csv + summary.csv
 """
 
 from __future__ import annotations
@@ -235,7 +237,7 @@ def _resolve_path(base_dir: Path, raw_path: str | Path) -> Path:
     return (base_dir / p).resolve()
 
 
-def run_from_config(script_config_path: str | Path, save_mode: str = "minimum") -> Path:
+def run_from_config(script_config_path: str | Path, save_mode: str = "minimum", test_type: str = "f") -> Path:
     """
     Run Granger analysis test sweep from configuration file.
 
@@ -243,7 +245,8 @@ def run_from_config(script_config_path: str | Path, save_mode: str = "minimum") 
         script_config_path: path to script configuration JSON/YAML file
         save_mode: save strategy for per-case matrices:
             - "minimum": save only binary causality matrix (+ summary.csv at the end)
-            - "matrices": save all matrices (binary, p-value, f-test, sign) (+ summary.csv)
+            - "matrices": save all matrices (binary, selected p-value, f/wald/lr tests, sign) (+ summary.csv)
+        test_type: test used for thresholded causality matrix: "f", "wald", or "lr"
 
     Returns:
         Path to generated summary.csv file
@@ -254,6 +257,9 @@ def run_from_config(script_config_path: str | Path, save_mode: str = "minimum") 
     """
     config_path = Path(script_config_path).resolve()
     config_dir = config_path.parent
+    selected_test = str(test_type).strip().lower()
+    if selected_test not in {"f", "wald", "lr"}:
+        raise ValueError("test_type must be one of: 'f', 'wald', 'lr'")
 
     if not config_path.exists():
         raise FileNotFoundError(f"Script config file not found: {config_path}")
@@ -344,6 +350,8 @@ def run_from_config(script_config_path: str | Path, save_mode: str = "minimum") 
         causality_path = output_dir / base_filename
         p_value_path = output_dir / _build_result_filename(case_idx, backend, param_names, case_values, "p_value")
         f_test_path = output_dir / _build_result_filename(case_idx, backend, param_names, case_values, "f_test")
+        wald_test_path = output_dir / _build_result_filename(case_idx, backend, param_names, case_values, "wald_test")
+        lr_test_path = output_dir / _build_result_filename(case_idx, backend, param_names, case_values, "lr_test")
         sign_path = output_dir / _build_result_filename(case_idx, backend, param_names, case_values, "sign")
         
         # Print case header
@@ -361,9 +369,16 @@ def run_from_config(script_config_path: str | Path, save_mode: str = "minimum") 
             out = builder.fit()
             
             # Extract and save all result matrices
-            causality_df = out.results.result(threshold=threshold, with_sign=False)
-            p_value_df = out.results.p_value
+            causality_df = out.results.result(threshold=threshold, with_sign=False, test=selected_test)
+            if selected_test == "f":
+                p_value_df = out.results.p_value
+            elif selected_test == "wald":
+                p_value_df = out.results.wald_p_value
+            else:
+                p_value_df = out.results.lr_p_value
             f_test_df = out.results.F_test
+            wald_test_df = out.results.wald_test
+            lr_test_df = out.results.lr_test
             sign_df = out.results.sign
 
             # Measure per-case execution time excluding file-save operations.
@@ -376,6 +391,8 @@ def run_from_config(script_config_path: str | Path, save_mode: str = "minimum") 
             if save_mode == "matrices":
                 p_value_df.to_csv(p_value_path)
                 f_test_df.to_csv(f_test_path)
+                wald_test_df.to_csv(wald_test_path)
+                lr_test_df.to_csv(lr_test_path)
                 sign_df.to_csv(sign_path)
 
             if reuse_data and out.prepared_data is not None:
@@ -391,9 +408,12 @@ def run_from_config(script_config_path: str | Path, save_mode: str = "minimum") 
             row: Dict[str, Any] = {
                 "case_id": case_idx,
                 "backend": backend,
+                "test_type": selected_test,
                 "causality_file": causality_path.name,
                 "p_value_file": p_value_path.name if save_mode == "matrices" else "NOT_SAVED",
                 "f_test_file": f_test_path.name if save_mode == "matrices" else "NOT_SAVED",
+                "wald_test_file": wald_test_path.name if save_mode == "matrices" else "NOT_SAVED",
+                "lr_test_file": lr_test_path.name if save_mode == "matrices" else "NOT_SAVED",
                 "sign_file": sign_path.name if save_mode == "matrices" else "NOT_SAVED",
                 "execution_time_seconds": round(elapsed_s, 2),
             }
@@ -412,9 +432,12 @@ def run_from_config(script_config_path: str | Path, save_mode: str = "minimum") 
             row: Dict[str, Any] = {
                 "case_id": case_idx,
                 "backend": backend,
+                "test_type": selected_test,
                 "causality_file": "FAILED",
                 "p_value_file": "FAILED",
                 "f_test_file": "FAILED",
+                "wald_test_file": "FAILED",
+                "lr_test_file": "FAILED",
                 "sign_file": "FAILED",
                 "execution_time_seconds": round(elapsed_s, 2),
                 "error": str(e),
@@ -466,13 +489,19 @@ def main() -> None:
         help=(
             "Saving mode for per-case outputs: "
             "'minimum' saves only binary causality matrix; "
-            "'matrices' saves binary, p-value, f-test, and sign matrices"
+            "'matrices' saves binary, selected p-value, f/wald/lr test, and sign matrices"
         ),
+    )
+    parser.add_argument(
+        "--test",
+        default="f",
+        choices=["f", "wald", "lr"],
+        help="Statistical test used to build binary causality from p-values: f, wald, or lr",
     )
     args = parser.parse_args()
 
     try:
-        summary_path = run_from_config(args.config, save_mode=args.save)
+        summary_path = run_from_config(args.config, save_mode=args.save, test_type=args.test)
         print(f"\n✓ SUCCESS: Results saved to {summary_path}")
     except Exception as e:
         print(f"\n✗ ERROR: {e}", file=sys.stderr)

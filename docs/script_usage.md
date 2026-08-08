@@ -12,7 +12,8 @@ The script performs the following workflow:
 4. **Run Analysis** — for each configuration, executes Granger analysis via `MultitaskGrangerBuilder`
 5. **Save Results** — stores outputs according to `--save` mode:
   - `minimum` (default): binary causality matrix + `summary.csv`
-  - `matrices`: binary, p-values, F-test, sign + `summary.csv`
+  - `matrices`: binary, p-values, F-test, sign, ... + `summary.csv`
+  - `--test` selects the statistical test (`f`, `wald`, `lr`) used for thresholding and p-value output.
 6. **Compute Metrics** — evaluates predictions against ground truth (TP, FP, FN, accuracy, F1, precision, recall, etc.)
 7. **Generate Summary** — outputs summary.csv with timing and metrics across all test cases
 
@@ -130,12 +131,18 @@ python run_group_causality_tests.py --config run_group_causality_tests.config.js
 
 Allowed values:
 - `minimum` — saves only `case_NNN_*_causality.csv` and `summary.csv`
-- `matrices` — saves `causality`, `p_value`, `f_test`, `sign` and `summary.csv`
+- `matrices` — saves `causality`, selected `p_value`, `f_test`, `wald_test`, `lr_test`, `sign`, and `summary.csv`
+
+Test selection:
+- `--test f` (default) — thresholding and `p_value` use the F-test p-values
+- `--test wald` — thresholding and `p_value` use Wald-test p-values
+- `--test lr` — thresholding and `p_value` use likelihood-ratio p-values
 
 ### Default Behavior
 
 If `--config` is omitted, the script looks for `run_group_causality_tests.config.json` in the same directory.
 If `--save` is omitted, default mode is `minimum`:
+If `--test` is omitted, default test is `f`:
 
 ```bash
 python run_group_causality_tests.py

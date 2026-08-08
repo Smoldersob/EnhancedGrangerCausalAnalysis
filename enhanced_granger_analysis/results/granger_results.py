@@ -201,7 +201,7 @@ class GrangerAnalysisResults:
 		f_values = f_test_value(ref_error, base_error, lag_order=lag_order, rank=rank, n_samples=n_samples)
 		lr_values = likelihood_ratio_test_value(ref_error, base_error, n_samples=n_samples)
 
-		if self.base_snapshot.covariance is None:
+		if self._base_covariance is None:
 			raise warnings.warn(
 				"Base covariance is not set. Call set_base_covariance(...) before update_cause() to compute Wald test values."
 			)
