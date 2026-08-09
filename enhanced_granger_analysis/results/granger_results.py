@@ -11,7 +11,7 @@ from .causality_matrix import CausalityMatrices
 from .statistics import (
 	ensure_2d,
 	error_values,
-	estimate_weight_covariance,
+	estimate_masked_weight_covariance,
 	f_test_value,
 	likelihood_ratio_test_value,
 	p_value_from_chi_square_test,
@@ -35,7 +35,7 @@ class GrangerAnalysisResults:
 	all causality matrices for each tested cause.
 	"""
 
-	def __init__(self, effects: Iterable[str], causes: Iterable[str]) -> None:
+	def __init__(self, effects: Iterable[str], causes: Iterable[str], mask: NDArray[np.int64]) -> None:
 		self.effects: List[str] = list(effects)
 		self.causes: List[str] = list(causes)
 		self.matrices = CausalityMatrices.create(self.effects, self.causes)
@@ -43,6 +43,7 @@ class GrangerAnalysisResults:
 		self.base_snapshot: Optional[ModelSnapshot] = None
 		self.reference_snapshots: Dict[str, ModelSnapshot] = {}
 		self._base_covariance: Optional[NDArray[np.float64]] = None
+		self.mask: NDArray[np.int64] = mask
 
 	def set_base_covariance(
 		self,
@@ -51,13 +52,20 @@ class GrangerAnalysisResults:
 		y_pred: NDArray[np.float64],
 	) -> None:
 		"""Estimate and store the covariance matrix used by Wald tests."""
-		self._base_covariance = estimate_weight_covariance(x_train, y_true, y_pred)
+		self._base_covariance = estimate_masked_weight_covariance(
+			x_train, 
+			y_true, 
+			y_pred,
+			coefficient_mask=self.mask,
+			fit_intercept=True
+		)
 
 	def set_base_snapshot(
 		self,
 		base_predictions: NDArray[np.float64],
 		base_weights: NDArray[np.float64],
 	) -> None:
+		"""Store base model predictions and weights for later use in causality tests."""
 		self.base_snapshot = ModelSnapshot(predictions=base_predictions, weights=base_weights)
 
 	def _extract_output_feature_weights(
@@ -193,24 +201,53 @@ class GrangerAnalysisResults:
 
 		start = int(col_offsets[cause_index])
 		end = int(col_offsets[cause_index + 1])
-		lag_order = max(end - start, 1)
-		rank = float(n_features) / float(lag_order)
+		n_restrictions = np.sum(self.mask[:, start:end], axis=1)
+		if np.any(n_restrictions < 0):
+			raise ResultsError(
+				f"Invalid coefficient block for cause '{cause}': "
+				f"start={start}, end={end}"
+			)
+
 		n_samples = y_true_2d.shape[0]
 
-		base_error, ref_error = error_values(y_true=y_true_2d, y_base_pred=base_pred, y_ref_pred=ref_pred)
-		f_values = f_test_value(ref_error, base_error, lag_order=lag_order, rank=rank, n_samples=n_samples)
-		lr_values = likelihood_ratio_test_value(ref_error, base_error, n_samples=n_samples)
-
-		if self._base_covariance is None:
-			raise warnings.warn(
-				"Base covariance is not set. Call set_base_covariance(...) before update_cause() to compute Wald test values."
+		n_unrestricted_parameters = np.sum(self.mask, axis=1) + 1  # +1 for intercept if present
+		residual_df = n_samples - n_unrestricted_parameters
+		if np.any(residual_df <= 0):
+			raise ResultsError(
+				f"Not enough observations: n_samples={n_samples}, "
+				f"n_unrestricted_parameters={n_unrestricted_parameters}"
 			)
-		else:
-			wald_values = wald_test_value(base_w, self._base_covariance, start=start, end=end)
 
-		f_p_values = p_value_from_f_test(f_values, lag_order=lag_order, df_denominator=n_samples - rank)
-		wald_p_values = p_value_from_chi_square_test(wald_values, df=lag_order)
-		lr_p_values = p_value_from_chi_square_test(lr_values, df=lag_order)
+		base_error, ref_error = error_values(y_true=y_true_2d, y_base_pred=base_pred, y_ref_pred=ref_pred)
+
+		f_values = f_test_value(
+			error_ref=ref_error,
+			error_base=base_error,
+			n_restrictions=n_restrictions,
+			n_unrestricted_parameters=n_unrestricted_parameters,
+			n_samples=n_samples,
+		)
+		lr_values = likelihood_ratio_test_value(ref_error, base_error, n_samples=n_samples)
+		if self._base_covariance is None:
+			raise ResultsError(
+				"Base covariance is not set. "
+				"Call set_base_covariance(...) before update_cause()."
+			)
+		wald_values = wald_test_value(
+			weights=base_w,
+			covariance=self._base_covariance,
+			coefficient_mask=self.mask,
+			start=start,
+			end=end,
+		)
+		
+		f_p_values = p_value_from_f_test(
+			f_values=f_values,
+			n_restrictions=n_restrictions,
+			residual_df=residual_df,
+		)
+		wald_p_values = p_value_from_chi_square_test(lr_values, df=n_restrictions)
+		lr_p_values = p_value_from_chi_square_test(lr_values, df=n_restrictions)
 
 		self.matrices.base_error.set_column(cause, base_error)
 		self.matrices.ref_error.set_column(cause, ref_error)

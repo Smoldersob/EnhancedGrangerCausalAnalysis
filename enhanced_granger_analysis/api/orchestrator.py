@@ -365,6 +365,7 @@ class MultiTaskGrangerAPI:
 			reg_spec_base.setdefault("max_lags_per_pred", lag_block_sizes)
 			reg_spec_base.setdefault("col_offsets", list(prepared.col_offsets[:-1].astype(int)))
 
+
 		constraint_obj = strategy.build_constraint_from_relations(
 			relations=relations_map,
 			predictor_names=all_columns,
@@ -455,7 +456,11 @@ class MultiTaskGrangerAPI:
 		y_backend_real = prepared.y_scaler.inverse_transform(prepared.y_backend_scaled)
 		base_weight_matrix = np.asarray(base_weights[0], dtype=np.float64)
 
-		results = GrangerAnalysisResults(effects=effects_list, causes=tested_causes_list)
+		results = GrangerAnalysisResults(
+			effects=effects_list, 
+			causes=tested_causes_list,
+			mask=constraint_obj.mask if hasattr(constraint_obj, "mask") else prepared.base_mask,
+		)
 		results.set_base_snapshot(
 			base_predictions=base_pred_scaled,
 			base_weights=base_weight_matrix
