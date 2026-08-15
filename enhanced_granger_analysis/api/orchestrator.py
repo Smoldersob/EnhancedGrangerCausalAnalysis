@@ -495,7 +495,8 @@ class MultiTaskGrangerAPI:
 
 			if reference_needs_reinit:
 				reference_model.initialize(prepared.X_backend_scaled, targets=prepared.y_backend_scaled)
-			reference_model.set_weights(base_weights)
+			else:
+				reference_model.set_weights(base_weights)
 
 			start = int(prepared.col_offsets[cause_idx])
 			end = int(prepared.col_offsets[cause_idx + 1])

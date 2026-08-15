@@ -18,22 +18,29 @@ from ...core.exceptions import (
 )
 
 if find_spec("tensorflow") is not None:
-	tf = importlib.import_module("tensorflow")
-
-	_force_cpu_env = os.getenv("CGA_TF_FORCE_CPU", "").strip().lower()
-	_use_gpu_env = os.getenv("CGA_TF_USE_GPU", "").strip().lower()
-	_is_wsl = bool(os.getenv("WSL_DISTRO_NAME"))
-	_force_cpu = _force_cpu_env in {"1", "true", "yes", "on"}
-	_explicit_use_gpu = _use_gpu_env in {"1", "true", "yes", "on"}
-	_prefer_cpu = _force_cpu or (_is_wsl and not _explicit_use_gpu)
-
-	if _prefer_cpu:
-		try:
-			tf.config.set_visible_devices([], "GPU")
-		except Exception:
-			pass
-else:  # pragma: no cover - runtime dependency check
+	import tensorflow as tf
+else:
 	tf = None
+
+
+class FeatureMask(tf.keras.layers.Layer):
+	"""Untrainable feature mask layer: y = x * mask."""
+
+	def __init__(self, n_features: int, **kwargs: Any) -> None:
+		super().__init__(trainable=False, **kwargs)
+		self.n_features = n_features
+
+	def build(self, input_shape: Any) -> None:
+		self.mask = self.add_weight(
+			name="mask",
+			shape=(self.n_features,),
+			initializer="ones",
+			trainable=False,
+			dtype=self.dtype,
+		)
+
+	def call(self, inputs: Any) -> Any:
+		return inputs * self.mask
 
 
 class TensorFlowGrangerModel(BaseGrangerModel):
@@ -50,6 +57,9 @@ class TensorFlowGrangerModel(BaseGrangerModel):
 		epochs: int = 100,
 		batch_size: int = 32,
 		verbose: int = 0,
+		device: Optional[str] = None,
+    	use_jit: Optional[bool] = None,
+		**kwargs: Any,
 	) -> None:
 		super().__init__(
 			backend=backend,
@@ -72,18 +82,66 @@ class TensorFlowGrangerModel(BaseGrangerModel):
 		self.batch_size = batch_size
 		self.verbose = verbose
 
+		self.device = self._resolve_device(device)
+		if use_jit is None:
+			self.use_jit = self.device.startswith("/GPU:")
+		else:
+			self.use_jit = bool(use_jit)
+
+		if self.device.startswith("/CPU:") and self.use_jit:
+			raise ValueError(
+				"use_jit=True is unsupported with device='cpu' in this backend. "
+				"Use device='gpu' or set use_jit=False."
+			)
+
 		self.model: Optional[Any] = None
 		self._variable_control_layer: Optional[Any] = None
 		self._coefficient_layer: Optional[Any] = None
 
 		self._n_features: Optional[int] = None
 		self._n_outputs: Optional[int] = None
-		self._variable_mask: Optional[NDArray[np.float64]] = None
-		self._X_train: Optional[NDArray[np.float64]] = None
-		self._y_train: Optional[NDArray[np.float64]] = None
+		self._variable_mask: Optional[NDArray[np.float32]] = None
+		self._X_train: Optional[NDArray[np.float32]] = None
+		self._y_train: Optional[NDArray[np.float32]] = None
 		self._history: Optional[Any] = None
 
 		self._validate_keras_components()
+
+	def _resolve_device(self, device: Optional[str]) -> str:
+		"""Return the target device without modifying the global TensorFlow configuration."""
+		gpus = tf.config.list_physical_devices("GPU")
+
+		if device is None or str(device).strip().lower() in {"", "auto"}:
+			return "/GPU:0" if gpus else "/CPU:0"
+
+		normalized = str(device).strip().lower()
+
+		if normalized in {"cpu", "cpu-only", "/cpu:0"}:
+			return "/CPU:0"
+
+		if normalized in {"gpu", "cuda", "/gpu:0", "/cuda:0"}:
+			if not gpus:
+				raise BackendNotAvailableError(
+					"GPU/CUDA was requested, but TensorFlow does not detect a GPU."
+				)
+			return "/GPU:0"
+
+		if normalized.startswith(("cuda:", "gpu:", "/cuda:", "/gpu:")):
+			raw_index = normalized.rsplit(":", 1)[-1]
+			if not raw_index.isdigit():
+				raise ValueError(f"Unsupported TensorFlow device spec: {device!r}")
+
+			index = int(raw_index)
+			if index >= len(gpus):
+				raise BackendNotAvailableError(
+					f"Requested GPU {index}, but only {len(gpus)} GPU(s) are available."
+				)
+			return f"/GPU:{index}"
+
+		raise ValueError(
+			"device must be one of: None, 'auto', 'cpu', 'gpu', 'cuda', "
+			"'cuda:N' or 'gpu:N'."
+		)
 
 	def _validate_keras_components(self) -> None:
 		"""Validate optional regularizer/constraint against Keras base classes."""
@@ -143,27 +201,56 @@ class TensorFlowGrangerModel(BaseGrangerModel):
 		"""Resolve loss spec to Keras-compatible loss object/callable."""
 		return tf.keras.losses.get(self._loss_spec)
 
-	def _reset_optimizer_state(self) -> None:
-		"""Reset optimizer internal state without recompiling the model."""
-		if self.model is None or getattr(self.model, "optimizer", None) is None:
+	def _capture_initial_optimizer_state(self) -> None:
+		"""Build optimizer slots and save a fresh optimizer state without a training step."""
+		if self.model is None or self.model.optimizer is None:
 			return
 
 		optimizer = self.model.optimizer
-		# Keras optimizers expose state variables (iteration + slots).
-		# Zeroing them is much cheaper than re-compiling the full model graph.
-		for var in optimizer.variables:
-			var.assign(tf.zeros_like(var))
+		optimizer.build(self.model.trainable_variables)
+
+		variables = optimizer.variables
+		if callable(variables):
+			variables = variables()
+
+		self._initial_optimizer_weights = [
+			np.array(variable.numpy(), copy=True)
+			for variable in variables
+		]
+
+
+	def _restore_initial_optimizer_state(self) -> None:
+		"""Restores the optimizer state saved after its initialization."""
+		with tf.device(self.device):
+			if self.model is None or self.model.optimizer is None:
+				return
+
+			if self._initial_optimizer_weights is None:
+				self._capture_initial_optimizer_state()
+
+			optimizer = self.model.optimizer
+			variables = optimizer.variables
+			if callable(variables):
+				variables = variables()
+
+			if len(variables) != len(self._initial_optimizer_weights):
+				raise TrainingError(
+					"Optimizer variable layout changed; cannot restore initial optimizer state."
+				)
+
+			for variable, initial_value in zip(variables, self._initial_optimizer_weights):
+				variable.assign(initial_value)
 
 	def initialize(
 		self,
-		data: NDArray[np.float64],
+		data: NDArray[np.float32],
 		lags: Optional[int] = None,
 		**kwargs: Any,
 	) -> None:
 		"""Initialize model using lagged features prepared externally (e.g. LagEngine)."""
 		self._validate_keras_components()
 
-		X = np.asarray(data, dtype=np.float64)
+		X = np.asarray(data, dtype=np.float32)
 		y_raw = kwargs.get("targets")
 		if y_raw is None:
 			raise TrainingError(
@@ -171,7 +258,7 @@ class TensorFlowGrangerModel(BaseGrangerModel):
 				"Lagged features should be prepared by LagEngine."
 			)
 
-		y = np.asarray(y_raw, dtype=np.float64)
+		y = np.asarray(y_raw, dtype=np.float32)
 		if X.ndim != 2:
 			raise TrainingError("Expected 2D lagged feature matrix with shape (n_samples, n_lagged_features)")
 		if y.ndim == 1:
@@ -183,36 +270,44 @@ class TensorFlowGrangerModel(BaseGrangerModel):
 
 		n_features = X.shape[1]
 		n_outputs = y.shape[1]
-		variable_mask = np.ones(n_features, dtype=np.float64)
-		identity_kernel = np.eye(n_features, dtype=np.float64)
+		variable_mask = np.ones(n_features, dtype=np.float32)
+		identity_kernel = np.eye(n_features, dtype=np.float32)
 
-		variable_control_layer = tf.keras.layers.Dense(
-			units=n_features,
-			use_bias=False,
-			trainable=False,
-			kernel_initializer=tf.keras.initializers.Constant(identity_kernel),
-			name="variable_control",
-			dtype=tf.float64,
-		)
+		with tf.device(self.device):
+			variable_control_layer = FeatureMask(
+				n_features=n_features,
+				name="variable_control",
+				dtype=tf.float32,
+			)
 
-		coefficient_layer = tf.keras.layers.Dense(
-			units=n_outputs,
-			use_bias=True,
-			kernel_constraint=self.constraint,
-			kernel_regularizer=self.regularizer,
-			name="coefficients",
-			dtype=tf.float64,
-		)
+			coefficient_layer = tf.keras.layers.Dense(
+				units=n_outputs,
+				use_bias=True,
+				kernel_constraint=self.constraint,
+				kernel_regularizer=self.regularizer,
+				name="coefficients",
+				dtype=tf.float32,
+			)
 
-		self.model = tf.keras.Sequential(
-			[
-				tf.keras.layers.Input(shape=(n_features,), dtype=tf.float64),
-				variable_control_layer,
-				coefficient_layer,
-			],
-			name="tensorflow_granger_model",
-		)
-		self.model.compile(optimizer=self._build_optimizer(), loss=self._build_loss())
+			self.model = tf.keras.Sequential(
+				[
+					tf.keras.layers.Input(shape=(n_features,), dtype=tf.float32),
+					variable_control_layer,
+					coefficient_layer,
+				],
+				name="tensorflow_granger_model",
+			)
+
+			optimizer = self._build_optimizer()
+			loss = self._build_loss()
+
+			self.model.compile(
+				optimizer=optimizer,
+				loss=loss,
+				jit_compile=self.use_jit,
+			)
+	
+			self._capture_initial_optimizer_state()	
 
 		self._variable_control_layer = variable_control_layer
 		self._coefficient_layer = coefficient_layer
@@ -229,9 +324,12 @@ class TensorFlowGrangerModel(BaseGrangerModel):
 			raise ModelNotFittedError("Model is not initialized. Call initialize(...) first.")
 
 		# Reset optimizer state between fits without costly re-compile.
-		self._reset_optimizer_state()
+		self._restore_initial_optimizer_state()
 
 		try:
+			if self.batch_size is None:
+				self.batch_size = self._X_train.shape[0]
+				
 			self._history = self.model.fit(
 				self._X_train,
 				self._y_train,
@@ -252,7 +350,7 @@ class TensorFlowGrangerModel(BaseGrangerModel):
 				raise TrainingError(f"TensorFlow training failed: {exc}") from exc
 
 		self._fitted = True
-		forecasts = np.asarray(self.model.predict(self._X_train, verbose=0), dtype=np.float64)
+		forecasts = np.asarray(self.model.predict(self._X_train, verbose=0), dtype=np.float32)
 
 		final_loss = (
 			float(self._history.history["loss"][-1])
@@ -285,12 +383,12 @@ class TensorFlowGrangerModel(BaseGrangerModel):
 			or "failedpreconditionerror" in msg and "cuda" in msg
 		)
 
-	def predict(self, X: NDArray[np.float64]) -> NDArray[np.float64]:
+	def predict(self, X: NDArray[np.float32]) -> NDArray[np.float32]:
 		"""Generate predictions from fitted TensorFlow model."""
 		if not self._fitted or self.model is None or self._n_features is None:
 			raise ModelNotFittedError("Model is not fitted. Call fit(...) first.")
 
-		X_arr = np.asarray(X, dtype=np.float64)
+		X_arr = np.asarray(X, dtype=np.float32)
 		if X_arr.ndim != 2:
 			raise TrainingError("X must be a 2D array")
 		if X_arr.shape[1] != self._n_features:
@@ -298,14 +396,12 @@ class TensorFlowGrangerModel(BaseGrangerModel):
 				f"X has {X_arr.shape[1]} features, expected {self._n_features}"
 			)
 
-		if self._variable_mask is not None:
-			X_arr = X_arr * self._variable_mask[np.newaxis, :]
-
-		pred = self.model.predict(X_arr, verbose=0)
+		with tf.device(self.device):
+			pred = self.model.predict(X_arr, verbose=0)
 		return np.asarray(pred, dtype=np.float64)
 
 	def set_weights(
-		self, weights: Union[NDArray[np.float64], List[NDArray[np.float64]]]
+		self, weights: Union[NDArray[np.float32], List[NDArray[np.float32]]]
 	) -> None:
 		"""Set coefficient-layer kernel (and optional bias) weights."""
 		if self._coefficient_layer is None:
@@ -317,16 +413,19 @@ class TensorFlowGrangerModel(BaseGrangerModel):
 
 		if isinstance(weights, list):
 			if len(weights) == 1:
-				self._coefficient_layer.set_weights([weights[0], current_weights[1]])
+				with tf.device(self.device):
+					self._coefficient_layer.set_weights([weights[0], current_weights[1]])
 			elif len(weights) == 2:
-				self._coefficient_layer.set_weights([weights[0], weights[1]])
+				with tf.device(self.device):
+					self._coefficient_layer.set_weights([weights[0], weights[1]])
 			else:
 				raise TrainingError("weights list must contain kernel or [kernel, bias]")
 			return
 
-		self._coefficient_layer.set_weights([weights, current_weights[1]])
+		with tf.device(self.device):
+			self._coefficient_layer.set_weights([weights, current_weights[1]])
 
-	def get_weights(self) -> List[NDArray[np.float64]]:
+	def get_weights(self) -> List[NDArray[np.float32]]:
 		"""Return coefficient-layer weights as a single matrix in a one-element list."""
 		if self._coefficient_layer is None or self._n_features is None:
 			raise ModelNotFittedError("Model is not initialized. Call initialize(...) first.")
@@ -336,25 +435,25 @@ class TensorFlowGrangerModel(BaseGrangerModel):
 			return []
 
 		kernel = coeff_weights[0]
-		return [np.asarray(kernel, dtype=np.float64)]
+		bias = coeff_weights[1] if len(coeff_weights) > 1 else np.zeros(self._n_outputs, dtype=np.float32)
+		return [np.asarray(kernel, dtype=np.float32), np.asarray(bias, dtype=np.float32)]
 
 	def omit_variables(self, variable_indices: List[int]) -> None:
 		"""Set selected variables to zero in the non-trainable diagonal control layer."""
 		if self._variable_control_layer is None or self._n_features is None:
 			raise ModelNotFittedError("Model is not initialized. Call initialize(...) first.")
 
-		# Match PyTorch/scikit behavior: each call starts from fully enabled variables.
-		self._variable_mask = np.ones(self._n_features, dtype=np.float64)
+		with tf.device(self.device):
+			self._variable_mask = np.ones(self._n_features, dtype=np.float64)
 
-		for idx in variable_indices:
-			if idx < 0 or idx >= self._n_features:
+			indices = np.asarray(variable_indices, dtype=np.intp)
+			if np.any(indices < 0) or np.any(indices >= self._n_features):
 				raise TrainingError(
-					f"Variable index {idx} out of range [0, {self._n_features - 1}]"
+					f"Variable indices must belong to [0, {self._n_features - 1}]"
 				)
-			self._variable_mask[idx] = 0.0
 
-		diagonal_kernel = np.diag(self._variable_mask).astype(np.float64)
-		self._variable_control_layer.set_weights([diagonal_kernel])
+			self._variable_mask[indices] = 0.0
+			self._variable_control_layer.mask.assign(self._variable_mask)
 
 	def set_regularizer(self, regularizer: Any) -> None:
 		"""Set regularizer with Keras type validation."""

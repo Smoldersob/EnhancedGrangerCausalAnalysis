@@ -94,6 +94,7 @@ class ScikitConstrainedGrangerModel(LinearModel, RegressorMixin, BaseGrangerMode
 		tol: float = 1e-8,
 		batch_size: Optional[int] = None,
 		verbose: int = 0,
+		**kwargs: Any
 	) -> None:
 		BaseGrangerModel.__init__(
 			self,

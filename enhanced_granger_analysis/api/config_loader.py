@@ -9,12 +9,6 @@ from typing import Any, Dict, List, Mapping, Optional, Sequence, Tuple
 from ..core.exceptions import DataValidationError
 from ..core.lag_config import LagConfiguration
 from ..preprocessing.lag.lag_selectors import CVLagSelector, ICLagSelector, VARLagSelector
-from ..backends.callbacks import ConvergenceCheck, EarlyStopping, ReduceLearningRate
-
-try:
-	from ..backends.callbacks import TorchTensorBoardCallback  # type: ignore
-except Exception:  # pragma: no cover - optional callback
-	TorchTensorBoardCallback = None  # type: ignore[assignment]
 
 try:
 	from .. import initializers as init_module  # type: ignore
@@ -241,7 +235,6 @@ def _normalize_initializer_spec(raw_initializer: Any) -> Any:
 		"Supported: ols, zeros, random_normal (or class instances)"
 	)
 
-
 def _normalize_compute_device(raw_device: Any, backend_name: Optional[str]) -> Dict[str, Any]:
 	"""Normalize compute device spec into backend-specific environment setup.
 	
@@ -263,28 +256,16 @@ def _normalize_compute_device(raw_device: Any, backend_name: Optional[str]) -> D
 	if not device_spec or device_spec == "auto":
 		return {}
 	
-	# TensorFlow device setup via environment variables
-	if backend_name == "tensorflow":
-		if device_spec in {"cpu", "cpu-only"}:
-			os.environ["CGA_TF_FORCE_CPU"] = "1"
-			os.environ["CGA_TF_USE_GPU"] = "0"
-		elif device_spec in {"gpu", "cuda"} or device_spec.startswith("cuda"):
-			os.environ["CGA_TF_FORCE_CPU"] = "0"
-			os.environ["CGA_TF_USE_GPU"] = "1"
-		return {}
-	
-	# PyTorch device setup via model_config
-	if backend_name == "pytorch":
-		if device_spec in {"gpu", "cuda"}:
-			return {"device": "cuda"}
-		elif device_spec.startswith("cuda"):
-			return {"device": device_spec}
-		elif device_spec == "cpu":
-			return {"device": "cpu"}
-		# else: pass through unknown device specs
-		return {"device": device_spec} if device_spec != "auto" else {}
-	
+	if backend_name == "pytorch" or backend_name == "tensorflow":
+		if device_spec not in ["gpu", "cuda", "cpu", "cpu-only"] and not device_spec.startswith("cuda:"):
+			raise DataValidationError(
+				f"Unsupported compute_device '{raw_device}' for backend '{backend_name}'. "
+				"Supported: 'auto', 'cpu', 'cpu-only', 'gpu', 'cuda', or 'cuda:<index>'"
+			)
+		else:
+			return {"device": device_spec}	
 	return {}
+
 
 
 class BuilderConfigLoader:
@@ -409,11 +390,11 @@ class BuilderConfigLoader:
 		if "initializer" in out and out.get("initializer") is not None:
 			out["initializer"] = _normalize_initializer_spec(out.get("initializer"))
 
-		# Normalize compute device spec and merge into model_config for PyTorch
+		# Normalize compute device spec and merge into model_config
 		if "compute_device" in out or "device" in out:
 			device_spec = out.pop("compute_device", out.pop("device", None))
 			device_config = _normalize_compute_device(device_spec, backend_name)
-			if device_config and backend_name == "pytorch":
+			if device_config and backend_name != "sklearn":
 				model_cfg_raw = out.get("model_config")
 				if model_cfg_raw is None:
 					model_cfg: Dict[str, Any] = {}

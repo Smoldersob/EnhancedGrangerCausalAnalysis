@@ -171,6 +171,8 @@ class TensorFlowObjectLoader:
 					if key not in {"type", "name", "kind", "params"}:
 						params.setdefault(key, value)
 
+			resolved = self._tf.keras.optimizers.get({"class_name": type_name, "config": params})
+			self._log("optimizer", resolved)
 			return resolved
 
 		if isinstance(raw_optimizer, type) and issubclass(raw_optimizer, keras_optimizer):

@@ -140,7 +140,7 @@ class PyTorchBackendStrategy(BackendStrategy):
 		kwargs.setdefault("batch_size", config.get("batch_size", 32))
 		kwargs.setdefault("verbose", config.get("verbose", 0))
 		kwargs.setdefault("device", config.get("device", None))
-
+		
 		return model_cls(**kwargs)
 
 	def resolve_callbacks(self, callbacks: Optional[List[Any]]) -> Optional[List[Any]]:

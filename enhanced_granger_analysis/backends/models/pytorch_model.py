@@ -49,6 +49,7 @@ class PyTorchGrangerModel(BaseGrangerModel):
 		batch_size: Optional[int] = 32,
 		verbose: int = 0,
 		device: Optional[str] = None,
+		**kwargs: Any
 	) -> None:
 		super().__init__(
 			backend=backend,
@@ -76,11 +77,7 @@ class PyTorchGrangerModel(BaseGrangerModel):
 
 		self.optimizer_cls = self._resolve_optimizer(self._optimizer_spec)
 		self.loss_fn = self._resolve_loss(self._loss_spec)
-
-		if device is None:
-			self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-		else:
-			self.device = torch.device(device)
+		self.device = self._resolve_device(device)
 
 		self.model: Optional[Any] = None
 		self._variable_control_layer: Optional[Any] = None
@@ -96,6 +93,28 @@ class PyTorchGrangerModel(BaseGrangerModel):
 
 		self._validate_torch_components()
 		self._validate_callbacks()
+
+	def _resolve_device(self, device: Optional[str]) -> Any:
+		"""Normalize requested device alias and enforce CPU/GPU selection."""
+		if device is None or str(device).strip().lower() in {"", "auto"}:
+			return torch.device("cuda" if torch.cuda.is_available() else "cpu")
+
+		normalized = str(device).strip().lower()
+		if normalized in {"cpu", "cpu-only"}:
+			return torch.device("cpu")
+		if normalized in {"gpu", "cuda"}:
+			if not torch.cuda.is_available():
+				raise BackendNotAvailableError(
+					"CUDA was requested for PyTorch but no CUDA device is available."
+				)
+			return torch.device("cuda")
+		if normalized.startswith("cuda"):
+			if not torch.cuda.is_available():
+				raise BackendNotAvailableError(
+					f"Requested CUDA device '{normalized}' is unavailable on this machine."
+				)
+			return torch.device(normalized)
+		return torch.device(normalized)
 
 	def _resolve_optimizer(self, optimizer: Optional[Union[str, Type[Any], Any]]) -> Any:
 		"""Resolve optimizer spec to optimizer class."""
@@ -489,8 +508,9 @@ class PyTorchGrangerModel(BaseGrangerModel):
 			raise ModelNotFittedError("Model is not initialized. Call initialize(...) first.")
 
 		kernel = self._coefficient_layer.weight.detach().cpu().numpy().T
-		return [np.asarray(kernel, dtype=np.float64)]
-
+		bias = self._coefficient_layer.bias.detach().cpu().numpy()
+		return [kernel, bias]
+	
 	def omit_variables(self, variable_indices: List[int]) -> None:
 		"""Set selected variable mask entries to zero in non-trainable diagonal layer."""
 		if self._variable_control_layer is None or self._n_features is None:

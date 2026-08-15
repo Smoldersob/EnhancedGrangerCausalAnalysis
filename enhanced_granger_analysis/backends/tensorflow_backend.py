@@ -50,63 +50,10 @@ class TensorFlowBackendStrategy(BackendStrategy):
 
 	def __init__(self, loading_verbose: bool = False) -> None:
 		super().__init__(loading_verbose=loading_verbose)
-		self._tf = None
-		self._keras = None
 		self._object_loader: Optional[TensorFlowObjectLoader] = None
-		self._device_mode: str = "uninitialized"
 		if self.is_available():
 			import tensorflow as tf
-			self._configure_tensorflow_runtime(tf)
-			self._tf = tf
-			self._keras = tf.keras
 			self._object_loader = TensorFlowObjectLoader(tf, loading_verbose=loading_verbose)
-
-	def _configure_tensorflow_runtime(self, tf_module: Any) -> None:
-		"""Configure TensorFlow runtime device policy.
-
-		Policy:
-		- If CGA_TF_FORCE_CPU=1/true/yes/on => CPU only.
-		- Else if GPU is available => enable memory growth.
-		- If GPU setup fails => fallback to CPU-only mode.
-		"""
-		force_cpu_env = os.getenv("CGA_TF_FORCE_CPU", "").strip().lower()
-		use_gpu_env = os.getenv("CGA_TF_USE_GPU", "").strip().lower()
-		is_wsl = bool(os.getenv("WSL_DISTRO_NAME"))
-
-		force_cpu = force_cpu_env in {"1", "true", "yes", "on"}
-		explicit_use_gpu = use_gpu_env in {"1", "true", "yes", "on"}
-		# WSL is often unstable for CUDA/cuDNN in long test runs.
-		# Default to CPU there unless GPU is explicitly requested.
-		prefer_cpu = force_cpu or (is_wsl and not explicit_use_gpu)
-
-		if prefer_cpu:
-			try:
-				tf_module.config.set_visible_devices([], "GPU")
-			except Exception:
-				pass
-			self._device_mode = "cpu-forced" if force_cpu else "cpu-wsl-default"
-			return
-
-		try:
-			gpus = tf_module.config.list_physical_devices("GPU")
-		except Exception:
-			gpus = []
-
-		if not gpus:
-			self._device_mode = "cpu-no-gpu"
-			return
-
-		try:
-			for gpu in gpus:
-				tf_module.config.experimental.set_memory_growth(gpu, True)
-			self._device_mode = "gpu"
-		except Exception:
-			try:
-				tf_module.config.set_visible_devices([], "GPU")
-				self._device_mode = "cpu-fallback"
-			except Exception:
-				# Last resort: keep default placement if runtime is already initialized.
-				self._device_mode = "gpu-runtime-locked"
 
 	def is_available(self) -> bool:
 		try:
@@ -166,6 +113,7 @@ class TensorFlowBackendStrategy(BackendStrategy):
 		kwargs.setdefault("epochs", config.get("epochs", 100))
 		kwargs.setdefault("batch_size", config.get("batch_size", 32))
 		kwargs.setdefault("verbose", config.get("verbose", 0))
+		kwargs.setdefault("device", config.get("device", None))
 
 		return model_cls(**kwargs)
 
