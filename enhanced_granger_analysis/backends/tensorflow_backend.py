@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import os
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Mapping
 
 from numpy.typing import NDArray
 
@@ -11,6 +11,42 @@ from .object_loaders.tf_object_loader import TensorFlowObjectLoader
 
 class TensorFlowBackendStrategy(BackendStrategy):
 	"""Strategy for TensorFlow/Keras backend."""
+
+	@staticmethod
+	def _resolve_optimizer_spec(config: Dict[str, Any]) -> Any:
+		"""Normalize optimizer configuration while preserving backward compatibility.
+
+		Supported patterns:
+		- "adam"
+		- {"type": "adam", "learning_rate": 1e-3}
+		- {"type": "adam", "params": {"learning_rate": 1e-3}}
+		- legacy top-level "learning_rate" alongside optimizer config
+		"""
+		optimizer_cfg = config.get("optimizer")
+		learning_rate = config.get("learning_rate")
+		if optimizer_cfg is None:
+			if learning_rate is None:
+				return "adam"
+			return {"type": "adam", "learning_rate": learning_rate}
+
+		if isinstance(optimizer_cfg, Mapping):
+			merged = dict(optimizer_cfg)
+			params = merged.get("params")
+			if learning_rate is not None:
+				if isinstance(params, dict):
+					params = dict(params)
+					params.setdefault("learning_rate", learning_rate)
+					merged["params"] = params
+				else:
+					merged.setdefault("learning_rate", learning_rate)
+			return merged
+
+		if isinstance(optimizer_cfg, str) and learning_rate is not None:
+			name = optimizer_cfg.strip().lower()
+			if name:
+				return {"type": name, "learning_rate": learning_rate}
+
+		return optimizer_cfg
 
 	def __init__(self, loading_verbose: bool = False) -> None:
 		super().__init__(loading_verbose=loading_verbose)
@@ -111,7 +147,8 @@ class TensorFlowBackendStrategy(BackendStrategy):
 		constraint_resolved = self.build_constraint(constraint)
 		callbacks_cfg = config.get("callbacks", None)
 		callbacks_resolved = self.resolve_callbacks(callbacks_cfg)
-		optimizer_resolved = self.resolve_optimizer(config.get("optimizer", "adam"))
+		optimizer_spec = self._resolve_optimizer_spec(config)
+		optimizer_resolved = self.resolve_optimizer(optimizer_spec)
 
 		return TensorFlowGrangerModel(
 			backend="tensorflow",

@@ -119,6 +119,51 @@ Simple example:
 reg = {"type": "pytorch_l1", "l1": 0.005}
 ```
 
+### Optimizers and training settings
+For both PyTorch and TensorFlow, optimizer settings are normally passed through `model_config` in the builder config. Supported forms include:
+
+```python
+model_config = {
+    "optimizer": "adam",
+    "learning_rate": 1e-4,
+    "epochs": 100,
+    "batch_size": 32,
+}
+```
+
+or a more explicit nested optimizer spec:
+
+```python
+model_config = {
+    "optimizer": {
+        "type": "adam",
+        "params": {
+            "lr": 1e-4,
+            "beta_1": 0.9,
+            "beta_2": 0.999,
+        },
+    }
+}
+```
+
+For TensorFlow/Keras, `optimizer.params` is the canonical place for optimizer-specific kwargs. This includes values such as `gradient_accumulation_steps` when they are part of the optimizer configuration contract for that backend:
+
+```python
+model_config = {
+    "optimizer": {
+        "type": "adam",
+        "params": {
+            "lr": 1e-4,
+            "gradient_accumulation_steps": 4,
+        },
+    }
+}
+```
+
+For PyTorch, passing `gradient_accumulation_steps` outside `optimizer.params` is accepted only as a legacy compatibility alias. The loader recognizes the top-level/model-level form and then strips it before creating the optimizer, because PyTorch optimizers do not accept this setting as a real optimizer constructor argument. In other words, the canonical PyTorch config is still the top-level model setting, while the TensorFlow/Keras canonical location remains inside `optimizer.params`.
+
+This asymmetry is intentional: `gradient_accumulation_steps` is a backend-specific optimizer/training parameter, and the compatibility alias is only meaningful for PyTorch, not the other way around.
+
 ### Constraints
 Supported dictionary types:
 

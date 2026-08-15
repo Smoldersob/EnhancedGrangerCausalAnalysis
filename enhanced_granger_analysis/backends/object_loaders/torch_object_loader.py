@@ -106,6 +106,15 @@ class TorchObjectLoader:
 				"adam": self._torch.optim.Adam,
 				"sgd": self._torch.optim.SGD,
 				"rmsprop": self._torch.optim.RMSprop,
+				"adagrad": self._torch.optim.Adagrad,
+				"adafactor": self._torch.optim.Adafactor,
+				"adadelta": self._torch.optim.Adadelta,
+				"adamax": self._torch.optim.Adamax,
+				"adamw": self._torch.optim.AdamW,
+				"lbfgs": self._torch.optim.LBFGS,
+				"asgd": self._torch.optim.ASGD,
+				"muon": self._torch.optim.Muon,
+				"nadam": self._torch.optim.NAdam,
 			}
 			resolved = mapping.get(raw_optimizer.strip().lower())
 			if resolved is None:
@@ -117,11 +126,31 @@ class TorchObjectLoader:
 
 		if isinstance(raw_optimizer, Mapping):
 			type_name, params = self._extract_typed_spec(raw_optimizer, context="optimizer")
+			if "params" in raw_optimizer and isinstance(raw_optimizer["params"], Mapping):
+				params = dict(raw_optimizer["params"])
+				for key, value in raw_optimizer.items():
+					if key not in {"type", "name", "kind", "params"}:
+						params.setdefault(key, value)
+			elif "learning_rate" in raw_optimizer and "learning_rate" not in params:
+				params["learning_rate"] = raw_optimizer["learning_rate"]
+			elif "lr" in raw_optimizer and "lr" not in params:
+				params["lr"] = raw_optimizer["lr"]
+
+			# gradient_accumulation_steps is a training-level concern; it is not a valid
+			# constructor kwarg for PyTorch optimizers and should therefore be stripped out.
+			# Keep closure and other optimizer-specific kwargs intact so optimizers like
+			# LBFGS can still receive a valid closure callback.
+			params.pop("gradient_accumulation_steps", None)
+			params.pop("gradient_accumulation", None)
+			params.pop("accumulation_steps", None)
+
 			opt_cls = self.resolve_optimizer(type_name)
 
-			def _optimizer_factory(model_params: Any, lr: float = 1e-3, _cls: Any = opt_cls, _params: Dict[str, Any] = params) -> Any:
+			def _optimizer_factory(model_params: Any, _cls: Any = opt_cls, _params: Dict[str, Any] = params) -> Any:
 				merged = dict(_params)
-				merged.setdefault("lr", lr)
+				if "lr" not in merged and "learning_rate" in merged:
+					merged["lr"] = merged["learning_rate"]
+				merged.pop("learning_rate", None)
 				return _cls(model_params, **merged)
 
 			self._log("optimizer(factory)", _optimizer_factory)

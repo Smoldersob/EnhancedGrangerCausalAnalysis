@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Mapping, Optional
 
 from numpy.typing import NDArray
 
@@ -10,6 +10,66 @@ from .object_loaders.torch_object_loader import TorchObjectLoader
 
 class PyTorchBackendStrategy(BackendStrategy):
 	"""Strategy for PyTorch backend."""
+
+	@staticmethod
+	def _extract_gradient_accumulation_steps(config: Dict[str, Any], optimizer_spec: Any) -> int:
+		"""Extract training-level gradient accumulation setting from config/optimizer spec."""
+		value = config.get("gradient_accumulation_steps", None)
+		if value is None and isinstance(optimizer_spec, dict):
+			optimizer_params = optimizer_spec.get("params")
+			if isinstance(optimizer_params, dict):
+				value = optimizer_params.get("gradient_accumulation_steps", None)
+				if value is None:
+					value = optimizer_params.get("gradient_accumulation", None)
+				if value is None:
+					value = optimizer_params.get("accumulation_steps", None)
+
+			if value is None:
+				value = optimizer_spec.get("gradient_accumulation_steps", None)
+			if value is None:
+				value = optimizer_spec.get("gradient_accumulation", None)
+			if value is None:
+				value = optimizer_spec.get("accumulation_steps", None)
+
+		if value is None:
+			return 1
+		return int(value)
+
+	@staticmethod
+	def _resolve_optimizer_spec(config: Dict[str, Any]) -> Any:
+		"""Normalize optimizer configuration while preserving backward compatibility.
+
+		Supported patterns:
+		- "adam"
+		- {"type": "adam", "learning_rate": 1e-3}
+		- {"type": "adam", "params": {"lr": 1e-3}}
+		- legacy top-level "learning_rate" alongside optimizer config
+		"""
+		optimizer_cfg = config.get("optimizer")
+		learning_rate = config.get("learning_rate")
+		if optimizer_cfg is None:
+			if learning_rate is None:
+				return "adam"
+			return {"type": "adam", "learning_rate": learning_rate}
+
+		if isinstance(optimizer_cfg, dict):
+			merged = dict(optimizer_cfg)
+			params = merged.get("params")
+			if learning_rate is not None:
+				if isinstance(params, dict):
+					params = dict(params)
+					params.setdefault("lr", learning_rate)
+					merged["params"] = params
+				else:
+					merged.setdefault("learning_rate", learning_rate)
+			return merged
+
+		if isinstance(optimizer_cfg, str) and learning_rate is not None:
+			name = optimizer_cfg.strip().lower()
+			if name:
+				return {"type": name, "learning_rate": learning_rate}
+
+		return optimizer_cfg
 
 	def __init__(self, loading_verbose: bool = False) -> None:
 		super().__init__(loading_verbose=loading_verbose)
@@ -57,7 +117,9 @@ class PyTorchBackendStrategy(BackendStrategy):
 		regularizer_resolved = self.build_regularizer(regularizer)
 		constraint_resolved = self.build_constraint(constraint)
 		callbacks_resolved = self.resolve_callbacks(config.get("callbacks", None))
-		optimizer_resolved = self.resolve_optimizer(config.get("optimizer", "adam"))
+		optimizer_spec = self._resolve_optimizer_spec(config)
+		gradient_accumulation_steps = self._extract_gradient_accumulation_steps(config, optimizer_spec)
+		optimizer_resolved = self.resolve_optimizer(optimizer_spec)
 
 		return PyTorchGrangerModel(
 			backend="pytorch",
@@ -67,6 +129,7 @@ class PyTorchBackendStrategy(BackendStrategy):
 			loss=config.get("loss", None),
 			callbacks=callbacks_resolved,
 			learning_rate=config.get("learning_rate", 0.001),
+			gradient_accumulation_steps=gradient_accumulation_steps,
 			epochs=config.get("epochs", 100),
 			batch_size=config.get("batch_size", 32),
 			verbose=config.get("verbose", 0),

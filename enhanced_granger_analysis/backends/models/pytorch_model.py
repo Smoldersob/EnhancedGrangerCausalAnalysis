@@ -42,8 +42,8 @@ class PyTorchGrangerModel(BaseGrangerModel):
 		optimizer: Optional[Union[str, Type[Any], Any]] = None,
 		loss: Optional[Union[str, Any]] = None,
 		callbacks: Optional[List[Callback]] = None,
-		optimizer_cls: Optional[Any] = None,
 		learning_rate: float = 1e-3,
+		gradient_accumulation_steps: int = 1,
 		loss_fn: Optional[Any] = None,
 		epochs: int = 100,
 		batch_size: Optional[int] = 32,
@@ -63,11 +63,14 @@ class PyTorchGrangerModel(BaseGrangerModel):
 			)
 
 		self.learning_rate = learning_rate
+		self.gradient_accumulation_steps = int(gradient_accumulation_steps)
+		if self.gradient_accumulation_steps < 1:
+			raise ConstraintConfigurationError("gradient_accumulation_steps must be >= 1")
 		self.epochs = epochs
 		self.batch_size = batch_size
 		self.verbose = verbose
-
-		self._optimizer_spec = optimizer if optimizer is not None else optimizer_cls
+		
+		self._optimizer_spec = optimizer
 		self._loss_spec = loss if loss is not None else loss_fn
 		self.callbacks = callbacks or []
 
@@ -326,21 +329,53 @@ class PyTorchGrangerModel(BaseGrangerModel):
 		}
 		self._run_callback_hook("on_train_beginning", callback_state)
 
+		uses_closure = isinstance(self._optimizer, torch.optim.LBFGS)
+		if uses_closure and self.gradient_accumulation_steps > 1:
+			raise ConstraintConfigurationError(
+				"gradient_accumulation_steps > 1 is not supported with closure-based optimizer stepping"
+			)
+
 		for epoch in range(self.epochs):
 			callback_state["epoch"] = epoch
 			if not self._run_callback_hook("on_epoch_beginning", callback_state):
 				break
 
 			epoch_losses: List[float] = []
-			for xb, yb in loader:
-				self._optimizer.zero_grad()
-				pred = self.model(xb)
-				loss = self.loss_fn(pred, yb)
-				loss = loss + self._regularization_penalty()
-				loss.backward()
-				self._optimizer.step()
-				self._apply_constraint()
-				epoch_losses.append(float(loss.detach().cpu().item()))
+			self._optimizer.zero_grad()
+			for batch_idx, (xb, yb) in enumerate(loader):
+				if uses_closure:
+					def _default_closure() -> Any:
+						self._optimizer.zero_grad()
+						pred_local = self.model(xb)
+						loss_local = self.loss_fn(pred_local, yb)
+						loss_local = loss_local + self._regularization_penalty()
+						loss_local.backward()
+						return loss_local
+
+					closure_fn = _default_closure
+
+					step_result = self._optimizer.step(closure_fn)
+					self._apply_constraint()
+
+					if torch.is_tensor(step_result):
+						epoch_losses.append(float(step_result.detach().cpu().item()))
+					else:
+						with torch.no_grad():
+							loss_value = self.loss_fn(self.model(xb), yb) + self._regularization_penalty()
+						epoch_losses.append(float(loss_value.detach().cpu().item()))
+					continue
+				else:
+					pred = self.model(xb)
+					loss = self.loss_fn(pred, yb)
+					loss = loss + self._regularization_penalty()
+					loss = loss / self.gradient_accumulation_steps
+					loss.backward()
+
+					if (batch_idx + 1) % self.gradient_accumulation_steps == 0 or batch_idx == len(loader) - 1:
+						self._optimizer.step()
+						self._optimizer.zero_grad()
+						self._apply_constraint()
+						epoch_losses.append(float(loss.detach().cpu().item() * self.gradient_accumulation_steps))
 
 			epoch_loss = float(np.mean(epoch_losses)) if epoch_losses else float("nan")
 			self._loss_history.append(epoch_loss)
@@ -486,18 +521,3 @@ class PyTorchGrangerModel(BaseGrangerModel):
 		self._validate_torch_components()
 		self.constraint = constraint
 		
-
-	def hyperoptimize(
-		self,
-		reg_param_grid: Dict[str, List[Any]],
-		n_trials: int = 50,
-	) -> Dict[str, Any]:
-		"""Return explicit no-op hyperoptimization result for this model."""
-		return {
-			"best_params": {},
-			"best_score": np.nan,
-			"trial_results": [],
-			"n_trials_requested": n_trials,
-			"reg_param_grid": reg_param_grid,
-			"message": "PyTorchGrangerModel does not have parameters for hyperoptimization.",
-		}

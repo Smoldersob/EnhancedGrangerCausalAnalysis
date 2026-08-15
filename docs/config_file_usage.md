@@ -121,6 +121,70 @@ Or keep the relation rules in a separate file and point `relations` at it:
 
 The referenced file may contain either the list-of-objects form or the mapping form.
 
+## Optimizer and training parameter control
+You can tune optimizer and training behavior directly in the builder config under `model_config` (or, for backward compatibility, by top-level keys such as `learning_rate`). Supported patterns are:
+
+```json
+{
+  "model_config": {
+    "optimizer": "adam",
+    "learning_rate": 1e-4,
+    "epochs": 100,
+    "batch_size": 32
+  }
+}
+```
+
+```json
+{
+  "model_config": {
+    "optimizer": {
+      "type": "adam",
+      "params": {
+        "lr": 1e-4,
+        "beta_1": 0.9,
+        "beta_2": 0.999
+      }
+    }
+  }
+}
+```
+
+This works for both TensorFlow and PyTorch. The difference is how backend-specific optimizer settings are forwarded:
+
+- TensorFlow/Keras: `optimizer.params` is the canonical location for optimizer arguments. If a backend-specific optimizer parameter is expected there, it should be placed under `optimizer.params` as part of the optimizer configuration.
+- PyTorch: `gradient_accumulation_steps` is also accepted outside `optimizer.params` as a legacy compatibility alias, because the training loop consumes it at the model level rather than passing it to the optimizer constructor.
+
+Canonical TensorFlow/Keras form:
+
+```json
+{
+  "model_config": {
+    "optimizer": {
+      "type": "adam",
+      "params": {
+        "learning_rate": 1e-4,
+        "gradient_accumulation_steps": 4
+      }
+    }
+  }
+}
+```
+
+Legacy PyTorch-compatible form:
+
+```json
+{
+  "model_config": {
+    "optimizer": "adam",
+    "learning_rate": 1e-4,
+    "gradient_accumulation_steps": 4
+  }
+}
+```
+
+The important distinction is that the backward-compatibility alias is PyTorch-only. In TensorFlow/Keras, the valid placement is under `optimizer.params`; the reverse is not the canonical or supported pattern.
+
 ## Group Test Configuration
 
 Use a group-test file when you want to run multiple cases from one shared base config.

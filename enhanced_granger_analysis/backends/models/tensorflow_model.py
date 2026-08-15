@@ -366,18 +366,3 @@ class TensorFlowGrangerModel(BaseGrangerModel):
 		self.constraint = constraint
 		self._validate_keras_components()
 
-	def hyperoptimize(
-		self,
-		reg_param_grid: Dict[str, List[Any]],
-		n_trials: int = 50,
-	) -> Dict[str, Any]:
-		"""Return explicit no-op hyperoptimization result for this model."""
-		return {
-			"best_params": {},
-			"best_score": np.nan,
-			"trial_results": [],
-			"n_trials_requested": n_trials,
-			"reg_param_grid": reg_param_grid,
-			"message": "TensorFlowGrangerModel nie posiada parametrów do hiperoptymalizacji.",
-		}
-

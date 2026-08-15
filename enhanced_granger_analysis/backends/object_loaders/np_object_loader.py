@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from typing import Any, Dict, List, Mapping, Optional, Sequence, Tuple
+import warnings
 
 from ..callbacks import ConvergenceCheck, EarlyStopping, ReduceLearningRate
 from ..callbacks.base_callback import Callback
@@ -170,9 +171,15 @@ class NumpyObjectLoader:
 		)
 
 	def resolve_optimizer(self, raw_optimizer: Any) -> None:
-		if raw_optimizer is None:
-			return None
-
-		raise ConstraintConfigurationError(
-			"Scikit backend does not support optimizer objects. Use learning_rate/max_iter/tol in model_config."
-		)
+		# if raw_optimizer is None:
+		# 	return None
+		# else:
+		# 	warning_msg = (
+		# 		"Scikit backend does not support optimizer objects. Use learning_rate/max_iter/tol in model_config." \
+		# 		"Optimizer configuration will be ignored."
+		# 	)
+		# 	warnings.warn(warning_msg, FutureWarning, stacklevel=2)
+		return None
+		# raise ConstraintConfigurationError(
+		# 	"Scikit backend does not support optimizer objects. Use learning_rate/max_iter/tol in model_config."
+		# )

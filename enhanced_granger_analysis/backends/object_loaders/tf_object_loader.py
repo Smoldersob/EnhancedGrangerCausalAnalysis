@@ -129,33 +129,27 @@ class TensorFlowObjectLoader:
 			return resolved
 
 		if isinstance(raw_optimizer, Mapping):
-			# Support both Keras-native format:
+			# Support Keras-native format:
 			#   {"class_name": "Adam", "config": {...}}
-			# and compact config format used in this project:
-			#   {"type": "adam", "learning_rate": 0.001, ...}
+			# compact project format:
+			#   {"type": "adam", "learning_rate": 0.001}
+			# nested params form:
+			#   {"type": "adam", "params": {"learning_rate": 0.001}}
 			if "class_name" in raw_optimizer:
 				resolved = self._tf.keras.optimizers.get(raw_optimizer)
 				self._log("optimizer", resolved)
 				return resolved
 
 			type_name, params = self._extract_typed_spec(raw_optimizer, context="optimizer")
-			keras_name_map = {
-				"adam": "Adam",
-				"sgd": "SGD",
-				"rmsprop": "RMSprop",
-				"adagrad": "Adagrad",
-				"adamax": "Adamax",
-				"nadam": "Nadam",
-				"ftrl": "Ftrl",
-			}
-			class_name = keras_name_map.get(type_name, type_name)
-			resolved = self._tf.keras.optimizers.get(
-				{
-					"class_name": class_name,
-					"config": params,
-				}
-			)
-			self._log("optimizer", resolved)
+			# Keep backward compatibility with flat learning_rate declarations.
+			if "learning_rate" in raw_optimizer and "learning_rate" not in params and "params" not in raw_optimizer:
+				params["learning_rate"] = raw_optimizer["learning_rate"]
+			if "params" in raw_optimizer and isinstance(raw_optimizer["params"], Mapping):
+				params = dict(raw_optimizer["params"])
+				for key, value in raw_optimizer.items():
+					if key not in {"type", "name", "kind", "params"}:
+						params.setdefault(key, value)
+
 			return resolved
 
 		if isinstance(raw_optimizer, type) and issubclass(raw_optimizer, keras_optimizer):
