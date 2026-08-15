@@ -101,7 +101,38 @@ model = strategy.build_model(
 )
 ```
 
-## 5. Build Constraint from Relation Mapping
+## 5. Model Selection and Backend Default Fallback
+
+The backend-supported configuration may include a `model` or `model_type` field. For now this is intentionally a lightweight compatibility hook and does not introduce a global model registry.
+
+Current behavior:
+
+- If `model` / `model_type` is missing, empty, or set to a default alias, the current backend model remains the active default.
+- If `model` / `model_type` is a class that subclasses the current backend model class, that subclass is used instead.
+- Other values fall back to the default model implementation for backward compatibility.
+
+This keeps the system stable while still allowing a custom subclass to plug into the same model lifecycle when it inherits from the backend's existing base implementation.
+
+Example:
+
+```python
+class MyTensorFlowModel(TensorFlowGrangerModel):
+    def __init__(self, **kwargs):
+        super().__init__(**kwargs)
+        self.hidden_layers = kwargs.get("hidden_layers", 1)
+
+model = strategy.build_model(
+    n_features=20,
+    n_outputs=3,
+    model=MyTensorFlowModel,
+    model_config={"hidden_layers": 2},
+    epochs=20,
+)
+```
+
+This is intentionally not a dynamic plugin system yet. The goal is to keep extension points simple and local to the backend's current model family.
+
+## 6. Build Constraint from Relation Mapping
 
 Use backend-native conversion from relation rules:
 
@@ -116,7 +147,7 @@ constraint = strategy.build_constraint_from_relations(
 )
 ```
 
-## 6. How to Add New Components
+## 7. How to Add New Components
 
 ## Callback
 
@@ -137,7 +168,7 @@ constraint = strategy.build_constraint_from_relations(
 - TensorFlow: `tf.keras.regularizers.Regularizer`.
 - Register names in object loaders.
 
-## 7. When You Need a New Backend (not only new components)
+## 8. When You Need a New Backend (not only new components)
 
 Create a new backend strategy when at least one of these is true:
 
@@ -152,6 +183,6 @@ In practice, add:
 - New object loader for dict-to-object resolution.
 - Factory registration (with aliases) in `BackendFactory`.
 
-## 8. Practical Recommendation
+## 9. Practical Recommendation
 
 Start with new component classes first. Create a new backend only when component-level extension is no longer enough.

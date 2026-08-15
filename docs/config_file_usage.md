@@ -78,6 +78,33 @@ In this case:
 - It predicts 2 outputs: `x3`, `x4`.
 - Causality is tested only for `f1→x3`, `f1→x4`, `f2→x3`, `f2→x4`, saving time on the reference loop for `u`, `x1`, `x2`.
 
+## Model selection in config files
+
+A configuration can also carry a `model` or `model_type` field. This is supported as a compatibility hook for the current backend model family.
+
+Current behavior:
+
+- The default implementation remains the active fallback for each backend.
+- If `model` / `model_type` points to a subclass of the backend's current base model class, that subclass is used.
+- There is no model registry or automatic plugin discovery yet.
+- The model config remains the place for additional parameters such as hidden layers, dropout, or custom training settings.
+
+Example:
+
+```json
+{
+  "backend": "tensorflow",
+  "model": "TensorFlowGrangerModel",
+  "model_config": {
+    "hidden_layers": 2,
+    "epochs": 50,
+    "batch_size": 32
+  }
+}
+```
+
+The value can also be passed as a Python class object when working directly from code rather than through JSON.
+
 ## Example configuration
 
 ```json
@@ -103,6 +130,7 @@ In this case:
       "min_abs_sum": 0.2
     }
   },
+  "model": "TensorFlowGrangerModel",
   "model_config": {
     "epochs": 50,
     "batch_size": 32,

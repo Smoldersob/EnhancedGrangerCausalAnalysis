@@ -18,6 +18,27 @@ class TensorFlowObjectLoader:
 		self._tf = tf_module
 		self._loading_verbose = bool(loading_verbose)
 
+	@staticmethod
+	def resolve_model(model_name: Optional[str], default_model: Any) -> Any:
+		"""Resolve a current backend model, accepting either a name or a subclass.
+
+		Supported cases:
+		- None / default names -> default_model
+		- a subclass of default_model -> return that subclass
+		- any other value -> keep the existing default to preserve backward compatibility
+		"""
+		if model_name is None:
+			return default_model
+
+		if isinstance(model_name, type) and issubclass(model_name, default_model):
+			return model_name
+
+		normalized = str(model_name).strip().lower()
+		if normalized in {"", "default", "base", "standard", "linear", "granger"}:
+			return default_model
+
+		return default_model
+
 	def set_loading_verbose(self, value: bool) -> None:
 		self._loading_verbose = bool(value)
 

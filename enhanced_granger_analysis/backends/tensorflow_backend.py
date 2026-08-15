@@ -143,6 +143,12 @@ class TensorFlowBackendStrategy(BackendStrategy):
 		if self._object_loader is not None:
 			self._object_loader.set_loading_verbose(self._loading_verbose)
 
+		model_cfg = config.get("model_config") or config.get("config") or {}
+		if not isinstance(model_cfg, dict):
+			model_cfg = {}
+		model_name = config.get("model_name") or config.get("model") or config.get("model_type")
+		model_cls = self._object_loader.resolve_model(model_name, TensorFlowGrangerModel)
+
 		regularizer_resolved = self.build_regularizer(regularizer)
 		constraint_resolved = self.build_constraint(constraint)
 		callbacks_cfg = config.get("callbacks", None)
@@ -150,17 +156,18 @@ class TensorFlowBackendStrategy(BackendStrategy):
 		optimizer_spec = self._resolve_optimizer_spec(config)
 		optimizer_resolved = self.resolve_optimizer(optimizer_spec)
 
-		return TensorFlowGrangerModel(
-			backend="tensorflow",
-			regularizer=regularizer_resolved,
-			constraint=constraint_resolved,
-			optimizer=optimizer_resolved,
-			loss=config.get("loss", "mse"),
-			callbacks=callbacks_resolved,
-			epochs=config.get("epochs", 100),
-			batch_size=config.get("batch_size", 32),
-			verbose=config.get("verbose", 0),
-		)
+		kwargs = dict(model_cfg)
+		kwargs.setdefault("backend", "tensorflow")
+		kwargs.setdefault("regularizer", regularizer_resolved)
+		kwargs.setdefault("constraint", constraint_resolved)
+		kwargs.setdefault("optimizer", optimizer_resolved)
+		kwargs.setdefault("loss", config.get("loss", "mse"))
+		kwargs.setdefault("callbacks", callbacks_resolved)
+		kwargs.setdefault("epochs", config.get("epochs", 100))
+		kwargs.setdefault("batch_size", config.get("batch_size", 32))
+		kwargs.setdefault("verbose", config.get("verbose", 0))
+
+		return model_cls(**kwargs)
 
 	def resolve_callbacks(self, callbacks: Optional[List[Any]]) -> Optional[List[Any]]:
 		if self._object_loader is None:

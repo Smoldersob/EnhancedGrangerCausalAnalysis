@@ -114,6 +114,12 @@ class PyTorchBackendStrategy(BackendStrategy):
 		if self._object_loader is not None:
 			self._object_loader.set_loading_verbose(self._loading_verbose)
 
+		model_cfg = config.get("model_config") or config.get("config") or {}
+		if not isinstance(model_cfg, dict):
+			model_cfg = {}
+		model_name = config.get("model_name") or config.get("model") or config.get("model_type")
+		model_cls = self._object_loader.resolve_model(model_name, PyTorchGrangerModel)
+
 		regularizer_resolved = self.build_regularizer(regularizer)
 		constraint_resolved = self.build_constraint(constraint)
 		callbacks_resolved = self.resolve_callbacks(config.get("callbacks", None))
@@ -121,20 +127,21 @@ class PyTorchBackendStrategy(BackendStrategy):
 		gradient_accumulation_steps = self._extract_gradient_accumulation_steps(config, optimizer_spec)
 		optimizer_resolved = self.resolve_optimizer(optimizer_spec)
 
-		return PyTorchGrangerModel(
-			backend="pytorch",
-			regularizer=regularizer_resolved,
-			constraint=constraint_resolved,
-			optimizer=optimizer_resolved,
-			loss=config.get("loss", None),
-			callbacks=callbacks_resolved,
-			learning_rate=config.get("learning_rate", 0.001),
-			gradient_accumulation_steps=gradient_accumulation_steps,
-			epochs=config.get("epochs", 100),
-			batch_size=config.get("batch_size", 32),
-			verbose=config.get("verbose", 0),
-			device=config.get("device", None),
-		)
+		kwargs = dict(model_cfg)
+		kwargs.setdefault("backend", "pytorch")
+		kwargs.setdefault("regularizer", regularizer_resolved)
+		kwargs.setdefault("constraint", constraint_resolved)
+		kwargs.setdefault("optimizer", optimizer_resolved)
+		kwargs.setdefault("loss", config.get("loss", None))
+		kwargs.setdefault("callbacks", callbacks_resolved)
+		kwargs.setdefault("learning_rate", config.get("learning_rate", 0.001))
+		kwargs.setdefault("gradient_accumulation_steps", gradient_accumulation_steps)
+		kwargs.setdefault("epochs", config.get("epochs", 100))
+		kwargs.setdefault("batch_size", config.get("batch_size", 32))
+		kwargs.setdefault("verbose", config.get("verbose", 0))
+		kwargs.setdefault("device", config.get("device", None))
+
+		return model_cls(**kwargs)
 
 	def resolve_callbacks(self, callbacks: Optional[List[Any]]) -> Optional[List[Any]]:
 		if self._object_loader is None:

@@ -52,23 +52,30 @@ class ScikitBackendStrategy(BackendStrategy):
 		config = self._consume_loading_verbose(config)
 		self._object_loader.set_loading_verbose(self._loading_verbose)
 
+		model_cfg = config.get("model_config") or config.get("config") or {}
+		if not isinstance(model_cfg, dict):
+			model_cfg = {}
+		model_name = config.get("model_name") or config.get("model") or config.get("model_type")
+		model_cls = self._object_loader.resolve_model(model_name, ScikitConstrainedGrangerModel)
+
 		regularizer_resolved = self.build_regularizer(regularizer)
 		constraint_resolved = self.build_constraint(constraint)
 		callbacks_resolved = self.resolve_callbacks(config.get("callbacks", None))
 		optimizer_resolved = self.resolve_optimizer(config.get("optimizer", None))
 
-		return ScikitConstrainedGrangerModel(
-			backend="sklearn",
-			regularizer=regularizer_resolved,
-			constraint=constraint_resolved,
-			callbacks=callbacks_resolved,
-			fit_intercept=config.get("fit_intercept", True),
-			learning_rate=config.get("learning_rate", 1.0),
-			max_iter=config.get("max_iter", 1000),
-			tol=config.get("tol", 1e-8),
-			batch_size=config.get("batch_size", None),
-			verbose=config.get("verbose", 0),
-		)
+		kwargs = dict(model_cfg)
+		kwargs.setdefault("backend", "sklearn")
+		kwargs.setdefault("regularizer", regularizer_resolved)
+		kwargs.setdefault("constraint", constraint_resolved)
+		kwargs.setdefault("callbacks", callbacks_resolved)
+		kwargs.setdefault("fit_intercept", config.get("fit_intercept", True))
+		kwargs.setdefault("learning_rate", config.get("learning_rate", 1.0))
+		kwargs.setdefault("max_iter", config.get("max_iter", 1000))
+		kwargs.setdefault("tol", config.get("tol", 1e-8))
+		kwargs.setdefault("batch_size", config.get("batch_size", None))
+		kwargs.setdefault("verbose", config.get("verbose", 0))
+
+		return model_cls(**kwargs)
 
 	def resolve_callbacks(self, callbacks: Optional[List[Any]]) -> Optional[List[Any]]:
 		self._object_loader.set_loading_verbose(self._loading_verbose)
