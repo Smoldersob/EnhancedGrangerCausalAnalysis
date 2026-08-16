@@ -153,25 +153,6 @@ def _build_callbacks_for_run(callbacks: Optional[Sequence[Any]], run_name: str) 
 	return [_clone_callback_for_run(cb, run_name) for cb in callbacks]
 
 
-def _set_model_callbacks(model: Any, callbacks: Optional[List[Any]], strategy: Optional[Any] = None) -> None:
-	"""Set callbacks on an already created model and validate when model supports it."""
-	if not hasattr(model, "callbacks"):
-		return
-
-	resolved_callbacks = callbacks
-	if strategy is not None and hasattr(strategy, "resolve_callbacks"):
-		resolved_callbacks = strategy.resolve_callbacks(callbacks)
-
-	setattr(model, "callbacks", resolved_callbacks or [])
-	validate = getattr(model, "_validate_callbacks", None)
-	if callable(validate):
-		validate()
-
-	validate_tf = getattr(model, "_validate_keras_components", None)
-	if callable(validate_tf):
-		validate_tf()
-
-
 def _regularizer_spec_from_value(regularizer: Any) -> Optional[Dict[str, Any]]:
 	if regularizer is None:
 		return None
@@ -487,11 +468,8 @@ class MultiTaskGrangerAPI:
 
 		for cause_name in tested_causes_list:
 			cause_idx = all_columns.index(cause_name)
-			_set_model_callbacks(
-				reference_model,
-				_build_callbacks_for_run(callbacks_template, f"reference_cause_{cause_name}"),
-				strategy,
-			)
+
+			reference_model.reset_callbacks(run_name=f"reference_cause_{cause_name}")
 
 			if reference_needs_reinit:
 				reference_model.initialize(prepared.X_backend_scaled, targets=prepared.y_backend_scaled)
@@ -503,9 +481,9 @@ class MultiTaskGrangerAPI:
 			reference_model.omit_variables(list(range(start, end)))
 			reference_model.fit()
 
-			ref_pred_scaled = np.asarray(reference_model.predict(prepared.X_backend_scaled), dtype=np.float64)
+			ref_pred_scaled = reference_model.predict(prepared.X_backend_scaled)
 			ref_pred_real = prepared.y_scaler.inverse_transform(ref_pred_scaled)
-			ref_weight_matrix = np.asarray(reference_model.get_weights()[0], dtype=np.float64)
+			ref_weight_matrix = reference_model.get_weights()[0]
 
 			results.update_cause(
 				cause=cause_name,

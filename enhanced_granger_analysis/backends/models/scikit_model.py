@@ -1,7 +1,6 @@
 from __future__ import annotations
 
-from typing import Any, Dict, List, Optional, Tuple, Union
-
+from typing import Any, Dict, List, Optional, Tuple, Union, Optional, Type, Mapping
 import numpy as np
 from numpy.typing import NDArray
 from sklearn.base import RegressorMixin
@@ -464,3 +463,142 @@ class ScikitConstrainedGrangerModel(LinearModel, RegressorMixin, BaseGrangerMode
 		self._validate_components()
 		self.constraint = constraint
 
+	def reset_callbacks(
+		self,
+		run_name: str,
+		callback_updates: Optional[
+			Mapping[Union[int, str, Type[Callback]], Mapping[str, Any]]
+		] = None,
+	) -> None:
+		"""
+		Replace callbacks with clean instances prepared for a new training run.
+
+		The model, its weights, layers, loss function, and optimizer
+		configuration are preserved. Each callback is responsible for
+		returning a new instance without runtime state through clone_for_run().
+
+		Parameters
+		----------
+		run_name:
+			Identifier of the new training run. Logging callbacks should use it
+			to create a separate output location or TensorBoard log directory.
+		callback_updates:
+			Optional configuration updates applied to a cloned callback.
+			A selector can be:
+			- callback index in self.callbacks,
+			- callback class name,
+			- callback type.
+
+			Example:
+			{
+				"EarlyStoppingCallback": {
+					"patience": 20,
+					"min_delta": 1e-5,
+				},
+				TensorBoardCallback: {
+					"log_root": "artifacts/tensorboard",
+				},
+			}
+		"""
+		if not isinstance(run_name, str) or not run_name.strip():
+			raise ConstraintConfigurationError(
+				"run_name must be a non-empty string when resetting callbacks."
+			)
+
+		self._validate_callbacks()
+
+		has_callback_updates = bool(callback_updates)
+		fresh_callbacks: List[Callback] = []
+
+		for index, callback in enumerate(self.callbacks):
+			fresh_callback = callback.clone_for_run(run_name)
+
+			if not isinstance(fresh_callback, Callback):
+				raise ConstraintConfigurationError(
+					f"{callback.__class__.__name__}.clone_for_run() must return "
+					"an instance of callbacks.base_callback.Callback."
+				)
+
+			if has_callback_updates:
+				updates = self._get_callback_updates(
+					callback=callback,
+					index=index,
+					callback_updates=callback_updates,
+				)
+				if updates:
+					self._apply_callback_updates(fresh_callback, updates)
+
+			fresh_callbacks.append(fresh_callback)
+
+		self.callbacks = fresh_callbacks
+		self._validate_callbacks()
+
+	def _get_callback_updates(
+		self,
+		*,
+		callback: Callback,
+		index: int,
+		callback_updates: Mapping[
+			Union[int, str, Type[Callback]], Mapping[str, Any]
+		],
+	) -> Dict[str, Any]:
+		"""Merge all configuration updates matching a callback."""
+		updates: Dict[str, Any] = {}
+
+		for selector, values in callback_updates.items():
+			if not isinstance(values, Mapping):
+				raise ConstraintConfigurationError(
+					"Each callback_updates value must be a mapping of "
+					"attribute names to values."
+				)
+
+			matches = (
+				selector == index
+				or selector == callback.__class__.__name__
+				or (
+					isinstance(selector, type)
+					and issubclass(selector, Callback)
+					and isinstance(callback, selector)
+				)
+			)
+
+			if matches:
+				updates.update(values)
+
+		return updates
+
+	def _apply_callback_updates(
+		self,
+		callback: Callback,
+		updates: Mapping[str, Any],
+	) -> None:
+		"""
+		Apply updates to public callback configuration attributes.
+
+		Private attributes are excluded because they are implementation-level
+		runtime fields and should be initialized by clone_for_run().
+		"""
+		for attribute, value in updates.items():
+			if attribute.startswith("_"):
+				raise ConstraintConfigurationError(
+					f"Cannot update private callback attribute: {attribute!r}"
+				)
+
+			if not hasattr(callback, attribute):
+				raise ConstraintConfigurationError(
+					f"{callback.__class__.__name__} has no configurable "
+					f"attribute {attribute!r}"
+				)
+
+			setattr(callback, attribute, value)
+
+	def _validate_callbacks(self) -> None:
+			"""Validate callback list passed to model initializer."""
+			if not isinstance(self.callbacks, list):
+				raise ConstraintConfigurationError("callbacks must be a list of Callback objects")
+	
+			for cb in self.callbacks:
+				if not isinstance(cb, Callback):
+					raise ConstraintConfigurationError(
+						"All PyTorch callbacks must inherit from callbacks.base_callback.Callback"
+					)

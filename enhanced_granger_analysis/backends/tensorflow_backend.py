@@ -21,9 +21,20 @@ class TensorFlowBackendStrategy(BackendStrategy):
 		- {"type": "adam", "learning_rate": 1e-3}
 		- {"type": "adam", "params": {"learning_rate": 1e-3}}
 		- legacy top-level "learning_rate" alongside optimizer config
+		- nested model_config.* values, including model_config.learning_rate
 		"""
+		model_cfg = config.get("model_config") or config.get("config") or {}
+		if not isinstance(model_cfg, Mapping):
+			model_cfg = {}
+
 		optimizer_cfg = config.get("optimizer")
+		if optimizer_cfg is None:
+			optimizer_cfg = model_cfg.get("optimizer")
+
 		learning_rate = config.get("learning_rate")
+		if learning_rate is None:
+			learning_rate = model_cfg.get("learning_rate")
+
 		if optimizer_cfg is None:
 			if learning_rate is None:
 				return "adam"
@@ -32,13 +43,16 @@ class TensorFlowBackendStrategy(BackendStrategy):
 		if isinstance(optimizer_cfg, Mapping):
 			merged = dict(optimizer_cfg)
 			params = merged.get("params")
+			if isinstance(params, dict):
+				params = dict(params)
+			else:
+				params = {}
 			if learning_rate is not None:
-				if isinstance(params, dict):
-					params = dict(params)
-					params.setdefault("learning_rate", learning_rate)
-					merged["params"] = params
-				else:
-					merged.setdefault("learning_rate", learning_rate)
+				params.setdefault("learning_rate", learning_rate)
+				merged["params"] = params
+			if "learning_rate" in merged and "learning_rate" not in params:
+				params.setdefault("learning_rate", merged["learning_rate"])
+				merged["params"] = params
 			return merged
 
 		if isinstance(optimizer_cfg, str) and learning_rate is not None:

@@ -136,3 +136,7 @@ class BaseGrangerModel(ABC):
     def _add_callback(self, callback: Any) -> None:
         """Add a callback to the model's training process."""
         self.callbacks.append(callback)
+
+    def reset_callbacks(self) -> None:
+        """Reset callbacks to an empty list."""
+        self.callbacks = []

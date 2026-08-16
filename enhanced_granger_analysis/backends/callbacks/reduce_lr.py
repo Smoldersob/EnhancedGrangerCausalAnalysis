@@ -17,7 +17,7 @@ class ReduceLearningRate(Callback):
 		factor: float = 0.5,
 		min_lr: float = 1e-8,
 		min_delta: float = 0.0,
-		monitor="loss",
+		monitor="epoch_loss",
 	) -> None:
 		if patience <= 0:
 			raise TrainingConfigurationError("patience must be a positive integer")
@@ -32,6 +32,7 @@ class ReduceLearningRate(Callback):
 		self.factor = factor
 		self.min_lr = min_lr
 		self.min_delta = min_delta
+		self.monitor = monitor
 
 		self._best_loss: float = float("inf")
 		self._num_bad_epochs: int = 0
@@ -41,7 +42,7 @@ class ReduceLearningRate(Callback):
 		self._num_bad_epochs = 0
 
 	def on_epoch_end(self, state: Dict[str, Any]) -> bool:
-		loss = float(state.get("epoch_loss", float("nan")))
+		loss = float(state.get(self.monitor, float("nan")))
 		optimizer = state.get("optimizer")
 
 		if optimizer is None or np.isnan(loss):
@@ -65,3 +66,14 @@ class ReduceLearningRate(Callback):
 		self._num_bad_epochs = 0
 		return True
 
+	def clone_for_run(self, run_name: str) -> "ReduceLearningRate":
+		"""Create a clean callback; do not copy best loss or stored weights."""
+		del run_name  # This callback has no run-specific destination.
+
+		return type(self)(
+			patience=self.patience,
+			factor=self.factor,
+			min_lr=self.min_lr,
+			min_delta=self.min_delta,
+			monitor=self.monitor,
+		)

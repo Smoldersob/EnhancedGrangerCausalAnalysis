@@ -16,7 +16,7 @@ class EarlyStopping(Callback):
 		patience: int = 20,
 		min_delta: float = 0.0,
 		restore_best_weights: bool = True,
-		monitor: str = "loss",
+		monitor: str = "epoch_loss",
 	) -> None:
 		if patience <= 0:
 			raise TrainingConfigurationError("patience must be a positive integer")
@@ -26,6 +26,7 @@ class EarlyStopping(Callback):
 		self.patience = patience
 		self.min_delta = min_delta
 		self.restore_best_weights = restore_best_weights
+		self.monitor = monitor
 
 		self._best_loss: float = float("inf")
 		self._num_bad_epochs: int = 0
@@ -37,7 +38,7 @@ class EarlyStopping(Callback):
 		self._best_weights = None
 
 	def on_epoch_end(self, state: Dict[str, Any]) -> bool:
-		loss = float(state.get("epoch_loss", float("nan")))
+		loss = float(state.get(self.monitor, float("nan")))
 		model = state.get("model")
 
 		if np.isnan(loss):
@@ -64,3 +65,13 @@ class EarlyStopping(Callback):
 		if self.restore_best_weights and self._best_weights is not None and model is not None:
 			model.set_weights(self._best_weights)
 
+	def clone_for_run(self, run_name: str) -> "EarlyStopping":
+		"""Create a clean callback; do not copy best loss or stored weights."""
+		del run_name  # This callback has no run-specific destination.
+
+		return type(self)(
+			patience=self.patience,
+			min_delta=self.min_delta,
+			restore_best_weights=self.restore_best_weights,
+			monitor=self.monitor,
+		)

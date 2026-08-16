@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from abc import ABC
+from abc import ABC, abstractmethod
 from typing import Any, Dict
 
 
@@ -21,3 +21,7 @@ class Callback(ABC):
 	def on_train_end(self, state: Dict[str, Any]) -> None:
 		"""Called once after training ends."""
 
+	@abstractmethod
+	def clone_for_run(self, run_name: str) -> "Callback":
+		"""Create a clean callback for a new run; do not copy any state from previous runs."""
+	

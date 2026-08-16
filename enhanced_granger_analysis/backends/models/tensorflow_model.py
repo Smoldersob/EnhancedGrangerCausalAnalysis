@@ -3,7 +3,8 @@ from __future__ import annotations
 import importlib
 import os
 from importlib.util import find_spec
-from typing import Any, Dict, List, Optional, Union
+from pathlib import Path
+from typing import Any, Dict, List, Mapping, Optional, Union
 
 import numpy as np
 from numpy.typing import NDArray
@@ -22,7 +23,7 @@ if find_spec("tensorflow") is not None:
 else:
 	tf = None
 
-
+@tf.keras.utils.register_keras_serializable(package="EnhancedGrangerCausalAnalysis", name="FeatureMask")
 class FeatureMask(tf.keras.layers.Layer):
 	"""Untrainable feature mask layer: y = x * mask."""
 
@@ -42,7 +43,6 @@ class FeatureMask(tf.keras.layers.Layer):
 	def call(self, inputs: Any) -> Any:
 		return inputs * self.mask
 
-
 class TensorFlowGrangerModel(BaseGrangerModel):
 	"""TensorFlow implementation of a Granger model with pluggable mask/regularization."""
 
@@ -58,7 +58,7 @@ class TensorFlowGrangerModel(BaseGrangerModel):
 		batch_size: int = 32,
 		verbose: int = 0,
 		device: Optional[str] = None,
-    	use_jit: Optional[bool] = None,
+		use_jit: Optional[bool] = None,
 		**kwargs: Any,
 	) -> None:
 		super().__init__(
@@ -83,24 +83,23 @@ class TensorFlowGrangerModel(BaseGrangerModel):
 		self.verbose = verbose
 
 		self.device = self._resolve_device(device)
-		if use_jit is None:
-			self.use_jit = self.device.startswith("/GPU:")
-		else:
-			self.use_jit = bool(use_jit)
-
-		if self.device.startswith("/CPU:") and self.use_jit:
+		if use_jit==True and self.device.startswith("/GPU:"):
+			self.use_jit = True
+		elif use_jit and self.device.startswith("/CPU:"):
 			raise ValueError(
 				"use_jit=True is unsupported with device='cpu' in this backend. "
 				"Use device='gpu' or set use_jit=False."
 			)
+		else:
+			self.use_jit = False
 
 		self.model: Optional[Any] = None
 		self._variable_control_layer: Optional[Any] = None
 		self._coefficient_layer: Optional[Any] = None
+		self._initial_optimizer_state: Optional[tuple[Any, ...]] = None
 
 		self._n_features: Optional[int] = None
 		self._n_outputs: Optional[int] = None
-		self._variable_mask: Optional[NDArray[np.float32]] = None
 		self._X_train: Optional[NDArray[np.float32]] = None
 		self._y_train: Optional[NDArray[np.float32]] = None
 		self._history: Optional[Any] = None
@@ -171,14 +170,57 @@ class TensorFlowGrangerModel(BaseGrangerModel):
 					"All callbacks must inherit from tf.keras.callbacks.Callback"
 				)
 
+	def _normalize_optimizer_spec(self, spec: Any) -> Any:
+		"""Convert generic optimizer config into a Keras-deserializable mapping."""
+		if not isinstance(spec, dict):
+			return spec
+
+		if "class_name" in spec and isinstance(spec.get("config"), dict):
+			return spec
+
+		optimizer_name = spec.get("type") or spec.get("class_name") or spec.get("name") or "adam"
+		config: Dict[str, Any] = {}
+
+		params = spec.get("params")
+		if isinstance(params, dict):
+			config.update(params)
+
+		native_config = spec.get("config")
+		if isinstance(native_config, dict):
+			config.update(native_config)
+
+		for key, value in spec.items():
+			if key not in {"type", "class_name", "name", "params", "config"}:
+				config[key] = value
+
+		if "learning_rate" in spec and "learning_rate" not in config:
+			config["learning_rate"] = spec["learning_rate"]
+
+		name = str(optimizer_name).strip()
+		alias_map = {
+			"adam": "Adam",
+			"adadelta": "Adadelta",
+			"adagrad": "Adagrad",
+			"adamax": "Adamax",
+			"ftrl": "Ftrl",
+			"nadam": "Nadam",
+			"rmsprop": "RMSprop",
+			"sgd": "SGD",
+		}
+		canonical_name = alias_map.get(name.lower(), name)
+
+		return {"class_name": canonical_name, "config": config}
+
 	def _build_optimizer(self) -> Any:
 		"""Create a fresh Keras optimizer instance from optimizer spec."""
 		keras_optimizer = tf.keras.optimizers.Optimizer
 
 		spec = self._optimizer_spec
-		if isinstance(spec, str) or isinstance(spec, dict):
+		if isinstance(spec, str):
 			return tf.keras.optimizers.get(spec)
 
+		if isinstance(spec, dict):
+			return tf.keras.optimizers.deserialize(self._normalize_optimizer_spec(spec))
 		if isinstance(spec, type) and issubclass(spec, keras_optimizer):
 			return spec()
 
@@ -202,7 +244,7 @@ class TensorFlowGrangerModel(BaseGrangerModel):
 		return tf.keras.losses.get(self._loss_spec)
 
 	def _capture_initial_optimizer_state(self) -> None:
-		"""Build optimizer slots and save a fresh optimizer state without a training step."""
+		"""Build optimizer slots and save pristine state on the active device."""
 		if self.model is None or self.model.optimizer is None:
 			return
 
@@ -213,33 +255,28 @@ class TensorFlowGrangerModel(BaseGrangerModel):
 		if callable(variables):
 			variables = variables()
 
-		self._initial_optimizer_weights = [
-			np.array(variable.numpy(), copy=True)
-			for variable in variables
-		]
-
-
-	def _restore_initial_optimizer_state(self) -> None:
-		"""Restores the optimizer state saved after its initialization."""
 		with tf.device(self.device):
-			if self.model is None or self.model.optimizer is None:
-				return
+			self._initial_optimizer_state = [
+				tf.identity(variable.value)
+				for variable in variables
+			]
 
-			if self._initial_optimizer_weights is None:
-				self._capture_initial_optimizer_state()
+	def _reset_optimizer_state(self) -> None:
+		if self.model is None or self.model.optimizer is None:
+			return
 
-			optimizer = self.model.optimizer
-			variables = optimizer.variables
-			if callable(variables):
-				variables = variables()
+		if self._initial_optimizer_state is None:
+			self._capture_initial_optimizer_state()
 
-			if len(variables) != len(self._initial_optimizer_weights):
-				raise TrainingError(
-					"Optimizer variable layout changed; cannot restore initial optimizer state."
-				)
+		variables = self.model.optimizer.variables
+		if callable(variables):
+			variables = variables()
 
-			for variable, initial_value in zip(variables, self._initial_optimizer_weights):
-				variable.assign(initial_value)
+		if len(variables) != len(self._initial_optimizer_state):
+			raise TrainingError("Optimizer variable layout changed.")
+
+		for variable, initial_value in zip(variables, self._initial_optimizer_state):
+			variable.assign(initial_value)
 
 	def initialize(
 		self,
@@ -270,73 +307,63 @@ class TensorFlowGrangerModel(BaseGrangerModel):
 
 		n_features = X.shape[1]
 		n_outputs = y.shape[1]
-		variable_mask = np.ones(n_features, dtype=np.float32)
-		identity_kernel = np.eye(n_features, dtype=np.float32)
 
 		with tf.device(self.device):
+			inputs = tf.keras.Input(shape=(n_features,), dtype=tf.float32)
+
 			variable_control_layer = FeatureMask(
 				n_features=n_features,
 				name="variable_control",
 				dtype=tf.float32,
 			)
+			selected_features = variable_control_layer(inputs)
 
 			coefficient_layer = tf.keras.layers.Dense(
-				units=n_outputs,
+				n_outputs,
 				use_bias=True,
 				kernel_constraint=self.constraint,
 				kernel_regularizer=self.regularizer,
 				name="coefficients",
 				dtype=tf.float32,
 			)
+			outputs = coefficient_layer(selected_features)
 
-			self.model = tf.keras.Sequential(
-				[
-					tf.keras.layers.Input(shape=(n_features,), dtype=tf.float32),
-					variable_control_layer,
-					coefficient_layer,
-				],
-				name="tensorflow_granger_model",
-			)
-
-			optimizer = self._build_optimizer()
-			loss = self._build_loss()
+			self.model = tf.keras.Model(inputs, outputs=outputs, name="granger_model")
 
 			self.model.compile(
-				optimizer=optimizer,
-				loss=loss,
+				optimizer = self._build_optimizer(),
+				loss = self._build_loss(),
 				jit_compile=self.use_jit,
 			)
-	
-			self._capture_initial_optimizer_state()	
+		
+			self._capture_initial_optimizer_state()
 
 		self._variable_control_layer = variable_control_layer
 		self._coefficient_layer = coefficient_layer
 		self._n_features = n_features
 		self._n_outputs = n_outputs
-		self._variable_mask = variable_mask
 		self._X_train = X
 		self._y_train = y
 		self._fitted = False
 
-	def fit(self) -> Dict[str, Any]:
+	def fit(self, return_history: bool = False) -> Dict[str, Any]|None:
 		"""Fit model and return a minimal result dictionary aligned with BaseGrangerModel."""
 		if self.model is None or self._X_train is None or self._y_train is None:
 			raise ModelNotFittedError("Model is not initialized. Call initialize(...) first.")
 
 		# Reset optimizer state between fits without costly re-compile.
-		self._restore_initial_optimizer_state()
+		self._reset_optimizer_state()
+		batch_size = self.batch_size or self._X_train.shape[0]
 
 		try:
-			if self.batch_size is None:
-				self.batch_size = self._X_train.shape[0]
-				
 			self._history = self.model.fit(
 				self._X_train,
 				self._y_train,
 				epochs=self.epochs,
-				batch_size=self.batch_size,
+				batch_size=batch_size,
 				callbacks=self.callbacks,
 				verbose=self.verbose,
+				shuffle=False,
 			)
 		except Exception as exc:  # pragma: no cover - backend runtime errors
 			if self._is_gpu_dnn_init_error(exc):
@@ -350,29 +377,33 @@ class TensorFlowGrangerModel(BaseGrangerModel):
 				raise TrainingError(f"TensorFlow training failed: {exc}") from exc
 
 		self._fitted = True
-		forecasts = np.asarray(self.model.predict(self._X_train, verbose=0), dtype=np.float32)
 
-		final_loss = (
-			float(self._history.history["loss"][-1])
-			if self._history is not None and "loss" in self._history.history
-			else float("nan")
-		)
+		if return_history:
+			forecasts = self.model(self._X_train, training=False).numpy().astype(np.float32)
 
-		loss_history = self._history.history.get("loss", []) if self._history is not None else []
-		epoch_indices = list(getattr(self._history, "epoch", [])) if self._history is not None else []
-		epochs_ran = len(epoch_indices) if epoch_indices else len(loss_history)
-		stop_reason = "callback_stop" if epochs_ran < self.epochs else "max_epochs_reached"
+			final_loss = (
+				float(self._history.history["loss"][-1])
+				if self._history is not None and "loss" in self._history.history
+				else float("nan")
+			)
 
-		return {
-			"test_statistic": final_loss,
-			"p_value": np.nan,
-			"weights": self.get_weights(),
-			"forecasts": forecasts,
-			"history": {
-				"loss": loss_history,
-				"stop_reason": stop_reason,
-			},
-		}
+			loss_history = self._history.history.get("loss", []) if self._history is not None else []
+			epoch_indices = list(getattr(self._history, "epoch", [])) if self._history is not None else []
+			epochs_ran = len(epoch_indices) if epoch_indices else len(loss_history)
+			stop_reason = "callback_stop" if epochs_ran < self.epochs else "max_epochs_reached"
+
+			return {
+				"test_statistic": final_loss,
+				"p_value": np.nan,
+				"weights": self.get_weights(),
+				"forecasts": forecasts,
+				"history": {
+					"loss": loss_history,
+					"stop_reason": stop_reason,
+				},
+			}
+		else:
+			return 
 
 	@staticmethod
 	def _is_gpu_dnn_init_error(exc: Exception) -> bool:
@@ -388,17 +419,20 @@ class TensorFlowGrangerModel(BaseGrangerModel):
 		if not self._fitted or self.model is None or self._n_features is None:
 			raise ModelNotFittedError("Model is not fitted. Call fit(...) first.")
 
-		X_arr = np.asarray(X, dtype=np.float32)
-		if X_arr.ndim != 2:
+		if X.ndim != 2:
 			raise TrainingError("X must be a 2D array")
-		if X_arr.shape[1] != self._n_features:
+		if X.shape[1] != self._n_features:
 			raise TrainingError(
-				f"X has {X_arr.shape[1]} features, expected {self._n_features}"
+				f"X has {X.shape[1]} features, expected {self._n_features}"
 			)
 
 		with tf.device(self.device):
-			pred = self.model.predict(X_arr, verbose=0)
-		return np.asarray(pred, dtype=np.float64)
+			pred = self.model(
+				tf.convert_to_tensor(X, dtype=tf.float32),
+				training=False,
+			)
+
+		return pred.numpy().astype(np.float32, copy=False)
 
 	def set_weights(
 		self, weights: Union[NDArray[np.float32], List[NDArray[np.float32]]]
@@ -407,13 +441,10 @@ class TensorFlowGrangerModel(BaseGrangerModel):
 		if self._coefficient_layer is None:
 			raise ModelNotFittedError("Model is not initialized. Call initialize(...) first.")
 
-		current_weights = self._coefficient_layer.get_weights()
-		if not current_weights:
-			raise TrainingError("Coefficient layer is not built yet.")
-
 		if isinstance(weights, list):
 			if len(weights) == 1:
 				with tf.device(self.device):
+					current_weights = self._coefficient_layer.get_weights()
 					self._coefficient_layer.set_weights([weights[0], current_weights[1]])
 			elif len(weights) == 2:
 				with tf.device(self.device):
@@ -421,9 +452,6 @@ class TensorFlowGrangerModel(BaseGrangerModel):
 			else:
 				raise TrainingError("weights list must contain kernel or [kernel, bias]")
 			return
-
-		with tf.device(self.device):
-			self._coefficient_layer.set_weights([weights, current_weights[1]])
 
 	def get_weights(self) -> List[NDArray[np.float32]]:
 		"""Return coefficient-layer weights as a single matrix in a one-element list."""
@@ -433,18 +461,16 @@ class TensorFlowGrangerModel(BaseGrangerModel):
 		coeff_weights = self._coefficient_layer.get_weights()
 		if not coeff_weights:
 			return []
-
-		kernel = coeff_weights[0]
-		bias = coeff_weights[1] if len(coeff_weights) > 1 else np.zeros(self._n_outputs, dtype=np.float32)
-		return [np.asarray(kernel, dtype=np.float32), np.asarray(bias, dtype=np.float32)]
-
+		else:
+			return coeff_weights
+		
 	def omit_variables(self, variable_indices: List[int]) -> None:
 		"""Set selected variables to zero in the non-trainable diagonal control layer."""
 		if self._variable_control_layer is None or self._n_features is None:
 			raise ModelNotFittedError("Model is not initialized. Call initialize(...) first.")
 
 		with tf.device(self.device):
-			self._variable_mask = np.ones(self._n_features, dtype=np.float64)
+			variable_mask = np.ones(self._n_features, dtype=np.float32)
 
 			indices = np.asarray(variable_indices, dtype=np.intp)
 			if np.any(indices < 0) or np.any(indices >= self._n_features):
@@ -452,8 +478,8 @@ class TensorFlowGrangerModel(BaseGrangerModel):
 					f"Variable indices must belong to [0, {self._n_features - 1}]"
 				)
 
-			self._variable_mask[indices] = 0.0
-			self._variable_control_layer.mask.assign(self._variable_mask)
+			variable_mask[indices] = 0.0
+			self._variable_control_layer.mask.assign(variable_mask)
 
 	def set_regularizer(self, regularizer: Any) -> None:
 		"""Set regularizer with Keras type validation."""
@@ -465,3 +491,212 @@ class TensorFlowGrangerModel(BaseGrangerModel):
 		self.constraint = constraint
 		self._validate_keras_components()
 
+
+	def reset_callbacks(
+		self,
+		*,
+		run_name: Optional[str] = None,
+		tensorboard_root_dir: Optional[Union[str, os.PathLike[str]]] = None,
+		callback_updates: Optional[
+			Mapping[Union[int, str, type], Mapping[str, Any]]
+		] = None,
+	) -> None:
+		"""
+		Prepare callbacks for a fully independent subsequent fit() call.
+
+		This method does not rebuild the model, recompile it, or copy
+		callback instances. It assumes that new initial model weights are
+		set separately via set_weights(...).
+
+		Parameters
+		----------
+		run_name:
+			Name of the new TensorBoard run. If a TensorBoard callback is
+			configured, its log_dir is changed to:
+			<tensorboard_root_dir>/<run_name>.
+		tensorboard_root_dir:
+			Parent directory for TensorBoard runs. If omitted, the parent
+			directory of the current TensorBoard log_dir is used.
+		callback_updates:
+			Configuration updates for matching callbacks. A selector can be:
+			- callback index in self.callbacks,
+			- callback class name, e.g. "EarlyStopping",
+			- callback type, e.g. tf.keras.callbacks.EarlyStopping.
+
+			Example:
+			{
+				tf.keras.callbacks.EarlyStopping: {
+					"patience": 20,
+					"min_delta": 1e-5,
+				},
+				"ReduceLROnPlateau": {
+					"factor": 0.5,
+					"patience": 4,
+				},
+			}
+		reset_optimizer_learning_rate:
+			Restore the original optimizer learning rate. This is important
+			after a ReduceLROnPlateau callback changed it during training.
+		"""
+		if self.model is None:
+			raise ModelNotFittedError(
+				"Model is not initialized. Call initialize(...) first."
+			)
+
+		self._validate_keras_components()
+
+		has_callback_updates = bool(callback_updates)
+
+		for index, callback in enumerate(self.callbacks):
+			if has_callback_updates:
+				updates = self._get_callback_updates(
+					callback=callback,
+					index=index,
+					callback_updates=callback_updates,
+				)
+				if updates:
+					self._apply_callback_updates(callback, updates)
+
+			if isinstance(callback, tf.keras.callbacks.TensorBoard):
+				self._reset_tensorboard_callback(
+					callback=callback,
+					run_name=run_name,
+					root_dir=tensorboard_root_dir,
+				)
+			else:
+				self._reset_callback_runtime_state(callback)
+
+		# Keras should resets this, but it's better to makes sure
+		self.model.stop_training = False
+
+	def _get_callback_updates(
+		self,
+		*,
+		callback: Any,
+		index: int,
+		callback_updates: Optional[
+			Mapping[Union[int, str, type], Mapping[str, Any]]
+		],
+	) -> Dict[str, Any]:
+		"""Merge all configuration updates that match a callback."""
+		if not callback_updates:
+			return {}
+
+		updates: Dict[str, Any] = {}
+
+		for selector, values in callback_updates.items():
+			if not isinstance(values, Mapping):
+				raise ConstraintConfigurationError(
+					"Each callback_updates value must be a mapping of "
+					"attribute names to values."
+				)
+
+			matches = (
+				selector == index
+				or selector == callback.__class__.__name__
+				or (
+					isinstance(selector, type)
+					and isinstance(callback, selector)
+				)
+			)
+
+			if matches:
+				updates.update(values)
+
+		return updates
+
+	def _apply_callback_updates(
+		self,
+		callback: Any,
+		updates: Mapping[str, Any],
+	) -> None:
+		"""
+		Update only existing public callback attributes.
+
+		Private attributes are intentionally excluded because they are
+		version-dependent runtime internals rather than stable configuration.
+		"""
+		for attribute, value in updates.items():
+			if attribute.startswith("_"):
+				raise ConstraintConfigurationError(
+					f"Cannot update private callback attribute: {attribute!r}"
+				)
+
+			if not hasattr(callback, attribute):
+				raise ConstraintConfigurationError(
+					f"{callback.__class__.__name__} has no configurable "
+					f"attribute {attribute!r}"
+				)
+
+			setattr(callback, attribute, value)
+
+	def _reset_callback_runtime_state(self, callback: Any) -> None:
+		"""
+		Clear known callback runtime state without reconstructing the callback
+		or copying its configuration.
+		"""
+		reset_state = getattr(callback, "reset_state", None)
+		if callable(reset_state):
+			reset_state()
+			return
+
+		if isinstance(callback, tf.keras.callbacks.EarlyStopping):
+			callback.wait = 0
+			callback.stopped_epoch = 0
+			callback.best_epoch = 0
+			callback.best_weights = None
+
+			# on_train_begin() initializes best and monitor_op according to
+			# the active TensorFlow/Keras version and callback configuration.
+			callback.on_train_begin(logs=None)
+			return
+
+		if isinstance(callback, tf.keras.callbacks.ReduceLROnPlateau):
+			callback.wait = 0
+			callback.cooldown_counter = 0
+			callback.best = np.inf
+			callback.on_train_begin(logs=None)
+			return
+
+		if isinstance(callback, tf.keras.callbacks.ModelCheckpoint):
+			callback.best = np.inf
+			callback.on_train_begin(logs=None)
+			return
+
+		# Custom callbacks without reset_state() intentionally retain their
+		# state. Resetting __dict__ could remove model references, file
+		# handles, configuration values, or other persistent resources.
+
+	def _reset_tensorboard_callback(
+		self,
+		*,
+		callback: Any,
+		run_name: Optional[str],
+		root_dir: Optional[Union[str, os.PathLike[str]]],
+	) -> None:
+		"""
+		Assign a new TensorBoard run directory and discard cached writer state.
+
+		TensorBoard will create fresh writers during the next model.fit() call.
+		"""
+		if run_name is not None:
+			base_dir = (
+				Path(root_dir)
+				if root_dir is not None
+				else Path(callback.log_dir).parent
+			)
+			callback.log_dir = str(base_dir / run_name)
+
+		# TensorBoard internals vary between TensorFlow/Keras releases.
+		# Clear only known writer and counter fields when they are present.
+		for attribute in (
+			"_train_writer",
+			"_val_writer",
+			"_writers",
+			"_train_step",
+			"_val_step",
+			"_global_train_batch",
+			"_global_test_batch",
+		):
+			if hasattr(callback, attribute):
+				setattr(callback, attribute, None)

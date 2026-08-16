@@ -36,3 +36,10 @@ class ConvergenceCheck(Callback):
 
 		return True
 
+	def clone_for_run(self, run_name: str) -> "ConvergenceCheck":
+		"""Create a clean callback; do not copy best loss or stored weights."""
+		del run_name  # This callback has no run-specific destination.
+
+		return type(self)(
+			relative_change_threshold=self.relative_change_threshold
+		)

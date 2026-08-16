@@ -20,7 +20,7 @@ def _ensure_tensorflow() -> None:
 	if tf is None:
 		raise BackendNotAvailableError("TensorFlow is required to use keras_regularizers.")
 
-
+@tf.keras.utils.register_keras_serializable(package="EnhancedGrangerCausalAnalysis", name="KerasL1Regularizer")	
 class KerasL1Regularizer(tf.keras.regularizers.Regularizer if tf is not None else object):
 	"""Standard Keras-compatible L1 regularizer with protocol helper methods."""
 
@@ -37,9 +37,9 @@ class KerasL1Regularizer(tf.keras.regularizers.Regularizer if tf is not None els
 			return tf.constant(0.0, dtype=target_dtype)
 		return tf.cast(self.l1, dtype=target_dtype) * tf.reduce_sum(tf.abs(x_cast))
 
-	def apply(self, model_params: NDArray[np.float64]) -> NDArray[np.float64]:
+	def apply(self, model_params: NDArray[np.float32]) -> NDArray[np.float32]:
 		"""Protocol-compatible helper returning L1 subgradient term."""
-		params = np.asarray(model_params, dtype=np.float64)
+		params = np.asarray(model_params, dtype=np.float32)
 		return self.l1 * np.sign(params)
 
 	def get_params(self) -> Dict[str, Any]:
@@ -50,6 +50,7 @@ class KerasL1Regularizer(tf.keras.regularizers.Regularizer if tf is not None els
 		return {"l1": self.l1}
 
 
+@tf.keras.utils.register_keras_serializable(package="EnhancedGrangerCausalAnalysis", name="KerasLagDependentL1Regularizer")
 class KerasLagDependentL1Regularizer(tf.keras.regularizers.Regularizer if tf is not None else object):
 	"""Lag-dependent L1 regularizer with per-lag influence weights.
 
@@ -115,7 +116,7 @@ class KerasLagDependentL1Regularizer(tf.keras.regularizers.Regularizer if tf is 
 		self.max_lags_per_pred = [int(v) for v in max_lags_per_pred]
 		self.col_offsets = offsets
 
-	def _feature_weights_np(self, n_features: int) -> NDArray[np.float64]:
+	def _feature_weights_np(self, n_features: int) -> NDArray[np.float32]:
 		"""Build per-feature weights using LagSelectionResult block layout."""
 		if self.max_lags_per_pred is not None and self.col_offsets is not None:
 			if len(self.max_lags_per_pred) != len(self.col_offsets):
@@ -123,7 +124,7 @@ class KerasLagDependentL1Regularizer(tf.keras.regularizers.Regularizer if tf is 
 
 			offsets = list(self.col_offsets)
 			ends = offsets[1:] + [int(n_features)]
-			per_feature = np.empty(n_features, dtype=np.float64)
+			per_feature = np.empty(n_features, dtype=np.float32)
 
 			for j, (start, end) in enumerate(zip(offsets, ends)):
 				if start < 0 or end < start or end > n_features:
@@ -159,10 +160,10 @@ class KerasLagDependentL1Regularizer(tf.keras.regularizers.Regularizer if tf is 
 			return per_feature
 
 		if len(self.lag_weights) == n_features:
-			return np.asarray(self.lag_weights, dtype=np.float64)
+			return np.asarray(self.lag_weights, dtype=np.float32)
 
 		if len(self.lag_weights) == 1:
-			return np.full(n_features, self.lag_weights[0], dtype=np.float64)
+			return np.full(n_features, self.lag_weights[0], dtype=np.float32)
 
 		raise RegularizerConfigurationError(
 			"Unable to map lag_weights to features. Set max_lags_per_pred and col_offsets, "
@@ -192,11 +193,11 @@ class KerasLagDependentL1Regularizer(tf.keras.regularizers.Regularizer if tf is 
 		weighted_abs = tf.abs(x_cast) * feature_weights_tf
 		return tf.cast(self.l1, dtype=target_dtype) * tf.reduce_sum(weighted_abs)
 
-	def apply(self, model_params: NDArray[np.float64]) -> NDArray[np.float64]:
+	def apply(self, model_params: NDArray[np.float32]) -> NDArray[np.float32]:
 		"""Protocol-compatible helper returning lag-weighted L1 subgradient."""
-		params = np.asarray(model_params, dtype=np.float64)
+		params = np.asarray(model_params, dtype=np.float32)
 		if params.ndim == 0:
-			return np.asarray(0.0, dtype=np.float64)
+			return np.asarray(0.0, dtype=np.float32)
 
 		n_features = params.shape[0]
 		feature_weights = self._feature_weights_np(n_features)
