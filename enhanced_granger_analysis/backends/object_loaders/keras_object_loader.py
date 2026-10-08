@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from typing import Any, Dict, List, Mapping, Optional, Sequence, Tuple
 
-from ..constraints.tensorflow_constraints import (
+from ..constraints.keras_constraints import (
 	TensorFlowMaskAndMinAbsSumConstraint,
 	TensorFlowMaskConstraint,
 )
@@ -14,7 +14,7 @@ from ...core.exceptions import ConstraintConfigurationError
 class TensorFlowObjectLoader:
 	"""Resolve TensorFlow callback and optimizer specs into Keras objects."""
 
-	def __init__(self, tf_module: Any, loading_verbose: bool = False) -> None:
+	def __init__(self, tf_module: Any, loading_verbose: bool = False):
 		self._tf = tf_module
 		self._loading_verbose = bool(loading_verbose)
 

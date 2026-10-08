@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import importlib
 import os
 from importlib.util import find_spec
 from pathlib import Path
@@ -27,11 +26,9 @@ else:
 class FeatureMask(tf.keras.layers.Layer):
 	"""Untrainable feature mask layer: y = x * mask."""
 
-	def __init__(self, n_features: int, **kwargs: Any) -> None:
+	def __init__(self, n_features: int, **kwargs: Any):
 		super().__init__(trainable=False, **kwargs)
 		self.n_features = n_features
-
-	def build(self, input_shape: Any) -> None:
 		self.mask = self.add_weight(
 			name="mask",
 			shape=(self.n_features,),
@@ -53,14 +50,14 @@ class TensorFlowGrangerModel(BaseGrangerModel):
 		constraint: Optional[Any] = None,
 		optimizer: Union[str, Any] = "adam",
 		loss: Union[str, Any] = "mse",
-		callbacks: Optional[List[Any]] = None,
+		callbacks: Optional[list] = None,
 		epochs: int = 100,
 		batch_size: int = 32,
 		verbose: int = 0,
 		device: Optional[str] = None,
 		use_jit: Optional[bool] = None,
 		**kwargs: Any,
-	) -> None:
+	):
 		super().__init__(
 			backend=backend,
 			regularizer=regularizer,
@@ -96,7 +93,7 @@ class TensorFlowGrangerModel(BaseGrangerModel):
 		self.model: Optional[Any] = None
 		self._variable_control_layer: Optional[Any] = None
 		self._coefficient_layer: Optional[Any] = None
-		self._initial_optimizer_state: Optional[tuple[Any, ...]] = None
+		self._initial_optimizer_state: Optional[tuple] = None
 
 		self._n_features: Optional[int] = None
 		self._n_outputs: Optional[int] = None
@@ -254,7 +251,6 @@ class TensorFlowGrangerModel(BaseGrangerModel):
 		variables = optimizer.variables
 		if callable(variables):
 			variables = variables()
-
 		with tf.device(self.device):
 			self._initial_optimizer_state = [
 				tf.identity(variable.value)
@@ -280,7 +276,7 @@ class TensorFlowGrangerModel(BaseGrangerModel):
 
 	def initialize(
 		self,
-		data: NDArray[np.float32],
+		data: NDArray[np.float32]|List[NDArray[np.float32]],
 		lags: Optional[int] = None,
 		**kwargs: Any,
 	) -> None:
@@ -346,7 +342,7 @@ class TensorFlowGrangerModel(BaseGrangerModel):
 		self._y_train = y
 		self._fitted = False
 
-	def fit(self, return_history: bool = False) -> Dict[str, Any]|None:
+	def fit(self, return_history: bool = False) -> Dict[str, Any]:
 		"""Fit model and return a minimal result dictionary aligned with BaseGrangerModel."""
 		if self.model is None or self._X_train is None or self._y_train is None:
 			raise ModelNotFittedError("Model is not initialized. Call initialize(...) first.")
@@ -403,7 +399,7 @@ class TensorFlowGrangerModel(BaseGrangerModel):
 				},
 			}
 		else:
-			return 
+			raise {}
 
 	@staticmethod
 	def _is_gpu_dnn_init_error(exc: Exception) -> bool:
@@ -414,7 +410,7 @@ class TensorFlowGrangerModel(BaseGrangerModel):
 			or "failedpreconditionerror" in msg and "cuda" in msg
 		)
 
-	def predict(self, X: NDArray[np.float32]) -> NDArray[np.float32]:
+	def predict(self, X: NDArray[np.float64]) -> NDArray[np.float64]:
 		"""Generate predictions from fitted TensorFlow model."""
 		if not self._fitted or self.model is None or self._n_features is None:
 			raise ModelNotFittedError("Model is not fitted. Call fit(...) first.")
@@ -435,7 +431,7 @@ class TensorFlowGrangerModel(BaseGrangerModel):
 		return pred.numpy().astype(np.float32, copy=False)
 
 	def set_weights(
-		self, weights: Union[NDArray[np.float32], List[NDArray[np.float32]]]
+		self, weights: NDArray[np.float32]| List[NDArray[np.float32]]
 	) -> None:
 		"""Set coefficient-layer kernel (and optional bias) weights."""
 		if self._coefficient_layer is None:
@@ -534,9 +530,6 @@ class TensorFlowGrangerModel(BaseGrangerModel):
 					"patience": 4,
 				},
 			}
-		reset_optimizer_learning_rate:
-			Restore the original optimizer learning rate. This is important
-			after a ReduceLROnPlateau callback changed it during training.
 		"""
 		if self.model is None:
 			raise ModelNotFittedError(

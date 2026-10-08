@@ -13,86 +13,58 @@ from ...core.exceptions import BackendNotAvailableError, ConstraintConfiguration
 
 
 if find_spec("tensorflow") is not None:
-	tf = importlib.import_module("tensorflow")
+    tf = importlib.import_module("tensorflow")
 else:  # pragma: no cover - runtime dependency check
-	tf = None
-
+    tf = None
 
 def _ensure_tensorflow() -> None:
-	if tf is None:
-		raise BackendNotAvailableError("TensorFlow is required to use tensorflow constraints.")
+    if tf is None:
+        raise BackendNotAvailableError("TensorFlow is required to use tensorflow constraints.")
 
-@tf.keras.utils.register_keras_serializable(package="EnhancedGrangerCausalAnalysis", name="TensorFlowMaskConstraint")
-class TensorFlowMaskConstraint(tf.keras.constraints.Constraint if tf is not None else object):
-	"""Keras kernel constraint that hard-zeros coefficients using a binary mask.
 
-	The expected mask shape is (n_outputs, n_features), aligned with LagEngine.
-	Dense kernel shape is (n_features, n_outputs), so the mask is transposed internally.
-	"""
+@keras.utils.register_keras_serializable(
+    package="EnhancedGrangerCausalAnalysis",
+    name="KerasZeroMaskConstraint"
+)
 
-	def __init__(self, mask: NDArray[np.float32]) -> None:
-		_ensure_tensorflow()
+class TensorFlowZeroMaskConstraint(tf.keras.constraints.Constraint):
+    def __init__(self, mask):
+        _ensure_tensorflow()
+        mask_arr = tf.keras.ops.array(mask, dtype="float32")
+        self.mask = mask_arr
+        self._mask_t = tf.constant(tf.keras.ops.transpose(mask_arr))
 
-		mask_arr = np.asarray(mask, dtype=np.float32)
-		if mask_arr.ndim != 2:
-			raise ConstraintConfigurationError(
-				"mask must be 2D with shape (n_outputs, n_features)"
-			)
+    def __call__(self, w):
+        return w * tf.cast(self._mask_t, w.dtype)
 
-		self.mask = mask_arr
-		self._expected_kernel_shape = (
-			int(mask_arr.shape[1]),
-			int(mask_arr.shape[0]),
-		)
-		self._mask_t = tf.constant(mask_arr.T, dtype=tf.float32)
+    def get_config(self):
+        return {"mask": tf.keras.ops.convert_to_numpy(self.mask).tolist()}
 
-	def __call__(self, w: Any) -> Any:
-		return w * tf.cast(self._mask_t, w.dtype)
-
-	def enforce(self, w: Any) -> Any:
-		return self(w)
-
-	def is_satisfied(self, params: Any, eps: float = 1e-8) -> bool:
-		if eps <= 0 or params.shape.rank != 2:
-			return False
-
-		actual_shape = tuple(int(v) for v in params.shape)
-		if actual_shape != self._expected_kernel_shape:
-			return False
-
-		mask_t = tf.cast(self._mask_t, params.dtype)
-		violation = tf.abs(params * (1.0 - mask_t))
-
-		return bool(
-			tf.reduce_all(
-				violation <= tf.cast(eps, params.dtype)
-			).numpy()
-		)
-
-	def get_config(self) -> Dict[str, Any]:
-		return {"mask": self.mask.tolist()}
 
 
 @tf.keras.utils.register_keras_serializable(package="EnhancedGrangerCausalAnalysis", name="TensorFlowMaskAndMinAbsSumConstraint")
-class TensorFlowMaskAndMinAbsSumConstraint(
-    tf.keras.constraints.Constraint if tf is not None else object
-):
+
+@tf.keras.utils.register_keras_serializable(
+    package="EnhancedGrangerCausalAnalysis",
+    name="TensorFlowMaskAndMinAbsSumConstraint",
+)
+class TensorFlowMaskAndMinAbsSumConstraint(tf.keras.constraints.Constraint):
     """Hard-mask Dense coefficients and enforce a minimum L1 sum on disjoint groups.
 
-    ``spec.mask`` uses LagEngine layout ``(n_outputs, n_features)`` while a
-    Dense kernel uses ``(n_features, n_outputs)``. All validation and static
-    TensorFlow constants are prepared once in ``__init__``.
+    spec.mask: (n_outputs, n_features)
+    Dense kernel: (n_features, n_outputs)
 
+    IMPORTANT:
     Every coefficient addressed by a min-abs-sum rule must be unique as a
     pair ``(feature_index, output_index)``. Different groups may use the same
     feature for different outputs, or different features for the same output.
     """
 
     def __init__(self, spec: ProcessedConstraintSpec, eps: float = 1e-8) -> None:
-        if tf is None:
-            raise BackendNotAvailableError(
-                "TensorFlow is required to use tensorflow constraints."
-            )
+
+        _ensure_tensorflow()
+        _ensure_keras()
+
         if not np.isfinite(eps) or eps <= 0:
             raise ConstraintConfigurationError("eps must be finite and > 0")
 
@@ -104,7 +76,7 @@ class TensorFlowMaskAndMinAbsSumConstraint(
         if not np.all(np.isfinite(mask)):
             raise ConstraintConfigurationError("spec.mask must contain finite values")
         if not np.all((mask == 0.0) | (mask == 1.0)):
-            raise ConstraintConfigurationError("spec.mask must be binary (values 0 or 1)")
+            raise ConstraintConfigurationError("spec.mask must be binary (0 or 1)")
 
         self.mask = mask
         self.eps = float(eps)
@@ -112,15 +84,17 @@ class TensorFlowMaskAndMinAbsSumConstraint(
         self._n_features = int(mask.shape[1])
         self._kernel_shape = (self._n_features, self._n_outputs)
 
-        # Layout already matches Dense.kernel: (n_features, n_outputs).
+        # Dense kernel layout: (n_features, n_outputs)
         self._mask_t = tf.constant(mask.T, dtype=tf.float32)
 
-        index_parts: list[np.ndarray] = []
-        segment_parts: list[np.ndarray] = []
+        scatter_indices_parts: list[np.ndarray] = []
+        segment_ids_parts: list[np.ndarray] = []
         min_abs_sums: list[float] = []
         group_sizes: list[int] = []
-        serialized_rules: list[Dict[str, Any]] = []
+        serialized_rules: list[dict[str, Any]] = []
         seen_coefficients: dict[tuple[int, int], int] = {}
+
+        group_id = 0
 
         for source_rule_index, rule in enumerate(spec.rules):
             output_index = int(rule.output_index)
@@ -152,13 +126,9 @@ class TensorFlowMaskAndMinAbsSumConstraint(
             duplicates = unique_features[feature_counts > 1]
             if duplicates.size:
                 raise ConstraintConfigurationError(
-                    f"Rule {source_rule_index}: repeated feature_indices: "
-                    f"{duplicates.tolist()}."
+                    f"Rule {source_rule_index}: repeated feature_indices: {duplicates.tolist()}."
                 )
 
-            # A coefficient forced to zero by the hard mask cannot be part of
-            # a positive lower-bound group. Reject it even for a zero threshold:
-            # this catches contradictory or redundant user specifications early.
             forbidden = feature_indices[mask[output_index, feature_indices] == 0.0]
             if forbidden.size:
                 raise ConstraintConfigurationError(
@@ -178,14 +148,12 @@ class TensorFlowMaskAndMinAbsSumConstraint(
                     )
                 seen_coefficients[coefficient] = source_rule_index
 
-            # The constraint sum(abs(w)) >= 0 is always fulfilled. It has no
-            # runtime role, but has already been fully validated above.
             if min_abs_sum == 0.0:
                 continue
 
             feature_indices_i32 = feature_indices.astype(np.int32, copy=False)
-            group_id = len(min_abs_sums)
-            index_parts.append(
+
+            scatter_indices_parts.append(
                 np.column_stack(
                     (
                         feature_indices_i32,
@@ -193,7 +161,7 @@ class TensorFlowMaskAndMinAbsSumConstraint(
                     )
                 )
             )
-            segment_parts.append(
+            segment_ids_parts.append(
                 np.full(feature_indices_i32.shape, group_id, dtype=np.int32)
             )
             min_abs_sums.append(min_abs_sum)
@@ -206,15 +174,17 @@ class TensorFlowMaskAndMinAbsSumConstraint(
                 }
             )
 
+            group_id += 1
+
         self.rules = serialized_rules
-        self._n_groups = len(min_abs_sums)
+        self._n_groups = group_id
 
         if self._n_groups:
             self._scatter_indices = tf.constant(
-                np.concatenate(index_parts, axis=0), dtype=tf.int32
+                np.concatenate(scatter_indices_parts, axis=0), dtype=tf.int32
             )
             self._segment_ids = tf.constant(
-                np.concatenate(segment_parts, axis=0), dtype=tf.int32
+                np.concatenate(segment_ids_parts, axis=0), dtype=tf.int32
             )
             self._group_min_abs_sums = tf.constant(min_abs_sums, dtype=tf.float32)
             self._group_sizes = tf.constant(group_sizes, dtype=tf.float32)
@@ -227,7 +197,12 @@ class TensorFlowMaskAndMinAbsSumConstraint(
             self._group_sizes = tf.constant([], dtype=tf.float32)
 
     def __call__(self, w: Any) -> Any:
-        """Apply the projection; this is the per-optimizer-step hot path."""
+        if w.shape.rank != 2 or tuple(int(v) for v in w.shape) != self._kernel_shape:
+            raise ConstraintConfigurationError(
+                f"Kernel shape {tuple(int(v) for v in w.shape)} does not match "
+                f"expected {self._kernel_shape}."
+            )
+
         mask_t = tf.cast(self._mask_t, w.dtype)
         constrained = w * mask_t
 
@@ -236,52 +211,36 @@ class TensorFlowMaskAndMinAbsSumConstraint(
 
         selected = tf.gather_nd(constrained, self._scatter_indices)
         abs_selected = tf.abs(selected)
+
         group_abs_sums = tf.math.unsorted_segment_sum(
             abs_selected, self._segment_ids, self._n_groups
         )
+
         deficits = tf.maximum(
-            tf.zeros_like(group_abs_sums),
             tf.cast(self._group_min_abs_sums, w.dtype) - group_abs_sums,
+            0.0,
         )
+
         deltas = tf.gather(
-            deficits / tf.cast(self._group_sizes, w.dtype), self._segment_ids
+            deficits / tf.cast(self._group_sizes, w.dtype),
+            self._segment_ids,
         )
-        signs = tf.where(tf.equal(selected, 0), tf.ones_like(selected), tf.sign(selected))
+
+        signs = tf.where(
+            tf.equal(selected, 0),
+            tf.ones_like(selected),
+            tf.sign(selected),
+        )
+
         projected = signs * (abs_selected + deltas)
 
-        # Validated in __init__: each (feature_index, output_index) is unique,
-        # and none points to a hard-masked coefficient.
-        return tf.tensor_scatter_nd_update(constrained, self._scatter_indices, projected)
-
-    def enforce(self, w: Any) -> Any:
-        """Compatibility alias for callers using the old public method."""
-        return self(w)
-
-    def is_satisfied(self, params: Any) -> bool:
-        """Diagnostic check; not intended for the training hot path."""
-        if not tf.is_tensor(params) or params.shape.rank != 2:
-            return False
-        if tuple(params.shape.as_list()) != self._kernel_shape:
-            return False
-
-        mask_t = tf.cast(self._mask_t, params.dtype)
-        mask_ok = tf.reduce_all(
-            tf.abs(params * (1.0 - mask_t)) <= tf.cast(self.eps, params.dtype)
+        constrained = tf.tensor_scatter_nd_update(
+            constrained,
+            self._scatter_indices,
+            projected,
         )
-        if not bool(mask_ok.numpy()):
-            return False
-        if self._n_groups == 0:
-            return True
 
-        selected = tf.gather_nd(params, self._scatter_indices)
-        group_abs_sums = tf.math.unsorted_segment_sum(
-            tf.abs(selected), self._segment_ids, self._n_groups
-        )
-        groups_ok = tf.reduce_all(
-            group_abs_sums + tf.cast(self.eps, params.dtype)
-            >= tf.cast(self._group_min_abs_sums, params.dtype)
-        )
-        return bool(groups_ok.numpy())
+        return constrained * mask_t
 
     def get_config(self) -> Dict[str, Any]:
         return {
@@ -291,21 +250,21 @@ class TensorFlowMaskAndMinAbsSumConstraint(
         }
 
 def build_tensorflow_constraint_from_relations(
-	relations: RelationMap,
-	predictor_names: Sequence[str],
-	output_names: Sequence[str],
-	col_offsets: Sequence[int],
-	n_features: int,
-	base_mask: Optional[NDArray[np.float32]] = None,
-	eps: float = 1e-8,
+    relations: RelationMap,
+    predictor_names: Sequence[str],
+    output_names: Sequence[str],
+    col_offsets: Sequence[int],
+    n_features: int,
+    base_mask: Optional[NDArray[np.float32]] = None,
+    eps: float = 1e-8,
 ) -> TensorFlowMaskAndMinAbsSumConstraint:
-	"""Build TensorFlow combined constraint from user-friendly relation mapping."""
-	spec = process_user_relations(
-		relations=relations,
-		predictor_names=predictor_names,
-		output_names=output_names,
-		col_offsets=col_offsets,
-		n_features=n_features,
-		base_mask=base_mask,
-	)
-	return TensorFlowMaskAndMinAbsSumConstraint(spec=spec, eps=eps)
+    """Build TensorFlow combined constraint from user-friendly relation mapping."""
+    spec = process_user_relations(
+        relations=relations,
+        predictor_names=predictor_names,
+        output_names=output_names,
+        col_offsets=col_offsets,
+        n_features=n_features,
+        base_mask=base_mask,
+    )
+    return TensorFlowMaskAndMinAbsSumConstraint(spec=spec, eps=eps)

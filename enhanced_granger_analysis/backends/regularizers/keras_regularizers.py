@@ -10,48 +10,38 @@ from numpy.typing import NDArray
 from ...core.exceptions import BackendNotAvailableError, RegularizerConfigurationError
 
 
-if find_spec("tensorflow") is not None:
-	tf = importlib.import_module("tensorflow")
+if find_spec("keras") is not None:
+	keras = importlib.import_module("keras")
 else:  # pragma: no cover - runtime dependency check
-	tf = None
+	keras = None
 
+import keras
+def _ensure_keras() -> None:
+	if keras is None:
+		raise BackendNotAvailableError("Keras is required to use keras_regularizers.")
 
-def _ensure_tensorflow() -> None:
-	if tf is None:
-		raise BackendNotAvailableError("TensorFlow is required to use keras_regularizers.")
-
-@tf.keras.utils.register_keras_serializable(package="EnhancedGrangerCausalAnalysis", name="KerasL1Regularizer")	
-class KerasL1Regularizer(tf.keras.regularizers.Regularizer if tf is not None else object):
+@keras.utils.register_keras_serializable(package="EnhancedGrangerCausalAnalysis", name="KerasL1Regularizer")
+class KerasL1Regularizer(keras.regularizers.Regularizer if keras is not None else object):
 	"""Standard Keras-compatible L1 regularizer with protocol helper methods."""
 
-	def __init__(self, l1: float = 0.0) -> None:
-		_ensure_tensorflow()
+	def __init__(self, l1: float = 0.0):
+		_ensure_keras()
 		if l1 < 0:
 			raise RegularizerConfigurationError("l1 must be >= 0")
 		self.l1 = float(l1)
 
 	def __call__(self, x: Any) -> Any:
-		target_dtype = tf.dtypes.as_dtype(tf.keras.backend.floatx())
-		x_cast = tf.cast(x, target_dtype)
+		x_cast = keras.ops.cast(x, 'float32')
 		if self.l1 == 0.0:
-			return tf.constant(0.0, dtype=target_dtype)
-		return tf.cast(self.l1, dtype=target_dtype) * tf.reduce_sum(tf.abs(x_cast))
-
-	def apply(self, model_params: NDArray[np.float32]) -> NDArray[np.float32]:
-		"""Protocol-compatible helper returning L1 subgradient term."""
-		params = np.asarray(model_params, dtype=np.float32)
-		return self.l1 * np.sign(params)
-
-	def get_params(self) -> Dict[str, Any]:
-		"""Protocol-compatible helper for retrieving regularizer parameters."""
-		return {"l1": self.l1}
+			return keras.opsconstant(0.0, dtype='float32')
+		return keras.ops.cast(self.l1, dtype='float32') * keras.ops.sum(keras.ops.abs(x_cast))
 
 	def get_config(self) -> Dict[str, Any]:
 		return {"l1": self.l1}
 
 
-@tf.keras.utils.register_keras_serializable(package="EnhancedGrangerCausalAnalysis", name="KerasLagDependentL1Regularizer")
-class KerasLagDependentL1Regularizer(tf.keras.regularizers.Regularizer if tf is not None else object):
+@keras.utils.register_keras_serializable(package="EnhancedGrangerCausalAnalysis", name="KerasLagDependentL1Regularizer")
+class KerasLagDependentL1Regularizer(keras.regularizers.Regularizer if keras is not None else object):
 	"""Lag-dependent L1 regularizer with per-lag influence weights.
 
 	Preferred mapping uses lag layout produced by LagSelector/LagEngine:
@@ -73,8 +63,8 @@ class KerasLagDependentL1Regularizer(tf.keras.regularizers.Regularizer if tf is 
 		lag_weights: Optional[Sequence[float]] = None,
 		max_lags_per_pred: Optional[Sequence[int]] = None,
 		col_offsets: Optional[Sequence[int]] = None,
-	) -> None:
-		_ensure_tensorflow()
+	):
+		_ensure_keras()
 
 		if l1 < 0:
 			raise RegularizerConfigurationError("l1 must be >= 0")
@@ -116,7 +106,7 @@ class KerasLagDependentL1Regularizer(tf.keras.regularizers.Regularizer if tf is 
 		self.max_lags_per_pred = [int(v) for v in max_lags_per_pred]
 		self.col_offsets = offsets
 
-	def _feature_weights_np(self, n_features: int) -> NDArray[np.float32]:
+	def _feature_weights_np(self, n_features: int):
 		"""Build per-feature weights using LagSelectionResult block layout."""
 		if self.max_lags_per_pred is not None and self.col_offsets is not None:
 			if len(self.max_lags_per_pred) != len(self.col_offsets):
@@ -171,39 +161,26 @@ class KerasLagDependentL1Regularizer(tf.keras.regularizers.Regularizer if tf is 
 		)
 
 	def __call__(self, x: Any) -> Any:
-		target_dtype = tf.dtypes.as_dtype(tf.keras.backend.floatx())
-		x_cast = tf.cast(x, target_dtype)
+		x_cast = keras.ops.cast(x, 'float32')
 		if self.l1 == 0.0:
-			return tf.constant(0.0, dtype=target_dtype)
+			return keras.ops.constant(0.0, dtype='float32')
 
 		x_shape = x_cast.shape
 		if x_shape.rank is None or x_shape.rank == 0:
-			return tf.cast(self.l1, dtype=target_dtype) * tf.reduce_sum(tf.abs(x_cast))
+			return keras.ops.cast(self.l1, dtype='float32') * keras.ops.sum(keras.ops.abs(x_cast))
 
 		n_features = x_shape[0]
 		if n_features is None:
 			raise RegularizerConfigurationError("Kernel first dimension must be known for lag-dependent regularizer")
 
 		feature_weights = self._feature_weights_np(int(n_features))
-		feature_weights_tf = tf.convert_to_tensor(feature_weights, dtype=target_dtype)
+		feature_weights_tf = tf.convert_to_tensor(feature_weights, dtype='float32')
 
 		broadcast_shape = [int(n_features)] + [1] * (x_shape.rank - 1)
 		feature_weights_tf = tf.reshape(feature_weights_tf, broadcast_shape)
 
 		weighted_abs = tf.abs(x_cast) * feature_weights_tf
 		return tf.cast(self.l1, dtype=target_dtype) * tf.reduce_sum(weighted_abs)
-
-	def apply(self, model_params: NDArray[np.float32]) -> NDArray[np.float32]:
-		"""Protocol-compatible helper returning lag-weighted L1 subgradient."""
-		params = np.asarray(model_params, dtype=np.float32)
-		if params.ndim == 0:
-			return np.asarray(0.0, dtype=np.float32)
-
-		n_features = params.shape[0]
-		feature_weights = self._feature_weights_np(n_features)
-		reshape = (n_features,) + (1,) * (params.ndim - 1)
-		feature_weights = feature_weights.reshape(reshape)
-		return self.l1 * np.sign(params) * feature_weights
 
 	def get_params(self) -> Dict[str, Any]:
 		"""Protocol-compatible helper for retrieving regularizer parameters."""
