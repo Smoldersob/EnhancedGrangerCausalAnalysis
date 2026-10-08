@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from typing import Any, Dict, List, Optional, Tuple, Union, Optional, Type, Mapping
+from typing import Any, Dict, List, Tuple, Union, Optional, Type, Mapping
 import numpy as np
 from numpy.typing import NDArray
 from sklearn.base import RegressorMixin
@@ -19,14 +19,14 @@ from ...core.exceptions import (
 class _OptimizerProxy:
 	"""Small optimizer-like adapter exposing param_groups for callback compatibility."""
 
-	def __init__(self, lr: float) -> None:
+	def __init__(self, lr: float):
 		self.param_groups: List[Dict[str, float]] = [{"lr": float(lr)}]
 
 
 class _ArrayAdapter:
 	"""Tensor-like adapter used by callbacks that expect detach().cpu()."""
 
-	def __init__(self, array: NDArray[np.float64]) -> None:
+	def __init__(self, array: NDArray[np.float64]):
 		self._array = array
 
 	def detach(self) -> "_ArrayAdapter":
@@ -39,7 +39,7 @@ class _ArrayAdapter:
 class _CoefficientLayerAdapter:
 	"""Layer-like adapter exposing a weight attribute used by logging callbacks."""
 
-	def __init__(self, model: "ScikitConstrainedGrangerModel") -> None:
+	def __init__(self, model: "ScikitConstrainedGrangerModel"):
 		self._model = model
 
 	@property
@@ -51,7 +51,7 @@ class _CoefficientLayerAdapter:
 class _VariableControlLayer:
 	"""Non-trainable diagonal masking layer for scikit-based model."""
 
-	def __init__(self, n_features: int) -> None:
+	def __init__(self, n_features: int):
 		self.trainable = False
 		self._n_features = n_features
 		self._mask = np.ones(n_features, dtype=np.float64)
@@ -68,8 +68,8 @@ class _VariableControlLayer:
 			self._mask[idx] = 0.0
 		self.weight = np.diag(self._mask).astype(np.float64)
 
-	def transform(self, X: NDArray[np.float64]) -> NDArray[np.float64]:
-		return X @ self.weight
+	def transform(self, x: NDArray[np.float64]) -> NDArray[np.float64]:
+		return x @ self.weight
 
 	@property
 	def mask(self) -> NDArray[np.float64]:
@@ -86,7 +86,7 @@ class ScikitConstrainedGrangerModel(LinearModel, RegressorMixin, BaseGrangerMode
 		backend: str = "sklearn",
 		regularizer: Optional[Any] = None,
 		constraint: Optional[Any] = None,
-		callbacks: Optional[List[Callback]] = None,
+		callbacks: List[Callback] = None,
 		fit_intercept: bool = True,
 		learning_rate: float = 1.0,
 		max_iter: int = 1000,
@@ -94,7 +94,7 @@ class ScikitConstrainedGrangerModel(LinearModel, RegressorMixin, BaseGrangerMode
 		batch_size: Optional[int] = None,
 		verbose: int = 0,
 		**kwargs: Any
-	) -> None:
+	):
 		BaseGrangerModel.__init__(
 			self,
 			backend=backend,
@@ -404,15 +404,15 @@ class ScikitConstrainedGrangerModel(LinearModel, RegressorMixin, BaseGrangerMode
 		if not self._fitted or not hasattr(self, "coef_"):
 			raise ModelNotFittedError("Model is not fitted. Call fit(...) first.")
 
-		X_arr = np.asarray(X, dtype=np.float64)
-		if X_arr.ndim != 2:
+		x_arr = np.asarray(X, dtype=np.float64)
+		if x_arr.ndim != 2:
 			raise TrainingError("X must be a 2D array")
 		if self._variable_control_layer is not None:
-			X_arr = self._variable_control_layer.transform(X_arr)
+			x_arr = self._variable_control_layer.transform(x_arr)
 
-		return X_arr @ self.coef_.T + self.intercept_
+		return x_arr @ self.coef_.T + self.intercept_
 
-	def set_weights(self, weights: Union[NDArray[np.float64], List[NDArray[np.float64]]]) -> None:
+	def set_weights(self, weights: NDArray[np.float64]|List[NDArray[np.float64]]) -> None:
 		if self._n_features is None or self._n_outputs is None:
 			raise ModelNotFittedError("Model is not initialized. Call initialize(...) first.")
 

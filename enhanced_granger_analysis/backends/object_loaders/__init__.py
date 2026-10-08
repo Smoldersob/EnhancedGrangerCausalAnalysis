@@ -11,9 +11,9 @@ try:
 except Exception:
     pass
 try:
-    if importlib.util.find_spec("tensorflow") is not None:
-        from .tf_object_loader import TensorFlowObjectLoader
-        __all__.append("TensorFlowObjectLoader")
+    if importlib.util.find_spec("Keras") is not None:
+        from .keras_object_loader import KerasObjectLoader
+        __all__.append("KerasObjectLoader")
 except Exception:
     pass
 

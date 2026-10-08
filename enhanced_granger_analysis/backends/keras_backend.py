@@ -6,8 +6,8 @@ from .base_backend import BackendStrategy
 from .object_loaders.keras_object_loader import KerasObjectLoader
 
 
-class TensorFlowBackendStrategy(BackendStrategy):
-	"""Strategy for TensorFlow/Keras backend."""
+class KerasBackendStrategy(BackendStrategy):
+	"""Strategy for Keras backend."""
 
 	@staticmethod
 	def _resolve_optimizer_spec(config: Dict[str, Any]) -> Any:
@@ -109,8 +109,6 @@ class TensorFlowBackendStrategy(BackendStrategy):
 			except ImportError:
 				pass
 
-			# TensorFlow's deterministic ops may require additional environment variables to be set,
-			# but we won't enforce that here. Users can set TF_DETERMINISTIC_OPS=1 if they want.
 		from .models.keras_model import KerasGrangerModel
 		config = self._consume_loading_verbose(config)
 		if self._object_loader is not None:
@@ -130,7 +128,7 @@ class TensorFlowBackendStrategy(BackendStrategy):
 		optimizer_resolved = self.resolve_optimizer(optimizer_spec)
 
 		kwargs = dict(model_cfg)
-		kwargs.setdefault("backend", "tensorflow")
+		kwargs.setdefault("backend", "keras")
 		kwargs.setdefault("regularizer", regularizer_resolved)
 		kwargs.setdefault("constraint", constraint_resolved)
 		kwargs.setdefault("optimizer", optimizer_resolved)

@@ -46,7 +46,7 @@ Backend abstraction layer and implementations:
 
 - `backend_factory.py`: backend selection and strategy dispatch.
 - `base_backend.py`: shared backend contract.
-- `pytorch_backend.py`, `tensorflow_backend.py`, `scikit_backend.py`: backend-specific logic.
+- `pytorch_backend.py`, `keras_backend.py`, `scikit_backend.py`: backend-specific logic.
 - Subfolders (`callbacks`, `constraints`, `models`, `object_loaders`, `regularizers`): backend-native components.
 
 ### core

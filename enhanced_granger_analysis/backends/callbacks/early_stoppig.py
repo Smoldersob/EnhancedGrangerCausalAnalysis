@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List
 
 import numpy as np
 
@@ -17,7 +17,7 @@ class EarlyStopping(Callback):
 		min_delta: float = 0.0,
 		restore_best_weights: bool = True,
 		monitor: str = "epoch_loss",
-	) -> None:
+	):
 		if patience <= 0:
 			raise TrainingConfigurationError("patience must be a positive integer")
 		if min_delta < 0:
@@ -30,7 +30,7 @@ class EarlyStopping(Callback):
 
 		self._best_loss: float = float("inf")
 		self._num_bad_epochs: int = 0
-		self._best_weights: Optional[List[np.ndarray]] = None
+		self._best_weights: List[np.ndarray] = None
 
 	def on_train_beginning(self, state: Dict[str, Any]) -> None:
 		self._best_loss = float("inf")
@@ -66,7 +66,7 @@ class EarlyStopping(Callback):
 			model.set_weights(self._best_weights)
 
 	def clone_for_run(self, run_name: str) -> "EarlyStopping":
-		"""Create a clean callback; do not copy best loss or stored weights."""
+		"""Create a clean callback; do not copy the best loss or stored weights."""
 		del run_name  # This callback has no run-specific destination.
 
 		return type(self)(

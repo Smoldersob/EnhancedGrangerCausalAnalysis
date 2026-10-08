@@ -10,13 +10,13 @@ import numpy as np
 os.environ["KERAS_BACKEND"] = "tensorflow"
 
 from ..core.exceptions import TrainingError
-from ..backends.models.tensorflow_model import TensorFlowGrangerModel
-from ..backends.regularizers.tensorflow_regularizers import (
+from ..backends.models.keras_model import KerasGrangerModel
+from ..backends.regularizers.keras_regularizers import (
     KerasL1Regularizer,
     KerasLagDependentL1Regularizer,
 )
 from ..backends.constraints import (
-    build_tensorflow_constraint_from_relations,
+    build_keras_constraint_from_relations,
     process_user_relations,
 )
 
@@ -55,7 +55,7 @@ def test_tensorflow_model_initialize_fit_and_omit_variables():
     W = rng.normal(size=(5, 2)).astype(np.float64)
     y = X @ W
 
-    model = TensorFlowGrangerModel(
+    model = KerasGrangerModel(
         optimizer="adam",
         loss="mse",
         epochs=5,
@@ -82,7 +82,7 @@ def test_tensorflow_model_initialize_requires_targets():
     _require_tensorflow()
 
     X = np.random.randn(10, 4)
-    model = TensorFlowGrangerModel(epochs=1, batch_size=4, verbose=0)
+    model = KerasGrangerModel(epochs=1, batch_size=4, verbose=0)
 
     _assert_raises(TrainingError, model.initialize, X, 1)
 
@@ -90,7 +90,7 @@ def test_tensorflow_model_initialize_requires_targets():
 def test_tensorflow_model_hyperoptimize_returns_message():
     _require_tensorflow()
 
-    model = TensorFlowGrangerModel(epochs=1, batch_size=4, verbose=0)
+    model = KerasGrangerModel(epochs=1, batch_size=4, verbose=0)
     result = model.hyperoptimize({"alpha": [0.1, 1.0]}, n_trials=3)
 
     assert isinstance(result, dict)
@@ -118,7 +118,7 @@ def test_tensorflow_model_accepts_keras_callbacks():
     X = rng.normal(size=(24, 3)).astype(np.float64)
     y = rng.normal(size=(24, 1)).astype(np.float64)
 
-    model = TensorFlowGrangerModel(
+    model = KerasGrangerModel(
         optimizer="adam",
         loss="mse",
         callbacks=[counter],
@@ -140,7 +140,7 @@ def test_tensorflow_model_accepts_keras_l1_regularizer():
     y = rng.normal(size=(30, 1)).astype(np.float64)
 
     regularizer = KerasL1Regularizer(l1=1e-3)
-    model = TensorFlowGrangerModel(
+    model = KerasGrangerModel(
         regularizer=regularizer,
         optimizer="adam",
         loss="mse",
@@ -152,7 +152,7 @@ def test_tensorflow_model_accepts_keras_l1_regularizer():
     result = model.fit()
 
     assert "history" in result
-    assert regularizer.get_params()["l1"] == 1e-3
+    assert regularizer.get_config()["l1"] == 1e-3
 
 
 def test_tensorflow_model_accepts_optimizer_instance_and_resets_between_fit_calls():
@@ -165,7 +165,7 @@ def test_tensorflow_model_accepts_optimizer_instance_and_resets_between_fit_call
     y = rng.normal(size=(30, 1)).astype(np.float64)
 
     opt_instance = tf.keras.optimizers.Adam(learning_rate=1e-2)
-    model = TensorFlowGrangerModel(
+    model = KerasGrangerModel(
         optimizer=opt_instance,
         loss="mse",
         epochs=2,
@@ -197,7 +197,7 @@ def test_tensorflow_model_accepts_optimizer_class():
     X = rng.normal(size=(24, 3)).astype(np.float64)
     y = rng.normal(size=(24, 1)).astype(np.float64)
 
-    model = TensorFlowGrangerModel(
+    model = KerasGrangerModel(
         optimizer=tf.keras.optimizers.SGD,
         loss="mse",
         epochs=2,
@@ -224,7 +224,7 @@ def test_tensorflow_model_accepts_lag_dependent_l1_regularizer():
         max_lags_per_pred=[3, 3],
         col_offsets=[0, 3],
     )
-    model = TensorFlowGrangerModel(
+    model = KerasGrangerModel(
         regularizer=regularizer,
         optimizer="adam",
         loss="mse",
@@ -279,7 +279,7 @@ def test_tensorflow_constraint_enforces_zero_mask_and_min_abs_sum():
 
     import tensorflow as tf
 
-    constraint = build_tensorflow_constraint_from_relations(
+    constraint = build_keras_constraint_from_relations(
         relations={
             ("y1", "x1"): 0,
             ("y1", "x2"): 1.5,
@@ -310,7 +310,7 @@ def test_tensorflow_constraint_rejects_invalid_kernel_shape():
     import tensorflow as tf
     from ..core.exceptions import ConstraintConfigurationError
 
-    constraint = build_tensorflow_constraint_from_relations(
+    constraint = build_keras_constraint_from_relations(
         relations={
             ("y1", "x1"): 0,
         },

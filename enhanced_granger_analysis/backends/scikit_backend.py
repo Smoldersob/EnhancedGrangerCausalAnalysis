@@ -11,7 +11,7 @@ from .object_loaders.np_object_loader import NumpyObjectLoader
 class ScikitBackendStrategy(BackendStrategy):
 	"""Strategy for scikit-learn backend."""
 
-	def __init__(self, loading_verbose: bool = False) -> None:
+	def __init__(self, loading_verbose: bool = False):
 		super().__init__(loading_verbose=loading_verbose)
 		self._sklearn = None
 		self._object_loader = NumpyObjectLoader(loading_verbose=loading_verbose)
@@ -41,13 +41,6 @@ class ScikitBackendStrategy(BackendStrategy):
 			np.random.seed(seed)
 			random.seed(seed)
 
-			try:
-				import torch
-				torch.manual_seed(seed)
-				if torch.cuda.is_available():
-					torch.cuda.manual_seed_all(seed)
-			except ImportError:
-				pass
 		from .models.scikit_model import ScikitConstrainedGrangerModel
 		config = self._consume_loading_verbose(config)
 		self._object_loader.set_loading_verbose(self._loading_verbose)
@@ -77,7 +70,7 @@ class ScikitBackendStrategy(BackendStrategy):
 
 		return model_cls(**kwargs)
 
-	def resolve_callbacks(self, callbacks: Optional[List[Any]]) -> Optional[List[Any]]:
+	def resolve_callbacks(self, callbacks: Optional[list]) -> Optional[list]:
 		self._object_loader.set_loading_verbose(self._loading_verbose)
 		return self._object_loader.resolve_callbacks(callbacks)
 
@@ -118,14 +111,14 @@ class ScikitBackendStrategy(BackendStrategy):
 
 	def validate_components(
 		self,
-		regularizer: Optional[Any]|None,
-		constraint: Optional[Any]|None,
-		callbacks: Optional[List[Any]] = None,
+		regularizer: Optional[Any],
+		constraint: Optional[Any],
+		callbacks: Optional[list] = None,
 		optimizer: Any = None,
 	) -> None:
 		self._object_loader.set_loading_verbose(True)
 		if callbacks is not None:
-			resolved_callbacks = self._object_loader.resolve_callbacks(callbacks)
+			self._object_loader.resolve_callbacks(callbacks)
 		if optimizer is not None:
 			_ = self._object_loader.resolve_optimizer(optimizer)
 		if regularizer is not None:

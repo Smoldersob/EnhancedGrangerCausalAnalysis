@@ -41,14 +41,36 @@ Implemented and stabilized between 2.0.0 and 2.1.0:
 These improvements do not replace the long-term roadmap, but they significantly reduce onboarding friction and make the 2.x architecture easier to adopt in real testing workflows.
 
 
-### Version Changes 2.2.0 (pip support and futher consitency updrades)
+### Version Changes 2.2.0 (pip support and further consistency upgrades)
 
 The 2.2.0 once again changes the folder structure of repository. Additional improvements in documentation and script usage. Changes allow:
-- **Choosing computational unit in grouped experiments**: user can choose to calcutate on **GPU** or **CPU**
-- **Easier contol of grouped experiment**: configuration of grouped experiment has been futher developt to allow better and more universal control
-- **Development of saved parametes**: grouped experiments can be dane in two modes:
+- **Choosing computational unit in grouped experiments**: user can choose to calculate on **GPU** or **CPU**
+- **Easier control of grouped experiment**: configuration of grouped experiment has been further development to allow better and more universal control
+- **Development of saved parameters**: grouped experiments can be dane in two modes:
     - minimum: binary causality matrix + summary.csv
     - matrices: binary, p-values, F-test, sign + summary.csv
 - **Pip support**: pyproject.toml has been added and module have been moved in to subfolder to allow pip install
-- **Documentation update**: futher development of docs to allow easier introduction to new users and development of library
+- **Documentation update**: further development of docs to allow easier introduction to new users and development of library
  
+### Version Changes 2.3.0
+The 2.3.0 versions has added 3 major changes:
+- **Keras/TensorFlow backend and modeling update**: in new version tensorflow backend has been replaced
+with fully keras backend, in which all constraints, regularizers and model are described implemented 
+from backend used by keras. This allows to you keras implementation with any keras backend:
+tensorflow, pytorch or jax. It has to be remembered that it has to be set before using the library.
+- **Intelligent data preparation**: code responsible for data preparation has been partially rewritten.
+The most important change and addition is checking usability of signal by checking if they have constant
+values or are copies of other signals. These columns have to be handled in special way if they are 
+part of analyzed causes or effects.
+- **Results and metrics handling**: the way results of test are analyzed has been change and upgraded.
+New implementation returns more comprehensive information about the values, model and analyzed signals.
+New entities `metrics` have been added, so the in new implementation results are analyzed using them.
+Metrics have their registry, but it is also possible now to add custom metrics and used them on test 
+results, which is supposed to help expand future. 
+
+There were also few smaller changes:
+- hiper optimization method have been separated and slightly upgraded
+- calculating constrained parameters have been updated and made a little customizable
+- results saved by using script have changed - minimum option save only results after thresholding and summary table, 
+while matrices also save matrices of metric and p-value. New parameter `with_sign` was added to the script to allow
+saving and using unsigned relation matices.

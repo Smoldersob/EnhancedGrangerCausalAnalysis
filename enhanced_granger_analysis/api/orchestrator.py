@@ -3,7 +3,6 @@ from __future__ import annotations
 import copy
 import os
 import re
-from dataclasses import dataclass
 from typing import Any, Dict, List, Mapping, Optional, Sequence, Tuple
 
 import numpy as np
@@ -11,99 +10,15 @@ import pandas as pd
 import time
 
 from ..backends import BackendFactory
-from ..core.exceptions import DataValidationError
 from ..core.lag_config import LagConfiguration
-from ..core.outputs import MultiTaskGrangerOutput
-from ..preprocessing.lag.lag_engine import LagEngine
 from ..preprocessing.stationarity import StationarityTransformer
-from ..preprocessing.scaling import IdentityScaler, MaxAbsScaler, MinMaxScaler, RobustScaler, StandardScaler, _BaseScaler
-from ..results.granger_results import GrangerAnalysisResults
+from ..preprocessing.lag import BaseLagSelector
+from ..preprocessing.prepare_data import PreparedData, prepare_data
+
+from ..results.granger_results import GrangerAnalysisResults, ResultsError, PreparationContext
 from ..hiperopt.hyperoptimization import MultiTaskGrangerHyperparameterOptimizer
 
-
-@dataclass(frozen=True)
-class _PreparedData:
-	data_stationary: List[pd.DataFrame]
-	engine: LagEngine
-	X_train: np.ndarray
-	y_train: np.ndarray
-	col_offsets: np.ndarray
-	x_scaler: Any
-	y_scaler: Any
-	X_backend_scaled: np.ndarray
-	y_backend_scaled: np.ndarray
-	X_backend_raw: np.ndarray
-	y_backend_raw: np.ndarray
-	base_mask: Optional[np.ndarray]
-
-
-def _to_dataframe_list(data: pd.DataFrame | Sequence[pd.DataFrame]) -> List[pd.DataFrame]:
-	if isinstance(data, pd.DataFrame):
-		return [data.copy()]
-	if isinstance(data, Sequence) and all(isinstance(df, pd.DataFrame) for df in data):
-		return [df.copy() for df in data]
-	raise DataValidationError("data must be a DataFrame or a sequence of DataFrames")
-
-
-def _reduce_backend_load(
-	X_scaled: np.ndarray,
-	y_scaled: np.ndarray,
-	X_raw: np.ndarray,
-	y_raw: np.ndarray,
-	backend_sample_fraction: float = 1.0,
-	backend_max_samples: Optional[int] = None,
-) -> Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
-	"""Reduce training workload after scaling and before backend call."""
-	if not 0.0 < backend_sample_fraction <= 1.0:
-		raise ValueError("backend_sample_fraction must be in range (0.0, 1.0]")
-
-	n = X_scaled.shape[0]
-	if n == 0:
-		raise DataValidationError("No samples available after lag preparation")
-
-	n_keep = max(1, int(np.floor(backend_sample_fraction * n)))
-	if backend_max_samples is not None:
-		if backend_max_samples <= 0:
-			raise ValueError("backend_max_samples must be > 0")
-		n_keep = min(n_keep, int(backend_max_samples))
-
-	if n_keep >= n:
-		return X_scaled, y_scaled, X_raw, y_raw
-
-	idx = np.arange(n_keep, dtype=int)
-	return X_scaled[idx], y_scaled[idx], X_raw[idx], y_raw[idx]
-
-
-def _create_scaler(name: Optional[Any]) -> Any:
-	if name is None:
-		return IdentityScaler()
-
-	if isinstance(name, str):
-		name_lower = name.lower()
-		if name_lower in {"identity", "none"}:
-			return IdentityScaler()
-		if name_lower in {"standard", "zscore"}:
-			return StandardScaler()
-		if name_lower in {"minmax"}:
-			return MinMaxScaler()
-		if name_lower in {"robust"}:
-			return RobustScaler()
-		if name_lower in {"maxabs"}:
-			return MaxAbsScaler()
-		raise ValueError(f"Unsupported scaler: {name}")
-
-	if isinstance(name, type) and issubclass(name, _BaseScaler):
-		return name()
-
-	if isinstance(name, _BaseScaler):
-		return name
-
-	if all(hasattr(name, attr) and callable(getattr(name, attr)) for attr in ("fit_transform", "transform", "inverse_transform")):
-		return name
-
-	raise ValueError(f"Unsupported scaler: {name}")
-
-
+# Preprocessing utility functions for run-specific callback handling and regularizer specification.
 def _sanitize_run_name(name: str) -> str:
 	"""Convert arbitrary run identifier into a safe path segment."""
 	return re.sub(r"[^a-zA-Z0-9_.-]+", "_", str(name)).strip("_") or "run"
@@ -184,7 +99,6 @@ def _regularizer_spec_from_value(regularizer: Any) -> Optional[Dict[str, Any]]:
 	params.setdefault("type", type_name)
 	return params
 
-
 class MultiTaskGrangerAPI:
 	"""
 	Multitask orchestrator for backend-based Granger analysis.
@@ -203,78 +117,13 @@ class MultiTaskGrangerAPI:
 	def __init__(
 		self,
 		backend: Optional[str] = None,
-		stationarity_transformer: Optional[Any] = None,
 		reuse_data: bool = False,
 	) -> None:
 		self.backend = backend
-		self._stationarity_transformer = stationarity_transformer or StationarityTransformer()
 		self._reuse_data = bool(reuse_data)
-		self._prepared_data: Optional[_PreparedData] = None
+		self._prepared_data: Optional[PreparedData] = None
 
-	def _prepare_data(
-		self,
-		data: pd.DataFrame | Sequence[pd.DataFrame],
-		effects: Optional[Sequence[str]] = None,
-		lag_config: Optional[LagConfiguration] = None,
-		lag_selector: Optional[Any] = None,
-		stationarity_transformer: Optional[Any] = None,
-		backend_sample_fraction: float = 1.0,
-		backend_max_samples: Optional[int] = None,
-		x_scaler: Optional[Any] = "standard",
-		y_scaler: Optional[Any] = "standard",
-	) -> _PreparedData:
-		data_list = _to_dataframe_list(data)
-		all_columns = list(data_list[0].columns)
-		effects_list = list(effects) if effects is not None else all_columns
-		
-		stationarity = stationarity_transformer or self._stationarity_transformer
-		data_stationary = stationarity.fit_transform(data_list)
-
-		engine = LagEngine(config=lag_config or LagConfiguration(), selector=lag_selector)
-		X_train, y_train, col_offsets = engine.prepare(data_stationary, effects=effects_list)
-
-		x_scaler_obj = _create_scaler(x_scaler)
-		y_scaler_obj = _create_scaler(y_scaler)
-
-		X_train_scaled = x_scaler_obj.fit_transform(X_train)
-		y_train_scaled = y_scaler_obj.fit_transform(y_train)
-
-		X_backend_scaled, y_backend_scaled, X_backend_raw, y_backend_raw = _reduce_backend_load(
-			X_scaled=X_train_scaled,
-			y_scaled=y_train_scaled,
-			X_raw=X_train,
-			y_raw=y_train,
-			backend_sample_fraction=backend_sample_fraction,
-			backend_max_samples=backend_max_samples,
-		)
-
-		base_mask = None
-		if engine.mask_ is not None:
-			mask_arr = np.asarray(engine.mask_, dtype=np.float64)
-			if mask_arr.shape[0] == len(effects_list):
-				base_mask = mask_arr
-			else:
-				effect_indices = [all_columns.index(effect_name) for effect_name in effects_list]
-				base_mask = mask_arr[effect_indices, :]
-
-		prepared = _PreparedData(
-			data_stationary=data_stationary,
-			engine=engine,
-			X_train=X_train,
-			y_train=y_train,
-			col_offsets=col_offsets,
-			x_scaler=x_scaler_obj,
-			y_scaler=y_scaler_obj,
-			X_backend_scaled=X_backend_scaled,
-			y_backend_scaled=y_backend_scaled,
-			X_backend_raw=X_backend_raw,
-			y_backend_raw=y_backend_raw,
-			base_mask=base_mask,
-		)
-
-		self._prepared_data = prepared
-
-		return prepared
+	
 
 	def fit(
 		self,
@@ -284,9 +133,9 @@ class MultiTaskGrangerAPI:
 		tested_causes: Optional[Sequence[str]] = None,
 		relations: Optional[Mapping[Tuple[str, str], Any]] = None,
 		lag_config: Optional[LagConfiguration] = None,
-		lag_selector: Optional[Any] = None,
-		stationarity_transformer: Optional[Any] = None,
-		prepared_data: Optional[_PreparedData] = None,
+		lag_selector: Optional[BaseLagSelector] = None,
+		stationarity_transformer: Optional[StationarityTransformer] = None,
+		prepared_data: Optional[PreparedData] = None,
 		backend_sample_fraction: float = 1.0,
 		backend_max_samples: Optional[int] = None,
 		x_scaler: Optional[Any] = "standard",
@@ -298,32 +147,19 @@ class MultiTaskGrangerAPI:
 		hiperoptimalization_conf: Optional[Dict[str, Any]] = None,
 		initializer: Optional[Any] = None,
 		model_config: Optional[Dict[str, Any]] = None,
-	) -> MultiTaskGrangerOutput:
-		data_list = _to_dataframe_list(data)
-		all_columns = list(data_list[0].columns)
-
-		causes_list = list(causes) if causes is not None else all_columns
-		effects_list = list(effects) if effects is not None else all_columns
-		tested_causes_list = list(tested_causes) if tested_causes is not None else causes_list
-
-		unknown_causes = [c for c in causes_list if c not in all_columns]
-		unknown_effects = [e for e in effects_list if e not in all_columns]
-		unknown_tested = [c for c in tested_causes_list if c not in all_columns]
-		if unknown_causes or unknown_effects or unknown_tested:
-			raise DataValidationError(
-				f"Unknown variables detected. causes={unknown_causes}, effects={unknown_effects}, tested_causes={unknown_tested}"
-			)
+	) -> GrangerAnalysisResults:
 
 		relations_map = dict(relations or {})
-
 		preparation_time_seconds = 0.0
 		if prepared_data is not None:
 			prepared = prepared_data
 		else:
 			prep_start = time.perf_counter()
-			prepared = self._prepare_data(
+			prepared = prepare_data(
 				data=data,
-				effects=effects_list,
+				causes=causes,
+				tested_causes=tested_causes.copy(),
+				effects=effects.copy(),
 				lag_config=lag_config,
 				lag_selector=lag_selector,
 				stationarity_transformer=stationarity_transformer,
@@ -349,12 +185,22 @@ class MultiTaskGrangerAPI:
 
 		constraint_obj = strategy.build_constraint_from_relations(
 			relations=relations_map,
-			predictor_names=all_columns,
-			output_names=effects_list,
+			predictor_names=prepared.causes,
+			output_names=prepared.effects,
 			col_offsets=prepared.col_offsets[:-1],
-			n_features=prepared.X_train.shape[1],
+			n_features=prepared.X_scaled.shape[1],
 			base_mask=prepared.base_mask,
 		)
+
+		results = GrangerAnalysisResults(
+			effects=prepared.effects, 
+			causes=prepared.tested_causes, 
+			mask=constraint_obj.mask if hasattr(constraint_obj,"mask") else prepared.base_mask, 
+			col_offsets=prepared.col_offsets, 
+			y_true=prepared.y_raw,
+			X_true=prepared.X_raw,
+		)
+
 
 		model_cfg = dict(model_config or {})
 		callbacks_cfg = model_cfg.pop("callbacks", None)
@@ -375,8 +221,8 @@ class MultiTaskGrangerAPI:
 		if initializer is not None:
 			initializer_weights = self._build_initializer_weights(
 				initializer=initializer,
-				X_train=prepared.X_backend_scaled,
-				y_train=prepared.y_backend_scaled,
+				X_train=prepared.X_scaled,
+				y_train=prepared.y_scaled,
 				mask=prepared.base_mask,
 			)
 
@@ -415,13 +261,13 @@ class MultiTaskGrangerAPI:
 
 		base_cfg = _run_cfg("base_model")
 		base_model = strategy.build_model(
-			n_features=prepared.X_train.shape[1],
-			n_outputs=prepared.y_train.shape[1],
+			n_features=prepared.X_scaled.shape[1],
+			n_outputs=prepared.y_scaled.shape[1],
 			regularizer=reg_obj,
 			constraint=constraint_obj,
 			**base_cfg,
 		)
-		base_model.initialize(prepared.X_backend_scaled, targets=prepared.y_backend_scaled)
+		base_model.initialize(prepared.X_scaled, targets=prepared.y_scaled)
 
 		if initializer_weights is not None:
 			self._assign_initializer_weights(
@@ -432,47 +278,37 @@ class MultiTaskGrangerAPI:
 		base_model.fit()
 		base_weights = base_model.get_weights()
 
-		base_pred_scaled = np.asarray(base_model.predict(prepared.X_backend_scaled), dtype=np.float64)
+		base_pred_scaled = np.asarray(base_model.predict(prepared.X_scaled), dtype=np.float64)
 		base_pred_real = prepared.y_scaler.inverse_transform(base_pred_scaled)
-		y_backend_real = prepared.y_scaler.inverse_transform(prepared.y_backend_scaled)
 		base_weight_matrix = np.asarray(base_weights[0], dtype=np.float64)
 
-		results = GrangerAnalysisResults(
-			effects=effects_list, 
-			causes=tested_causes_list,
-			mask=constraint_obj.mask if hasattr(constraint_obj, "mask") else prepared.base_mask,
+		
+
+		results.set_base_snapshot( 
+			predictions=base_pred_real,
+			weights=base_weight_matrix
 		)
-		results.set_base_snapshot(
-			base_predictions=base_pred_scaled,
-			base_weights=base_weight_matrix
-		)
-		results.set_base_covariance(
-			x_train=prepared.X_backend_scaled,
-			y_true=prepared.y_backend_scaled,
-			y_pred=base_pred_scaled,
-		)
-		reference_models: Dict[str, Any] = {}
 
 		# Reuse a single reference model object; reinitialize state for each cause.
 		reference_cfg = _run_cfg("reference_model_template")
 		reference_model = strategy.build_model(
-			n_features=prepared.X_train.shape[1],
-			n_outputs=prepared.y_train.shape[1],
+			n_features=prepared.X_scaled.shape[1],
+			n_outputs=prepared.y_scaled.shape[1],
 			regularizer=reg_obj,
 			constraint=constraint_obj,
 			**reference_cfg,
 		)
 		reference_needs_reinit = bool(getattr(reference_model, "needs_reinit", True))
 		if not reference_needs_reinit:
-			reference_model.initialize(prepared.X_backend_scaled, targets=prepared.y_backend_scaled)
+			reference_model.initialize(prepared.X_scaled, targets=prepared.y_scaled)
 
-		for cause_name in tested_causes_list:
-			cause_idx = all_columns.index(cause_name)
+		for cause_name in prepared.tested_causes:
+			cause_idx = prepared.tested_causes.index(cause_name)
 
 			reference_model.reset_callbacks(run_name=f"reference_cause_{cause_name}")
 
 			if reference_needs_reinit:
-				reference_model.initialize(prepared.X_backend_scaled, targets=prepared.y_backend_scaled)
+				reference_model.initialize(prepared.X_scaled, targets=prepared.y_scaled)
 			else:
 				reference_model.set_weights(base_weights)
 
@@ -481,39 +317,26 @@ class MultiTaskGrangerAPI:
 			reference_model.omit_variables(list(range(start, end)))
 			reference_model.fit()
 
-			ref_pred_scaled = reference_model.predict(prepared.X_backend_scaled)
+			ref_pred_scaled = reference_model.predict(prepared.X_scaled)
 			ref_pred_real = prepared.y_scaler.inverse_transform(ref_pred_scaled)
 			ref_weight_matrix = reference_model.get_weights()[0]
 
-			results.update_cause(
+			results.set_reference_snapshot(
 				cause=cause_name,
-				cause_index=cause_idx,
-				y_true=y_backend_real,
-				col_offsets=prepared.col_offsets,
-				base_predictions=base_pred_real,
-				reference_predictions=ref_pred_real,
-				base_weights=base_weight_matrix,
-				reference_weights=ref_weight_matrix,
+				predictions=ref_pred_real,
+				weights=ref_weight_matrix,
 			)
-			reference_models[cause_name] = {
-				"predictions": ref_pred_real,
-				"weights": ref_weight_matrix,
-			}
 
-		prepared_data_output = prepared if (self._reuse_data or prepared_data is not None) else None
-		self._prepared_data = prepared
-
-		return MultiTaskGrangerOutput(
-			results=results,
-			base_model=base_model,
-			reference_models=reference_models,
-			stationarity_transformer=self._stationarity_transformer,
-			lag_engine=prepared.engine,
-			X_scaler=prepared.x_scaler,
-			y_scaler=prepared.y_scaler,
-			preparation_time_seconds=preparation_time_seconds,
-			prepared_data=prepared_data_output,
+		results.set_preparation_context(
+			PreparationContext(
+				prepared_data=prepared if (self._reuse_data or prepared_data is not None) else None,
+				metadata={
+					"preparation_time_seconds": preparation_time_seconds,
+				},
+			)
 		)
+
+		return results
 
 	@staticmethod
 	def _build_initializer_weights(
@@ -552,3 +375,5 @@ class MultiTaskGrangerAPI:
 		kernel = np.asarray(weights[0], dtype=np.float64).copy()
 		bias = np.asarray(weights[1], dtype=np.float64).copy()
 		model.set_weights([kernel, bias])
+
+	

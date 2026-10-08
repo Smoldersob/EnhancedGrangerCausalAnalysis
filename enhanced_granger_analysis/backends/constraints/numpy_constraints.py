@@ -17,7 +17,7 @@ class NumpyMaskConstraint:
 	Expected mask shape: (n_outputs, n_features).
 	"""
 
-	def __init__(self, mask: NDArray[np.float64]) -> None:
+	def __init__(self, mask: NDArray[np.float64]):
 		arr = np.asarray(mask, dtype=np.float64)
 		if arr.ndim != 2:
 			raise ConstraintConfigurationError("mask must be 2D with shape (n_outputs, n_features)")
@@ -47,7 +47,7 @@ class NumpyMaskConstraint:
 class NumpyMaskAndMinAbsSumConstraint:
 	"""Mask + min abs-sum constraint for numpy/scikit coefficient matrices."""
 
-	def __init__(self, spec: ProcessedConstraintSpec, eps: float = 1e-8) -> None:
+	def __init__(self, spec: ProcessedConstraintSpec, eps: float = 1e-8):
 		mask = np.asarray(spec.mask, dtype=np.float64)
 		if mask.ndim != 2:
 			raise ConstraintConfigurationError("spec.mask must be 2D with shape (n_outputs, n_features)")
@@ -132,7 +132,7 @@ def build_numpy_constraint_from_relations(
 	n_features: int,
 	base_mask: Optional[NDArray[np.float64]] = None,
 	eps: float = 1e-8,
-) -> NumpyMaskAndMinAbsSumConstraint:
+) -> NumpyMaskAndMinAbsSumConstraint|NumpyMaskConstraint:
 	"""Build numpy/scikit combined constraint from user-friendly relation mapping."""
 	spec = process_user_relations(
 		relations=relations,
@@ -142,5 +142,8 @@ def build_numpy_constraint_from_relations(
 		n_features=n_features,
 		base_mask=base_mask,
 	)
-	return NumpyMaskAndMinAbsSumConstraint(spec=spec, eps=eps)
+	if len(spec.rules) == 0:
+		return NumpyMaskConstraint(spec.mask)
+	else:
+		return NumpyMaskAndMinAbsSumConstraint(spec=spec, eps=eps)
 

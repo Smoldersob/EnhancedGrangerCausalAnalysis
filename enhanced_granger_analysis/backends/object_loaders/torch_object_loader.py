@@ -18,7 +18,7 @@ except Exception:  # pragma: no cover - optional dependency
 class TorchObjectLoader:
 	"""Resolve PyTorch callback and optimizer specs."""
 
-	def __init__(self, torch_module: Any, loading_verbose: bool = False) -> None:
+	def __init__(self, torch_module: Any, loading_verbose: bool = False):
 		self._torch = torch_module
 		self._loading_verbose = bool(loading_verbose)
 

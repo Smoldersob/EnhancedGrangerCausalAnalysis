@@ -7,9 +7,9 @@ from .base_backend import BackendStrategy
 from ..core.exceptions import BackendNotAvailableError, BackendSelectionError
 
 try:
-	from .tensorflow_backend import TensorFlowBackendStrategy
+	from .keras_backend import KerasBackendStrategy
 except Exception:  # pragma: no cover - optional backend module
-	TensorFlowBackendStrategy = None  # type: ignore[assignment]
+	KerasBackendStrategy = None  # type: ignore[assignment]
 
 try:
 	from .pytorch_backend import PyTorchBackendStrategy
@@ -36,21 +36,21 @@ class BackendFactory:
 	# Registry of known strategies (name -> class) enabled by optional dependencies.
 	_BACKEND_REGISTRY: Dict[str, type] = {}
 	_CANONICAL_ALIASES: Dict[str, str] = {
-		"tensorflow": "tensorflow",
-		"tf": "tensorflow",
-		"keras": "tensorflow",
+		"tensorflow": "keras",
+		"tf": "keras",
+		"keras": "keras",
 		"pytorch": "pytorch",
 		"torch": "pytorch",
 		"sklearn": "sklearn",
 		"scikit": "sklearn",
 		"scikit-learn": "sklearn",
 	}
-	if importlib.util.find_spec("tensorflow") is not None and TensorFlowBackendStrategy is not None:
+	if importlib.util.find_spec("keras") is not None and KerasBackendStrategy is not None:
 		_BACKEND_REGISTRY.update(
 			{
-				"tensorflow": TensorFlowBackendStrategy,
-				"tf": TensorFlowBackendStrategy,
-				"keras": TensorFlowBackendStrategy,
+				"tensorflow": KerasBackendStrategy,
+				"tf": KerasBackendStrategy,
+				"keras": KerasBackendStrategy,
 			}
 		)
 	if importlib.util.find_spec("torch") is not None and PyTorchBackendStrategy is not None:
@@ -129,7 +129,7 @@ class BackendFactory:
 			cls._STRATEGY_CACHE[canonical_name] = None
 			raise BackendNotAvailableError(
 				f"Backend '{backend_name}' is not available. "
-				f"Please install the required package (tensorflow, torch, or scikit-learn)."
+				f"Please install the required package (keras, torch, or scikit-learn)."
 			)
 
 		cls._STRATEGY_CACHE[canonical_name] = strategy
@@ -180,7 +180,7 @@ class BackendFactory:
 		list of str
 			Backend names that are installed and usable.
 		"""
-		preferred_order = ["pytorch", "tensorflow", "sklearn"]
+		preferred_order = ["pytorch", "keras", "sklearn"]
 		available: List[str] = []
 		seen: Set[str] = set()
 		for backend_name in preferred_order:
@@ -197,7 +197,7 @@ class BackendFactory:
 		"""
 		Return the name of the first available backend in preference order.
 
-		Preference order: PyTorch > TensorFlow > scikit-learn
+		Preference order: PyTorch > Keras > scikit-learn
 
 		Returns
 		-------
@@ -209,7 +209,7 @@ class BackendFactory:
 		BackendNotAvailableError
 			If no backends are available.
 		"""
-		preference_order = ["pytorch", "tensorflow", "sklearn"]
+		preference_order = ["pytorch", "keras", "sklearn"]
 
 		for backend_name_pref in preference_order:
 			if cls.is_backend_available(backend_name_pref):
@@ -217,7 +217,7 @@ class BackendFactory:
 
 		raise BackendNotAvailableError(
 			"No machine learning backends are available. "
-			"Install at least one optional dependency: tensorflow, torch, scikit-learn."
+			"Install at least one optional dependency: keras, torch, scikit-learn."
 		)
 
 	@classmethod

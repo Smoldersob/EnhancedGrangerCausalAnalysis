@@ -18,7 +18,7 @@ class ReduceLearningRate(Callback):
 		min_lr: float = 1e-8,
 		min_delta: float = 0.0,
 		monitor="epoch_loss",
-	) -> None:
+	) :
 		if patience <= 0:
 			raise TrainingConfigurationError("patience must be a positive integer")
 		if not (0.0 < factor < 1.0):
@@ -67,7 +67,7 @@ class ReduceLearningRate(Callback):
 		return True
 
 	def clone_for_run(self, run_name: str) -> "ReduceLearningRate":
-		"""Create a clean callback; do not copy best loss or stored weights."""
+		"""Create a clean callback; do not copy the best loss or stored weights."""
 		del run_name  # This callback has no run-specific destination.
 
 		return type(self)(

@@ -1,98 +1,21 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
-from typing import Iterable
-
-import numpy as np
+from dataclasses import dataclass,	field
+from typing import Any
 import pandas as pd
-from numpy.typing import NDArray
 
 from ..core.exceptions import CausalityMatrixError
-
 
 @dataclass
 class CausalityMatrix:
 	"""Wrapper around a 2D DataFrame with fixed effects x causes indexing."""
 
 	data: pd.DataFrame
+	name: str | None = None
+	metadata: dict[str, Any] = field(default_factory=dict)
 
-	@classmethod
-	def zeros(cls, effects: Iterable[str], causes: Iterable[str]) -> "CausalityMatrix":
-		effects_list = list(effects)
-		causes_list = list(causes)
-		df = pd.DataFrame(
-			np.zeros((len(effects_list), len(causes_list)), dtype=np.float64),
-			index=effects_list,
-			columns=causes_list,
-		)
-		return cls(data=df)
-
-	@classmethod
-	def ones(cls, effects: Iterable[str], causes: Iterable[str]) -> "CausalityMatrix":
-		effects_list = list(effects)
-		causes_list = list(causes)
-		df = pd.DataFrame(
-			np.ones((len(effects_list), len(causes_list)), dtype=np.float64),
-			index=effects_list,
-			columns=causes_list,
-		)
-		return cls(data=df)
-
-	def set_column(self, cause: str, values: NDArray[np.float64]) -> None:
-		arr = np.asarray(values, dtype=np.float64)
-		if arr.shape[0] != self.data.shape[0]:
-			raise CausalityMatrixError(
-				f"Column vector length mismatch for cause '{cause}': {arr.shape[0]} vs {self.data.shape[0]}"
-			)
-		self.data.loc[:, cause] = arr
-
-	def threshold(self, threshold: float) -> pd.DataFrame:
-		return (self.data < threshold).astype(int)
-
-
-@dataclass
-class CausalityMatrices:
-	"""Bundle of all matrices used in Granger analysis reporting."""
-
-	base_error: CausalityMatrix
-	ref_error: CausalityMatrix
-	f_test: CausalityMatrix
-	p_value: CausalityMatrix
-	wald_test: CausalityMatrix
-	wald_p_value: CausalityMatrix
-	lr_test: CausalityMatrix
-	lr_p_value: CausalityMatrix
-	sign: CausalityMatrix
-
-	@classmethod
-	def create(cls, effects: Iterable[str], causes: Iterable[str]) -> "CausalityMatrices":
-		return cls(
-			base_error=CausalityMatrix.zeros(effects, causes),
-			ref_error=CausalityMatrix.zeros(effects, causes),
-			f_test=CausalityMatrix.ones(effects, causes),
-			p_value=CausalityMatrix.ones(effects, causes),
-			wald_test=CausalityMatrix.ones(effects, causes),
-			wald_p_value=CausalityMatrix.ones(effects, causes),
-			lr_test=CausalityMatrix.ones(effects, causes),
-			lr_p_value=CausalityMatrix.ones(effects, causes),
-			sign=CausalityMatrix.ones(effects, causes),
-		)
-
-	def _p_value_matrix(self, test: str) -> CausalityMatrix:
-		normalized = test.strip().lower()
-		if normalized in {"f", "f_test", "ftest"}:
-			return self.p_value
-		if normalized in {"wald", "wald_test"}:
-			return self.wald_p_value
-		if normalized in {"lr", "likelihood_ratio", "likelihood_ratio_test", "lrt", "lr_test"}:
-			return self.lr_p_value
-		raise CausalityMatrixError(f"Unknown test type: {test}")
-
-	def result(self, threshold: float = 0.01, with_sign: bool = False, test: str = "f") -> pd.DataFrame:
-		ans = self._p_value_matrix(test).threshold(threshold)
-		if with_sign:
-			signed = self.sign.data.copy()
-			ans = ans.astype(np.float64)
-			ans[ans == 1] = ans[ans == 1] * signed[ans == 1]
-			return ans
-		return ans
+	def threshold(self, threshold: float = 0.01) -> pd.DataFrame:
+		try:
+			return (self.data < threshold).astype(int)
+		except Exception as e:
+			raise CausalityMatrixError(f"Error occurred while applying threshold: {e}")

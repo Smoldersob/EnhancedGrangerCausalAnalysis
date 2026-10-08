@@ -4,7 +4,7 @@ EnhancedGrangerCausalAnalysis is a compact framework for advanced Granger-causal
 
 It extends classic pair-wise Granger tests with configurable multitask modeling, backend abstraction, constraint-aware training, and config-driven experiment sweeps.
 
-Current package version: `2.2.0`
+Current package version: `2.3.0`
 
 ## Architecture at a glance
 
@@ -85,7 +85,7 @@ output = api.fit(
     model_config={"epochs": 40, "batch_size": 32, "learning_rate": 1e-3},
 )
 
-causality = output.results.result(threshold=0.01, with_sign=True)
+causality = output.evaluate().result(threshold=0.01, with_sign=True)
 print(causality)
 ```
 

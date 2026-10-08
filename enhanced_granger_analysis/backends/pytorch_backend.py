@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from typing import Any, Dict, List, Mapping, Optional
+from typing import Any, Dict, List, Optional
 
 from numpy.typing import NDArray
 
@@ -71,7 +71,7 @@ class PyTorchBackendStrategy(BackendStrategy):
 
 		return optimizer_cfg
 
-	def __init__(self, loading_verbose: bool = False) -> None:
+	def __init__(self, loading_verbose: bool = False):
 		super().__init__(loading_verbose=loading_verbose)
 		self._torch = None
 		self._object_loader: Optional[TorchObjectLoader] = None
@@ -143,7 +143,7 @@ class PyTorchBackendStrategy(BackendStrategy):
 		
 		return model_cls(**kwargs)
 
-	def resolve_callbacks(self, callbacks: Optional[List[Any]]) -> Optional[List[Any]]:
+	def resolve_callbacks(self, callbacks: Optional[list]) -> Optional[list]:
 		if self._object_loader is None:
 			return callbacks
 		self._object_loader.set_loading_verbose(self._loading_verbose)

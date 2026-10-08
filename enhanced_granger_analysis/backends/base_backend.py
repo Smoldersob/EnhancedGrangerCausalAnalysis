@@ -66,7 +66,7 @@ class BackendStrategy(ABC):
 		return constraint_spec
 
 
-	def resolve_callbacks(self, callbacks: Optional[List[Any]]) -> Optional[List[Any]]:
+	def resolve_callbacks(self, callbacks: Optional[list]) -> Optional[list]:
 		"""Resolve callback specs to backend-native callback objects."""
 		return callbacks
 
@@ -78,14 +78,14 @@ class BackendStrategy(ABC):
 		self,
 		regularizer: Optional[Any],
 		constraint: Optional[Any],
-		callbacks: Optional[List[Any]] = None,
-		optimizer: Any = None,
+		callbacks: Optional[list] = None,
+		optimizer: Optional[Any] = None,
 	) -> None:
 		if self._object_loader is None:
 			return
 		self._object_loader.set_loading_verbose(True)
 		if callbacks is not None:
-			resolved_callbacks = self._object_loader.resolve_callbacks(callbacks)
+			self._object_loader.resolve_callbacks(callbacks)
 		if optimizer is not None:
 			_ = self._object_loader.resolve_optimizer(optimizer)
 		if regularizer is not None:

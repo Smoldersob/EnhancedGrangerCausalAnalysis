@@ -7,7 +7,7 @@ import pandas as pd
 
 from ..core.exceptions import DataValidationError
 from ..core.lag_config import LagConfiguration
-from ..core.outputs import MultiTaskGrangerOutput
+from ..results.granger_results import GrangerAnalysisResults
 from ..preprocessing.stationarity import StationarityTransformer
 from .config_loader import BuilderConfigLoader
 from .orchestrator import MultiTaskGrangerAPI
@@ -33,12 +33,10 @@ class MultiTaskGrangerBuilder:
 	def __init__(
 		self,
 		backend: Optional[str] = None,
-		stationarity_transformer: Any = None,
 		reuse_data: bool = False,
 	) -> None:
 		self._backend: Optional[str] = backend
 		self._data: Optional[pd.DataFrame | Sequence[pd.DataFrame]] = None
-		self._stationarity_transformer: Any = stationarity_transformer or StationarityTransformer()
 		self._reuse_data: bool = bool(reuse_data)
 
 		self._fit_kwargs: Dict[str, Any] = {
@@ -48,6 +46,7 @@ class MultiTaskGrangerBuilder:
 			"relations": None,
 			"lag_config": None,
 			"lag_selector": None,
+			"stationarity_transformer": StationarityTransformer(),
 			"backend_sample_fraction": 1.0,
 			"backend_max_samples": None,
 			"x_scaler": "standard",
@@ -101,7 +100,7 @@ class MultiTaskGrangerBuilder:
 		self,
 		transformer: Any = None,
 	) -> "MultiTaskGrangerBuilder":
-		self._stationarity_transformer = transformer or StationarityTransformer()
+		self._fit_kwargs["stationarity_transformer"] = transformer or StationarityTransformer()
 		return self
 
 	def reuse_data(self, value: bool = True) -> "MultiTaskGrangerBuilder":
@@ -169,7 +168,7 @@ class MultiTaskGrangerBuilder:
 			self._reuse_data = bool(config.get("reuse_data"))
 
 		if "stationarity_transformer" in config:
-			self._stationarity_transformer = config.get("stationarity_transformer") or StationarityTransformer()
+			self._fit_kwargs[key] = config.get("stationarity_transformer") or StationarityTransformer()
 
 		if "data" in config:
 			self._data = config.get("data")
@@ -193,24 +192,21 @@ class MultiTaskGrangerBuilder:
 		cfg = BuilderConfigLoader.load_file(path)
 		return self.from_config(cfg)
 
-	def fit(self) -> MultiTaskGrangerOutput:
+	def fit(self) -> GrangerAnalysisResults:
 		if self._data is None:
 			raise DataValidationError("Builder requires data(...) before fit()")
 
 		try:
 			api = MultiTaskGrangerAPI(
 				backend=self._backend,
-				stationarity_transformer=self._stationarity_transformer,
 				reuse_data=self._reuse_data,
 			)
 		except TypeError:
 			api = MultiTaskGrangerAPI(backend=self._backend)
-			if hasattr(api, "_stationarity_transformer"):
-				setattr(api, "_stationarity_transformer", self._stationarity_transformer)
 			if hasattr(api, "_reuse_data"):
 				setattr(api, "_reuse_data", self._reuse_data)
 		return api.fit(self._data, **self._fit_kwargs)
 
-	def run(self) -> MultiTaskGrangerOutput:
+	def run(self) -> GrangerAnalysisResults:
 		"""Alias for fit()."""
 		return self.fit()

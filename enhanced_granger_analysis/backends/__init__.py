@@ -8,9 +8,9 @@ __all__ = [
 	"BackendFactory",
 ]
 
-if importlib.util.find_spec("tensorflow") is not None:
+if importlib.util.find_spec("keras") is not None:
 	try:
-		from .tensorflow_backend import TensorFlowBackendStrategy
+		from .keras_backend import KerasBackendStrategy
 		__all__.append("TensorFlowBackendStrategy")
 	except Exception:
 		TensorFlowBackendStrategy = None

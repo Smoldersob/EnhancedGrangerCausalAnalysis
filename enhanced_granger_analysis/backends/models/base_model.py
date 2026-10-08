@@ -1,8 +1,10 @@
-from abc import ABC, abstractmethod
-from typing import Any, Dict, List, Optional, Union
 import numpy as np
+from abc import ABC, abstractmethod
 from numpy.typing import NDArray
+from typing import Any, Dict, List, Optional
+
 from ...core.protocols import Regularizer, Constraint
+
 
 class BaseGrangerModel(ABC):
     """
@@ -22,7 +24,7 @@ class BaseGrangerModel(ABC):
         constraint: Optional[Constraint] = None,
         callbacks: List[Any] = [],
         needs_reinit: bool = True,
-    ) -> None:
+    ):
         """
         Initialize the Granger causality model with pluggable components.
         
@@ -87,7 +89,7 @@ class BaseGrangerModel(ABC):
         pass
 
     @abstractmethod
-    def set_weights(self, weights: Union[NDArray[np.float64], List[NDArray[np.float64]]]) -> None:
+    def set_weights(self, weights: NDArray[np.float64]|List[NDArray[np.float64]]) -> None:
         """
         Set model weights with optional constraint enforcement.
         
@@ -137,6 +139,6 @@ class BaseGrangerModel(ABC):
         """Add a callback to the model's training process."""
         self.callbacks.append(callback)
 
-    def reset_callbacks(self) -> None:
+    def reset_callbacks(self, run_name:str) -> None:
         """Reset callbacks to an empty list."""
         self.callbacks = []

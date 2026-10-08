@@ -1,5 +1,3 @@
-from __future__ import annotations
-
 import importlib
 from importlib.util import find_spec
 from typing import Any, Dict, Optional, Sequence
@@ -12,43 +10,39 @@ from ...core.constraints_config import ProcessedConstraintSpec, RelationMap
 from ...core.exceptions import BackendNotAvailableError, ConstraintConfigurationError
 
 
-if find_spec("tensorflow") is not None:
-    tf = importlib.import_module("tensorflow")
+if find_spec("keras") is not None:
+    keras = importlib.import_module("keras")
 else:  # pragma: no cover - runtime dependency check
-    tf = None
+    keras = None
 
-def _ensure_tensorflow() -> None:
-    if tf is None:
-        raise BackendNotAvailableError("TensorFlow is required to use tensorflow constraints.")
+def _ensure_keras() -> None:
+    if keras is None:
+        raise BackendNotAvailableError("Keras is required to use constraints.")
 
 
 @keras.utils.register_keras_serializable(
     package="EnhancedGrangerCausalAnalysis",
     name="KerasZeroMaskConstraint"
 )
-
-class TensorFlowZeroMaskConstraint(tf.keras.constraints.Constraint):
+class KerasZeroMaskConstraint(keras.constraints.Constraint):
     def __init__(self, mask):
         _ensure_tensorflow()
-        mask_arr = tf.keras.ops.array(mask, dtype="float32")
+        mask_arr = keras.ops.array(mask, dtype="float32")
         self.mask = mask_arr
-        self._mask_t = tf.constant(tf.keras.ops.transpose(mask_arr))
+        self._mask_t = keras.ops.transpose(mask_arr)
 
     def __call__(self, w):
-        return w * tf.cast(self._mask_t, w.dtype)
+        return w * keras.ops.cast(self._mask_t, w.dtype)
 
     def get_config(self):
-        return {"mask": tf.keras.ops.convert_to_numpy(self.mask).tolist()}
+        return {"mask": keras.ops.convert_to_numpy(self.mask).tolist()}
 
 
-
-@tf.keras.utils.register_keras_serializable(package="EnhancedGrangerCausalAnalysis", name="TensorFlowMaskAndMinAbsSumConstraint")
-
-@tf.keras.utils.register_keras_serializable(
+@keras.utils.register_keras_serializable(
     package="EnhancedGrangerCausalAnalysis",
-    name="TensorFlowMaskAndMinAbsSumConstraint",
+    name="KerasMaskAndMinAbsSumConstraint",
 )
-class TensorFlowMaskAndMinAbsSumConstraint(tf.keras.constraints.Constraint):
+class KerasMaskAndMinAbsSumConstraint(keras.constraints.Constraint):
     """Hard-mask Dense coefficients and enforce a minimum L1 sum on disjoint groups.
 
     spec.mask: (n_outputs, n_features)
@@ -60,15 +54,14 @@ class TensorFlowMaskAndMinAbsSumConstraint(tf.keras.constraints.Constraint):
     feature for different outputs, or different features for the same output.
     """
 
-    def __init__(self, spec: ProcessedConstraintSpec, eps: float = 1e-8) -> None:
+    def __init__(self, spec: ProcessedConstraintSpec, eps: float = 1e-8):
 
-        _ensure_tensorflow()
         _ensure_keras()
 
         if not np.isfinite(eps) or eps <= 0:
             raise ConstraintConfigurationError("eps must be finite and > 0")
 
-        mask = np.asarray(spec.mask, dtype=np.float32)
+        mask = np.asarray(spec.mask, dtype="float32")
         if mask.ndim != 2:
             raise ConstraintConfigurationError(
                 "spec.mask must be 2D with shape (n_outputs, n_features)"
@@ -85,7 +78,7 @@ class TensorFlowMaskAndMinAbsSumConstraint(tf.keras.constraints.Constraint):
         self._kernel_shape = (self._n_features, self._n_outputs)
 
         # Dense kernel layout: (n_features, n_outputs)
-        self._mask_t = tf.constant(mask.T, dtype=tf.float32)
+        self._mask_t = keras.ops.cast(mask.T, dtype=np.float64)
 
         scatter_indices_parts: list[np.ndarray] = []
         segment_ids_parts: list[np.ndarray] = []
@@ -151,18 +144,18 @@ class TensorFlowMaskAndMinAbsSumConstraint(tf.keras.constraints.Constraint):
             if min_abs_sum == 0.0:
                 continue
 
-            feature_indices_i32 = feature_indices.astype(np.int32, copy=False)
+            feature_indices_i32 = feature_indices.astype("int32", copy=False)
 
             scatter_indices_parts.append(
                 np.column_stack(
                     (
                         feature_indices_i32,
-                        np.full(feature_indices_i32.shape, output_index, dtype=np.int32),
+                        np.full(feature_indices_i32.shape, output_index, dtype="int32"),
                     )
                 )
             )
             segment_ids_parts.append(
-                np.full(feature_indices_i32.shape, group_id, dtype=np.int32)
+                np.full(feature_indices_i32.shape, group_id, dtype="int32")
             )
             min_abs_sums.append(min_abs_sum)
             group_sizes.append(int(feature_indices_i32.size))
@@ -180,76 +173,96 @@ class TensorFlowMaskAndMinAbsSumConstraint(tf.keras.constraints.Constraint):
         self._n_groups = group_id
 
         if self._n_groups:
-            self._scatter_indices = tf.constant(
-                np.concatenate(scatter_indices_parts, axis=0), dtype=tf.int32
+            self._scatter_indices = keras.ops.cast(
+                np.concatenate(scatter_indices_parts, axis=0), dtype="int32"
             )
-            self._segment_ids = tf.constant(
-                np.concatenate(segment_ids_parts, axis=0), dtype=tf.int32
+            self._segment_ids = keras.ops.cast(
+                np.concatenate(segment_ids_parts, axis=0), dtype="int32"
             )
-            self._group_min_abs_sums = tf.constant(min_abs_sums, dtype=tf.float32)
-            self._group_sizes = tf.constant(group_sizes, dtype=tf.float32)
+            self._group_min_abs_sums = keras.ops.cast(min_abs_sums, dtype="float32")
+            self._group_sizes = keras.ops.cast(group_sizes, dtype="float32")
         else:
-            self._scatter_indices = tf.constant(
-                np.empty((0, 2), dtype=np.int32), dtype=tf.int32
+            self._scatter_indices = keras.ops.cast(
+                np.empty((0, 2), dtype="int32"), dtype="int32"
             )
-            self._segment_ids = tf.constant([], dtype=tf.int32)
-            self._group_min_abs_sums = tf.constant([], dtype=tf.float32)
-            self._group_sizes = tf.constant([], dtype=tf.float32)
+            self._segment_ids = keras.ops.cast([], dtype="int32")
+            self._group_min_abs_sums = keras.ops.cast([], dtype="float32")
+            self._group_sizes = keras.ops.cast([], dtype="float32")
 
     def __call__(self, w: Any) -> Any:
-        if w.shape.rank != 2 or tuple(int(v) for v in w.shape) != self._kernel_shape:
+        shape = tuple(w.shape)
+
+        if w.shape.rank != 2 or any(dim is None for dim in shape):
             raise ConstraintConfigurationError(
-                f"Kernel shape {tuple(int(v) for v in w.shape)} does not match "
+                f"Expected a rank-2 kernel with static shape; got {shape}."
+            )
+
+        actual_shape = tuple(int(dim) for dim in shape)
+        if actual_shape != self._kernel_shape:
+            raise ConstraintConfigurationError(
+                f"Kernel shape {actual_shape} does not match "
                 f"expected {self._kernel_shape}."
             )
 
-        mask_t = tf.cast(self._mask_t, w.dtype)
+        mask_t = keras.ops.cast(self._mask_t, w.dtype)
         constrained = w * mask_t
 
         if self._n_groups == 0:
             return constrained
 
-        selected = tf.gather_nd(constrained, self._scatter_indices)
-        abs_selected = tf.abs(selected)
+        _rows, n_cols = self._kernel_shape
 
-        group_abs_sums = tf.math.unsorted_segment_sum(
-            abs_selected, self._segment_ids, self._n_groups
-        )
+        indices = keras.ops.cast(self._scatter_indices, "int32")
+        row_indices = indices[:, 0]
+        col_indices = indices[:, 1]
 
-        deficits = tf.maximum(
-            tf.cast(self._group_min_abs_sums, w.dtype) - group_abs_sums,
-            0.0,
-        )
+        flat_indices = row_indices * n_cols + col_indices
+        flat_constrained = keras.ops.reshape(constrained, (-1,))
 
-        deltas = tf.gather(
-            deficits / tf.cast(self._group_sizes, w.dtype),
+        selected = keras.ops.take(flat_constrained, flat_indices, axis=0)
+        abs_selected = keras.ops.absolute(selected)
+
+        group_abs_sums = keras.ops.segment_sum(
+            abs_selected,
             self._segment_ids,
+            num_segments=self._n_groups,
+            sorted=False,
         )
 
-        signs = tf.where(
-            tf.equal(selected, 0),
-            tf.ones_like(selected),
-            tf.sign(selected),
+        minimum_sums = keras.ops.cast(self._group_min_abs_sums, w.dtype)
+        group_sizes = keras.ops.cast(self._group_sizes, w.dtype)
+
+        deficits = keras.ops.maximum(minimum_sums - group_abs_sums, 0.0)
+
+        deltas = keras.ops.take(
+            deficits / group_sizes,
+            self._segment_ids,
+            axis=0,
+        )
+
+        signs = keras.ops.where(
+            keras.ops.equal(selected, 0),
+            keras.ops.ones_like(selected),
+            keras.ops.sign(selected),
         )
 
         projected = signs * (abs_selected + deltas)
 
-        constrained = tf.tensor_scatter_nd_update(
-            constrained,
-            self._scatter_indices,
+        flat_constrained = keras.ops.scatter_update(
+            flat_constrained,
+            keras.ops.expand_dims(flat_indices, axis=1),
             projected,
         )
+
+        constrained = keras.ops.reshape(flat_constrained, self._kernel_shape)
 
         return constrained * mask_t
 
     def get_config(self) -> Dict[str, Any]:
-        return {
-            "mask": self.mask.tolist(),
-            "rules": [dict(rule) for rule in self.rules],
-            "eps": self.eps,
-        }
+        return dict(mask=self.mask.tolist(), rules=[dict(rule) for rule in self.rules], eps=self.eps)
 
-def build_tensorflow_constraint_from_relations(
+
+def build_keras_constraint_from_relations(
     relations: RelationMap,
     predictor_names: Sequence[str],
     output_names: Sequence[str],
@@ -267,4 +280,7 @@ def build_tensorflow_constraint_from_relations(
         n_features=n_features,
         base_mask=base_mask,
     )
-    return TensorFlowMaskAndMinAbsSumConstraint(spec=spec, eps=eps)
+    if len(spec.rules) == 0:
+        return KerasZeroMaskConstraint(spec.mask)
+    else:
+        return KerasMaskAndMinAbsSumConstraint(spec=spec, eps=eps)

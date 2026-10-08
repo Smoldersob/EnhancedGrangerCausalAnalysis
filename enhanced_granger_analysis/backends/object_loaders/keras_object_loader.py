@@ -1,21 +1,19 @@
-from __future__ import annotations
-
 from typing import Any, Dict, List, Mapping, Optional, Sequence, Tuple
 
 from ..constraints.keras_constraints import (
-	TensorFlowMaskAndMinAbsSumConstraint,
-	TensorFlowMaskConstraint,
+	KerasMaskAndMinAbsSumConstraint,
+	KerasMaskConstraint,
 )
-from ..regularizers.tensorflow_regularizers import KerasL1Regularizer, KerasLagDependentL1Regularizer
+from ..regularizers.keras_regularizers import KerasL1Regularizer, KerasLagDependentL1Regularizer
 from ...core.constraints_config import MinAbsSumRule, ProcessedConstraintSpec
 from ...core.exceptions import ConstraintConfigurationError
 
 
-class TensorFlowObjectLoader:
-	"""Resolve TensorFlow callback and optimizer specs into Keras objects."""
+class KerasObjectLoader:
+	"""Resolve Keras callback and optimizer specs into Keras objects."""
 
-	def __init__(self, tf_module: Any, loading_verbose: bool = False):
-		self._tf = tf_module
+	def __init__(self, keras_m: Any, loading_verbose: bool = False):
+		self._keras = keras_m
 		self._loading_verbose = bool(loading_verbose)
 
 	@staticmethod
@@ -44,7 +42,7 @@ class TensorFlowObjectLoader:
 
 	def _log(self, label: str, value: Any) -> None:
 		if self._loading_verbose:
-			print(f"[BackendLoader] TensorFlowObjectLoader: {label} -> {value!r}")
+			print(f"[BackendLoader] KerasObjectLoader: {label} -> {value!r}")
 
 	@staticmethod
 	def _extract_typed_spec(raw_spec: Any, *, context: str) -> Tuple[str, Dict[str, Any]]:
@@ -72,7 +70,7 @@ class TensorFlowObjectLoader:
 		return type_name.strip().lower(), params
 
 	def resolve_callback(self, raw_callback: Any) -> Any:
-		keras_callback_base = self._tf.keras.callbacks.Callback
+		keras_callback_base = self._keras.callbacks.Callback
 		if isinstance(raw_callback, keras_callback_base):
 			self._log("callback(instance)", raw_callback)
 			return raw_callback
@@ -80,7 +78,7 @@ class TensorFlowObjectLoader:
 		type_name, params = self._extract_typed_spec(raw_callback, context="callback")
 
 		if type_name in {"early_stopping", "keras_early_stopping", "earlystopping"}:
-			resolved = self._tf.keras.callbacks.EarlyStopping(**params)
+			resolved = self._keras.callbacks.EarlyStopping(**params)
 			self._log("callback", resolved)
 			return resolved
 
@@ -91,32 +89,32 @@ class TensorFlowObjectLoader:
 			"reducelronplateau",
 			"keras_reduce_lr",
 		}:
-			resolved = self._tf.keras.callbacks.ReduceLROnPlateau(**params)
+			resolved = self._keras.callbacks.ReduceLROnPlateau(**params)
 			self._log("callback", resolved)
 			return resolved
 
 		if type_name in {"tensorboard", "keras_tensorboard"}:
-			resolved = self._tf.keras.callbacks.TensorBoard(**params)
+			resolved = self._keras.callbacks.TensorBoard(**params)
 			self._log("callback", resolved)
 			return resolved
 
 		if type_name in {"model_checkpoint", "checkpoint", "keras_checkpoint"}:
-			resolved = self._tf.keras.callbacks.ModelCheckpoint(**params)
+			resolved = self._keras.callbacks.ModelCheckpoint(**params)
 			self._log("callback", resolved)
 			return resolved
 
 		if type_name in {"csv_logger", "csvlogger", "keras_csv_logger"}:
-			resolved = self._tf.keras.callbacks.CSVLogger(**params)
+			resolved = self._keras.callbacks.CSVLogger(**params)
 			self._log("callback", resolved)
 			return resolved
 
 		if type_name in {"terminate_on_nan", "keras_terminate_on_nan"}:
-			resolved = self._tf.keras.callbacks.TerminateOnNaN(**params)
+			resolved = self._keras.callbacks.TerminateOnNaN(**params)
 			self._log("callback", resolved)
 			return resolved
 
 		raise ConstraintConfigurationError(
-			"Unsupported TensorFlow callback type. Supported: early_stopping, reduce_lr_on_plateau, "
+			"Unsupported Keras callback type. Supported: early_stopping, reduce_lr_on_plateau, "
 			"tensorboard, model_checkpoint, csv_logger, terminate_on_nan"
 		)
 
@@ -135,17 +133,17 @@ class TensorFlowObjectLoader:
 
 	def resolve_optimizer(self, raw_optimizer: Any) -> Any:
 		if raw_optimizer is None:
-			resolved = self._tf.keras.optimizers.Adam()
+			resolved = self._keras.optimizers.Adam()
 			self._log("optimizer", resolved)
 			return resolved
 
-		keras_optimizer = self._tf.keras.optimizers.Optimizer
+		keras_optimizer = self._keras.optimizers.Optimizer
 		if isinstance(raw_optimizer, keras_optimizer):
 			self._log("optimizer(instance)", raw_optimizer)
 			return raw_optimizer
 
 		if isinstance(raw_optimizer, str):
-			resolved = self._tf.keras.optimizers.get(raw_optimizer)
+			resolved = self._keras.optimizers.get(raw_optimizer)
 			self._log("optimizer", resolved)
 			return resolved
 
@@ -157,7 +155,7 @@ class TensorFlowObjectLoader:
 			# nested params form:
 			#   {"type": "adam", "params": {"learning_rate": 0.001}}
 			if "class_name" in raw_optimizer:
-				resolved = self._tf.keras.optimizers.get(raw_optimizer)
+				resolved = self._keras.optimizers.get(raw_optimizer)
 				self._log("optimizer", resolved)
 				return resolved
 
@@ -171,7 +169,7 @@ class TensorFlowObjectLoader:
 					if key not in {"type", "name", "kind", "params"}:
 						params.setdefault(key, value)
 
-			resolved = self._tf.keras.optimizers.get({"class_name": type_name, "config": params})
+			resolved = self._keras.optimizers.get({"class_name": type_name, "config": params})
 			self._log("optimizer", resolved)
 			return resolved
 
@@ -186,18 +184,18 @@ class TensorFlowObjectLoader:
 				self._log("optimizer(callable)", candidate)
 				return candidate
 			raise ConstraintConfigurationError(
-				"TensorFlow optimizer callable must return tf.keras.optimizers.Optimizer"
+				"Keras optimizer callable must return tf.keras.optimizers.Optimizer"
 			)
 
 		raise ConstraintConfigurationError(
-			"Unsupported TensorFlow optimizer spec. Use string/object spec, optimizer instance, class, or callable."
+			"Unsupported Keras optimizer spec. Use string/object spec, optimizer instance, class, or callable."
 		)
 
 	def resolve_regularizer(self, raw_regularizer: Any) -> Any:
 		if raw_regularizer is None:
 			return None
 
-		keras_regularizer = self._tf.keras.regularizers.Regularizer
+		keras_regularizer = self._keras.regularizers.Regularizer
 		if isinstance(raw_regularizer, keras_regularizer):
 			self._log("regularizer(instance)", raw_regularizer)
 			return raw_regularizer
@@ -221,7 +219,7 @@ class TensorFlowObjectLoader:
 			return resolved
 
 		raise ConstraintConfigurationError(
-			"Unsupported TensorFlow regularizer type. Supported: l1, lag_dependent_l1"
+			"Unsupported Keras regularizer type. Supported: l1, lag_dependent_l1"
 		)
 
 	@staticmethod
@@ -254,7 +252,7 @@ class TensorFlowObjectLoader:
 		if raw_constraint is None:
 			return None
 
-		keras_constraint = self._tf.keras.constraints.Constraint
+		keras_constraint = self._keras.constraints.Constraint
 		if isinstance(raw_constraint, keras_constraint):
 			self._log("constraint(instance)", raw_constraint)
 			return raw_constraint
@@ -266,16 +264,16 @@ class TensorFlowObjectLoader:
 		if type_name in {"mask", "mask_constraint", "keras_mask", "tensorflow_mask"}:
 			if "mask" not in params:
 				raise ConstraintConfigurationError("mask constraint requires 'mask'")
-			resolved = TensorFlowMaskConstraint(mask=params["mask"])
+			resolved = KerasMaskConstraint(mask=params["mask"])
 			self._log("constraint", resolved)
 			return resolved
 
 		if type_name in {"mask_and_min_abs_sum", "mask_min_abs_sum", "keras_mask_and_min_abs_sum", "tensorflow_mask_and_min_abs_sum"}:
 			spec = self._build_processed_constraint_spec(params)
-			resolved = TensorFlowMaskAndMinAbsSumConstraint(spec=spec, eps=float(params.get("eps", 1e-8)))
+			resolved = KerasMaskAndMinAbsSumConstraint(spec=spec, eps=float(params.get("eps", 1e-8)))
 			self._log("constraint", resolved)
 			return resolved
 
 		raise ConstraintConfigurationError(
-			"Unsupported TensorFlow constraint type. Supported: mask, mask_and_min_abs_sum"
+			"Unsupported Keras constraint type. Supported: mask, mask_and_min_abs_sum"
 		)

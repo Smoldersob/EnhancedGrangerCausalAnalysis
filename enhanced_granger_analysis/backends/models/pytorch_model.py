@@ -39,9 +39,9 @@ class PyTorchGrangerModel(BaseGrangerModel):
 		backend: str = "pytorch",
 		regularizer: Optional[Any] = None,
 		constraint: Optional[Any] = None,
-		optimizer: Optional[Union[str, Type[Any], Any]] = None,
-		loss: Optional[Union[str, Any]] = None,
-		callbacks: Optional[List[Callback]] = None,
+		optimizer: Optional[Any] = None,
+		loss: Optional[Any] = None,
+		callbacks: List[Callback] = None,
 		learning_rate: float = 1e-3,
 		gradient_accumulation_steps: int = 1,
 		loss_fn: Optional[Any] = None,
@@ -50,7 +50,7 @@ class PyTorchGrangerModel(BaseGrangerModel):
 		verbose: int = 0,
 		device: Optional[str] = None,
 		**kwargs: Any
-	) -> None:
+	):
 		super().__init__(
 			backend=backend,
 			regularizer=regularizer,
@@ -178,7 +178,7 @@ class PyTorchGrangerModel(BaseGrangerModel):
 			"Unable to build optimizer from provided optimizer specification"
 		)
 
-	def _resolve_loss(self, loss: Optional[Union[str, Any]]) -> Any:
+	def _resolve_loss(self, loss: Any) -> Any:
 		"""Resolve loss spec to callable loss function."""
 		if loss is None:
 			return nn.MSELoss()
@@ -250,7 +250,7 @@ class PyTorchGrangerModel(BaseGrangerModel):
 		"""Initialize model using lagged features prepared externally (e.g. LagEngine)."""
 		self._validate_torch_components()
 
-		X = np.asarray(data, dtype=np.float64)
+		x = np.asarray(data, dtype=np.float64)
 		y_raw = kwargs.get("targets")
 		if y_raw is None:
 			raise TrainingError(
@@ -259,16 +259,16 @@ class PyTorchGrangerModel(BaseGrangerModel):
 			)
 
 		y = np.asarray(y_raw, dtype=np.float64)
-		if X.ndim != 2:
+		if x.ndim != 2:
 			raise TrainingError("Expected 2D lagged feature matrix with shape (n_samples, n_lagged_features)")
 		if y.ndim == 1:
 			y = y[:, np.newaxis]
 		if y.ndim != 2:
 			raise TrainingError("targets must be 1D or 2D array")
-		if X.shape[0] != y.shape[0]:
+		if x.shape[0] != y.shape[0]:
 			raise TrainingError("Lagged features and targets must have the same number of rows")
 
-		n_features = X.shape[1]
+		n_features = x.shape[1]
 		n_outputs = y.shape[1]
 
 		variable_control_layer = nn.Linear(n_features, n_features, bias=False)
@@ -289,7 +289,7 @@ class PyTorchGrangerModel(BaseGrangerModel):
 		self._n_features = n_features
 		self._n_outputs = n_outputs
 		self._variable_mask = np.ones(n_features, dtype=np.float64)
-		self._X_train = X
+		self._X_train = x
 		self._y_train = y
 		self._loss_history = []
 		self._fitted = False
@@ -328,13 +328,13 @@ class PyTorchGrangerModel(BaseGrangerModel):
 		# Always recreate optimizer to reset internal moments/state for each new fit.
 		self._optimizer = self._build_optimizer()
 
-		X_tensor = torch.tensor(self._X_train, dtype=torch.float32, device=self.device)
+		x_tensor = torch.tensor(self._X_train, dtype=torch.float32, device=self.device)
 		y_tensor = torch.tensor(self._y_train, dtype=torch.float32, device=self.device)
 
 		if self.batch_size is None:
-			loader = [(X_tensor, y_tensor)]
+			loader = [(x_tensor, y_tensor)]
 		else:
-			dataset = TensorDataset(X_tensor, y_tensor)
+			dataset = TensorDataset(x_tensor, y_tensor)
 			loader = DataLoader(dataset, batch_size=self.batch_size, shuffle=True)
 
 		self.model.train()
@@ -435,22 +435,22 @@ class PyTorchGrangerModel(BaseGrangerModel):
 		if not self._fitted or self.model is None or self._n_features is None:
 			raise ModelNotFittedError("Model is not fitted. Call fit(...) first.")
 
-		X_arr = np.asarray(X, dtype=np.float64)
-		if X_arr.ndim != 2:
+		x_arr = np.asarray(X, dtype=np.float64)
+		if x_arr.ndim != 2:
 			raise TrainingError("X must be a 2D array")
-		if X_arr.shape[1] != self._n_features:
+		if x_arr.shape[1] != self._n_features:
 			raise TrainingError(
-				f"X has {X_arr.shape[1]} features, expected {self._n_features}"
+				f"X has {x_arr.shape[1]} features, expected {self._n_features}"
 			)
 
-		X_tensor = torch.tensor(X_arr, dtype=torch.float32, device=self.device)
+		x_tensor = torch.tensor(x_arr, dtype=torch.float32, device=self.device)
 		self.model.eval()
 		with torch.no_grad():
-			pred = self.model(X_tensor)
+			pred = self.model(x_tensor)
 		return pred.detach().cpu().numpy().astype(np.float64)
 
 	def set_weights(
-		self, weights: Union[NDArray[np.float64], List[NDArray[np.float64]]]
+		self, weights: NDArray[np.float64]|List[NDArray[np.float64]]
 	) -> None:
 		"""Set coefficient-layer weights (kernel or kernel+bias)."""
 		if self._coefficient_layer is None:
@@ -540,10 +540,6 @@ class PyTorchGrangerModel(BaseGrangerModel):
 		"""Set constraint with PyTorch component validation."""
 		self._validate_torch_components()
 		self.constraint = constraint
-
-	def reset_callbacks(self, run_name: Optional[str] = None) -> None:
-		"""Reset callbacks to an empty list."""
-		self.callbacks = []
 
 	def reset_callbacks(
 		self,
