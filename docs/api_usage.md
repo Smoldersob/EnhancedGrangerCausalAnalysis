@@ -37,7 +37,7 @@ output = api.fit(
     callbacks: Optional[Sequence[Any]] = None,
     model_config: Optional[Dict[str, Any]] = None,
     ...
-) -> MultitaskGrangerOutput
+) -> GrangerAnalysisResults
 ```
 
 **Variable Selection Parameters:**
@@ -50,16 +50,7 @@ The distinction is important: `causes` define what the model can *see*, while `t
 
 **Output:**
 ```python
-MultitaskGrangerOutput(
-    results: GrangerAnalysisResults,  # causality matrix, p-values, statistics
-    base_model: Any,                  # trained reference model
-    reference_models: Dict[str, ...], # predictions/weights for each cause
-    stationarity_transformer: Any,
-    lag_engine: LagEngine,
-    X_scaler: Any,
-    y_scaler: Any,
-    prepared_data: Optional[_PreparedData],  # reused if reuse_data=True
-)
+results: GrangerAnalysisResults
 ```
 
 **Features:**
@@ -118,8 +109,8 @@ output = (MultitaskGrangerBuilder(backend="pytorch")
     .fit()
 )
 
-causality_matrix = output.results.causality_matrix
-print(causality_matrix.data)  # DataFrame with signed causality indicators
+causality = output.result(threshold=0.01, with_sign=True)
+print(causality)  # DataFrame with signed causality indicators
 ```
 
 **When to use:**
@@ -295,20 +286,20 @@ For details, see [Configuration File Usage](config_file_usage.md).
 ```python
 results = GrangerAnalysisResults(effects=["y1", "y2"], causes=["x1", "x2"])
 
-# Populated by orchestrator.fit() via update_cause()
-# Contains:
-results.causality_matrix          # DataFrame: signed causality (1, 0, -1) per pair
-results.p_value_matrix            # DataFrame: corrected p-values
-results.test_statistic_matrix     # DataFrame: F/chi2 test statistics
+# Populated by orchestrator.fit() via update_cause().
+# Metrics are exposed as DataFrames:
+results.p_value                  # p-values
+results.f_test                    # F-test statistics
+results.sign                      # sign of the strongest contribution
 ```
 
 **Accessible After Fit:**
 ```python
-output = builder.fit()
-causality_matrix = output.results.causality_matrix  # DataFrame
-print(causality_matrix.data)
+results = builder.fit()
+causality = results.result(threshold=0.01, with_sign=True)
+print(causality)
 # Output example:
-#       x1   x2
+#      x1   x2
 # y1  1.0 -1.0
 # y2  0.0  1.0
 ```
@@ -362,7 +353,7 @@ output = (MultitaskGrangerBuilder(backend="sklearn")
     .fit()
 )
 
-print(output.results.causality_matrix.data)
+print(output.result(threshold=0.01, with_sign=True))
 ```
 
 ### Test with Config File
@@ -381,9 +372,9 @@ output = MultitaskGrangerBuilder().from_config(cfg).data(df).fit()
 
 # Examine results
 print("Causality Matrix:")
-print(output.results.causality_matrix.data)
+print(output.result(threshold=0.01, with_sign=True))
 print("\nP-values:")
-print(output.results.p_value_matrix)
+print(output.p_value)
 ```
 
 ### Test with Sweep (Multiple Configurations)
@@ -397,7 +388,7 @@ it = TestGroupConfigIterator.from_file("group_config.json")
 
 for i, cfg in enumerate(it):
     output = MultitaskGrangerBuilder().from_config(cfg).data(df).fit()
-    print(f"Test {i}: {output.results.causality_matrix.data}")
+    print(f"Test {i}:\n{output.result(threshold=0.01, with_sign=True)}")
 ```
 
 ### Test with Relations (Constraints)
@@ -414,17 +405,14 @@ output = (MultitaskGrangerBuilder(backend="pytorch")
     .variables(causes=["x1", "x2"], effects=["y"], tested_causes=["x1", "x2"])
     .lag(LagConfiguration(max_lag=5))
     .model({"epochs": 30})
+    .relations({
+    ("y", "x1"): {"zero": True},
+    ("y", "x2"): {"min_abs_sum": 0.5},
+    })
     .fit()
 )
 
-# Define constraints (relations): force x1→y=0, bound x2→y coefficients
-relations = {
-    ("y", "x1"): {"zero": True},
-    ("y", "x2"): {"min_abs_sum": 0.5},
-}
-
-# This would be done through orchestrator directly or via config:
-# See orchestrator.fit(relations=relations, ...)
+print(output.result(threshold=0.01, with_sign=True))
 ```
 
 ### Quick Exploration with SimpleGrangerAPI
@@ -485,9 +473,9 @@ print(output.p_value)
 
 5. **Extract Results**
    ```python
-   causality = output.results.causality_matrix
-   p_values = output.results.p_value_matrix
-   print(causality.data)
+   causality = output.result(threshold=0.01, with_sign=True)
+   p_values = output.p_value
+   print(causality)
    ```
 
 ---
@@ -511,4 +499,3 @@ print(output.p_value)
 - [Configuration File Usage](config_file_usage.md) — Sweep expansion and iteration.
 - [Backend Usage](backend_usage.md) — Creating components (callbacks, regularizers, constraints).
 - [Components Loading](components_loading.md) — Backend-specific component formats.
-

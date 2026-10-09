@@ -73,7 +73,7 @@ df = pd.read_csv("example/PID_no_fault.csv", sep=";", index_col=0)
 
 api = MultiTaskGrangerAPI(backend="pytorch", reuse_data=True)
 
-output = api.fit(
+results = api.fit(
     data=df,
     causes=["u", "f1", "f2"],
     effects=["x1", "x2", "u1", "e1"],
@@ -85,7 +85,7 @@ output = api.fit(
     model_config={"epochs": 40, "batch_size": 32, "learning_rate": 1e-3},
 )
 
-causality = output.evaluate().result(threshold=0.01, with_sign=True)
+causality = results.result(threshold=0.01, with_sign=True)
 print(causality)
 ```
 

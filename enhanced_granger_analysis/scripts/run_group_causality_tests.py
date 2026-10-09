@@ -263,6 +263,11 @@ def run_from_config(script_config_path: str | Path, save_mode: str = "minimum", 
     selected_test = str(test_type).strip().lower()
     if selected_test not in {"f", "wald", "lr"}:
         raise ValueError("test_type must be one of: 'f', 'wald', 'lr'")
+    test_metrics = {
+        "f": ("f", "f_test_p_value"),
+        "wald": ("wald", "wald_test_p_value"),
+        "lr": ("lr", "likelihood_ratio_p_value"),
+    }
 
     if not config_path.exists():
         raise FileNotFoundError(f"Script config file not found: {config_path}")
@@ -370,24 +375,17 @@ def run_from_config(script_config_path: str | Path, save_mode: str = "minimum", 
             results = builder.fit()
             
             # Extract and save all result matrices
-            test_df = results.evaluate(selected_test)
-            try:
-                p_value_df = results.evaluate(f"p_value")
-            except Exception:
-                try:
-                    p_value_df = results.evaluate(f"{selected_test}_p_value")
-                except Exception as e:
-                    print(f"Error occurred while evaluating p-value: {e}")
-                    p_value_df = None
+            statistic_name, p_value_name = test_metrics[selected_test]
+            test_df = results.evaluate(statistic_name)
+            p_value_df = results.evaluate(p_value_name)
 
-            sign_df = results.evaluate("sign")
-            if p_value_df is not None:
-                causality_df = p_value_df.threshold(threshold=threshold)
-            else:
-                causality_df = test_df.threshold(threshold=threshold)
-            if with_sign:
-                causality_df = causality_df * sign_df
-
+            sign_df = results.sign 
+            causality_df = results.result(
+                threshold=threshold,
+                metric=p_value_name,
+                with_sign=with_sign,
+            )
+                
             # Measure per-case execution time excluding file-save operations.
             elapsed_s = time.perf_counter() - start
             if cached_prepared_data is not None:
@@ -396,14 +394,14 @@ def run_from_config(script_config_path: str | Path, save_mode: str = "minimum", 
             
             causality_df.to_csv(causality_path)
             if save_mode == "matrices":
-                p_value_df.to_csv(p_value_path)
-                test_df.to_csv(test_path)
+                p_value_df.data.to_csv(p_value_path)
+                test_df.data.to_csv(test_path)
                 sign_df.to_csv(sign_path)
 
-            if reuse_data and out.prepared_data is not None:
+            if reuse_data and results.preparation_context is not None:
                 prepared_data_cache[prep_signature] = {
-                    "prepared_data": out.prepared_data,
-                    "preparation_time_seconds": out.preparation_time_seconds,
+                    "prepared_data": results.preparation_context.prepared_data,
+                    "preparation_time_seconds": results.preparation_context.metadata.get("preparation_time_seconds", 0.0),
                 }
             
             # Compute metrics against ground truth
@@ -417,7 +415,7 @@ def run_from_config(script_config_path: str | Path, save_mode: str = "minimum", 
                 "causality_file": causality_path.name,
                 "signed_result": "True" if with_sign else "False",
                 "p_value_file": p_value_path.name if save_mode == "matrices" else "NOT_SAVED",
-                f"{selected_test}_file": test_path.name if save_mode == "matrices" else "NOT_SAVED",
+                "test_file": test_path.name if save_mode == "matrices" else "NOT_SAVED",
                 "execution_time_seconds": round(elapsed_s, 2),
             }
             for p, v in zip(param_names, case_values):
@@ -438,9 +436,7 @@ def run_from_config(script_config_path: str | Path, save_mode: str = "minimum", 
                 "test_type": selected_test,
                 "causality_file": "FAILED",
                 "p_value_file": "FAILED",
-                "f_test_file": "FAILED",
-                "wald_test_file": "FAILED",
-                "lr_test_file": "FAILED",
+                "test_file": "FAILED",
                 "sign_file": "FAILED",
                 "execution_time_seconds": round(elapsed_s, 2),
                 "error": str(e),
