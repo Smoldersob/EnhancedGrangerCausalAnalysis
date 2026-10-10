@@ -47,26 +47,29 @@ def _reduce_backend_load(
 	backend_max_samples: Optional[int] = None,
 ) -> Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
 	"""Reduce training workload after scaling and before backend call."""
-	if not 0.0 < backend_sample_fraction <= 1.0:
-		raise ValueError("backend_sample_fraction must be in range (0.0, 1.0]")
-
-	if backend_sample_fraction == 1.0 and backend_max_samples is None:
+	# Add type validation
+	if not isinstance(X_scaled, np.ndarray) or not isinstance(y_scaled, np.ndarray):
+		raise TypeError("X_scaled and y_scaled must be numpy arrays")
+	
+	# Handle edge cases first
+	if X_scaled.size == 0 or y_scaled.size == 0:
 		return X_scaled, y_scaled, X_raw, y_raw
-
+	
+	# Calculate sample count
 	n = X_scaled.shape[0]
-	if n == 0:
-		raise DataValidationError("No samples available after lag preparation")
-
 	n_keep = max(1, int(np.floor(backend_sample_fraction * n)))
+	
+	# Apply max_samples constraint
 	if backend_max_samples is not None:
-		if backend_max_samples <= 0:
-			raise ValueError("backend_max_samples must be > 0")
-		n_keep = min(n_keep, int(backend_max_samples))
-
-	if n_keep >= n:
-		return X_scaled, y_scaled, X_raw, y_raw
-
-	idx = np.arange(n_keep, dtype=int)
+		n_keep = min(n_keep, backend_max_samples)
+	
+	# Get random indices (better than fixed indices)
+	if n_keep < n:
+		idx = np.random.choice(n, size=n_keep, replace=False)
+	else:
+		idx = np.arange(n)
+	
+	# Return samples with proper alignment
 	return X_scaled[idx], y_scaled[idx], X_raw[idx], y_raw[idx]
 
 
@@ -454,7 +457,7 @@ def prepare_data(
 		causes=causes_list,
 		tested_causes=tested_causes_list,
 		effects=effects_list,
-        removed_variable_info=removed_variable_info,
+		removed_variable_info=removed_variable_info,
 	)
 
 	return prepared
