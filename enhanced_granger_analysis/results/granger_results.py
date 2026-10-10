@@ -1,3 +1,9 @@
+"""Container objects and cached result evaluation for Granger causality analysis.
+
+The module stores model snapshots, preprocessing metadata, and derived
+causality matrices computed from restricted and unrestricted model fits.
+"""
+
 from __future__ import annotations
 
 from collections.abc import Callable
@@ -20,7 +26,11 @@ DofMethod = Literal["structural", "active_support"]
 
 @dataclass
 class ModelSnapshot:
-	"""Stored outputs from one fitted model instance."""
+	"""
+	Snapshot of one fitted model run.
+	Stores predictions, optional coefficient weights, and arbitrary
+	metadata associated with a single unrestricted or restricted model fit.
+	"""
 
 	predictions: NDArray[np.float64]
 	weights: NDArray[np.float64] | None = None
@@ -29,34 +39,66 @@ class ModelSnapshot:
 
 @dataclass(frozen=True)
 class PreparationContext:
-	"""Context for preparing data for a single Granger causality analysis."""
+	"""
+	Encapsulates preprocessing state used during a Granger test.
+	The context exposes the original prepared-data objects and the
+	metadata needed to restore variables removed during feature preparation.
+	"""
 
 	prepared_data: PreparedData
 	metadata: dict[str, Any] | None = None
 
 	@property
 	def stationarity_transformer(self):
+		"""Return the transformer used to stabilize the stationarity step.
+
+		Returns: Transformer instance applied to the prepared data pipeline before
+		model fitting.
+		"""
 		return self.prepared_data.stationarity_transformer
 
 	@property
 	def lag_engine(self):
+		"""Return the lag-generation engine used by the analysis.
+
+		Returns: Lag-engine object producing time-lagged regression features.
+		"""
 		return self.prepared_data.lag_engine
 
 	@property
 	def x_scaler(self):
+		"""Return the feature scaler attached to the model inputs.
+
+		Returns: Scaling transformer applied to explanatory variables.
+		"""
 		return self.prepared_data.x_scaler
 
 	@property
 	def y_scaler(self):
+		"""Return the target scaler attached to the response variables.
+
+		Returns: Scaling transformer applied to dependent variables.
+		"""
 		return self.prepared_data.y_scaler
 
 	@property
 	def removed_variables(self) -> dict[str, dict[str, Any]]:
+		"""Return the bookkeeping for variables removed during preprocessing.
+
+		Returns: Dictionary keyed by removed variable name and containing the
+		corresponding restoration metadata.
+		"""
 		return self.prepared_data.removed_variable_info
 
 
 class GrangerAnalysisResults:
-	"""Container of artifacts from a Granger causality analysis."""
+	"""
+	Container for model outputs and Granger-causality test results.
+	This object stores the fitted unrestricted model, the restricted
+	reference models for each removed cause, and the cached matrices that
+	represent statistical metrics such as p-values, F-statistics, and likelihood
+	ratios.
+	"""
 
 	def __init__(
 		self,
@@ -67,6 +109,19 @@ class GrangerAnalysisResults:
 		y_true: Optional[NDArray[np.float64]] = None,
 		X_true: Optional[NDArray[np.float64]] = None,
 	) -> None:
+		"""Initialize an empty result store for a Granger causality analysis.
+
+		Args:
+			effects: Names of the response variables being evaluated.
+			causes: Names of the candidate causal drivers being tested.
+			mask: Boolean mask describing which coefficient slots are active.
+			col_offsets: Offsets delimiting each cause block within the feature
+				matrix.
+			y_true: Observed response matrix used to compute residual sums of
+				squares.
+			X_true: Original explanatory data matrix used as a fallback source
+				for unrestricted parameter counts.
+		"""
 		self.effects = list(effects or [])
 		self.causes = list(causes or [])
 		self.mask = np.asarray(mask, dtype=bool) if mask is not None else np.empty((0, 0), dtype=bool)
@@ -82,52 +137,115 @@ class GrangerAnalysisResults:
 
 	@property
 	def base_predictions(self) -> NDArray[np.float64] | None:
+		"""Return predictions from the unrestricted base model.
+
+		Returns: Base-model predictions as a 2D array or None when unavailable.
+		"""
 		return None if self.base_snapshot is None else self.base_snapshot.predictions
 
 	@property
 	def base_weights(self) -> NDArray[np.float64] | None:
+		"""Return coefficient weights from the unrestricted base model.
+
+		Returns: Weight matrix for the base fit, or None if no base snapshot is set.
+		"""
 		return None if self.base_snapshot is None else self.base_snapshot.weights
 
 	@property
 	def ref_predictions(self) -> dict[str, NDArray[np.float64]]:
+		"""Return predictions for every restricted reference model.
+
+		Returns: Mapping from cause name to the corresponding reduced-model outputs.
+		"""
 		return {name: snap.predictions for name, snap in self.reference_snapshots.items()}
 
 	@property
 	def ref_weights(self) -> dict[str, NDArray[np.float64]]:
+		"""Return weight matrices for every restricted reference model.
+
+		Returns: Mapping from cause name to reduced-model weights for non-None
+		entries.
+		"""
 		return {name: snap.weights for name, snap in self.reference_snapshots.items() if snap.weights is not None}
 
 	@property
 	def n_samples(self) -> int:
+		"""Return the number of sample rows in the observed target data.
+
+		Returns: Number of rows in the truth matrix, or zero when no data is stored.
+		"""
 		return int(self.y_true.shape[0]) if self.y_true.size else 0
 
 	@property
 	def p_value(self) -> pd.DataFrame:
+		"""Return the p-value matrix for the evaluated Granger tests.
+
+		Returns: DataFrame containing p-values indexed by effects and causes.
+		"""
 		return self.evaluate("p_value", restore_removed=True).data
 
 	@property
 	def f_test(self) -> pd.DataFrame:
+		"""Return the F-statistic matrix for evaluated Granger tests.
+
+		Returns: DataFrame containing F-statistics indexed by effects and causes.
+		"""
 		return self.evaluate("f_statistic", restore_removed=True).data
 
 	@property
 	def wald_test(self) -> pd.DataFrame:
+		"""Return the Wald-test matrix for evaluated Granger tests.
+
+		Returns: DataFrame containing Wald statistics indexed by effects and causes.
+		"""
 		return self.evaluate("wald_test", restore_removed=True).data
 
 	@property
 	def likelihood_ratio(self) -> pd.DataFrame:
+		"""Return the likelihood-ratio matrix for evaluated Granger tests.
+
+		Returns: DataFrame containing likelihood-ratio statistics indexed by effects
+		and causes.
+		"""
 		return self.evaluate("likelihood_ratio", restore_removed=True).data
 
 	@property
 	def sign(self) -> pd.DataFrame:
+		"""Return the signed direction matrix inferred from base-model coefficients.
+
+		Returns: DataFrame whose entries encode the net effect sign for each
+		effect-cause pair.
+		"""
 		return self._sign_matrix()
 
 	def set_dof_method(self, method: DofMethod) -> None:
-		"""Select whether test degrees of freedom use structure or active weights."""
+		"""
+		Select the convention used to count residual degrees of freedom.
+
+		Args:
+			method: Either ``"structural"`` or ``"active_support"``.
+
+		Raises:
+			ValueError: If the method name is unsupported.
+		"""
 		if method not in {"structural", "active_support"}:
 			raise ValueError("dof method must be 'structural' or 'active_support'")
 		self.dof_method = method
 
 	def _weights_as_feature_output(self, weights: NDArray[np.float64]) -> NDArray[np.float64]:
-		"""Normalize weights to the ``effects x features`` orientation."""
+		"""
+		Normalize a coefficient matrix into effects-by-feature order.
+
+		Args:
+			weights: Raw coefficient matrix for the fitted model.
+
+		Returns:
+			Weight matrix arranged with one row per effect and one column per
+			feature slot.
+
+		Raises:
+			ValueError: If the input is not a 2D array.
+		"""
 		weights_arr = np.asarray(weights, dtype=np.float64)
 		if weights_arr.ndim != 2:
 			raise ValueError(f"Expected 2D weights, got shape {weights_arr.shape}")
@@ -138,7 +256,17 @@ class GrangerAnalysisResults:
 		return weights_arr
 
 	def _effect_cause_matrix(self, values: NDArray[np.float64], *, name: str) -> CausalityMatrix:
-		"""Wrap numeric metric values in an effects-by-causes matrix."""
+		"""
+		Wrap a numeric table as an effects-by-causes matrix.
+
+		Args:
+			values: Metric values to place into the matrix body.
+			name: Human-readable label assigned to the resulting matrix.
+
+		Returns:
+			Data structure containing an effects-by-causes DataFrame and
+			associated metadata.
+		"""
 		values_arr = np.asarray(values, dtype=np.float64)
 		if values_arr.ndim == 1:
 			values_arr = values_arr[:, np.newaxis]
@@ -151,7 +279,13 @@ class GrangerAnalysisResults:
 		return CausalityMatrix(data=matrix, name=name)
 
 	def set_preparation_context(self, context: PreparationContext) -> None:
-		"""Attach preprocessing metadata used to restore removed variables."""
+		"""
+		Attach preprocessing metadata used to restore removed variables.
+
+		Args:
+			context: Context object storing the prepared-data pipeline and the
+				removed-variable restoration metadata.
+		"""
 		self.preparation_context = context
 
 	def set_base_snapshot(
@@ -160,7 +294,14 @@ class GrangerAnalysisResults:
 			base_weights: NDArray[np.float64],
 			metadata: Optional[dict[str, Any]] = None,
 		) -> None:
-			"""Store predictions and weights from the unrestricted base model."""
+			"""
+			Store the unrestricted base-model snapshot.
+
+			Args:
+				base_predictions: Predicted values from the unrestricted fit.
+				base_weights: Coefficient matrix for the unrestricted fit.
+				metadata: Optional metadata describing the fitted model state.
+			"""
 			self.base_snapshot = ModelSnapshot(predictions=ensure_2d(base_predictions), weights=np.asarray(base_weights, dtype=np.float64), metadata=metadata or {})
 			self._rss_cache.pop("base", None)
 			self._metric_cache.clear()
@@ -172,7 +313,15 @@ class GrangerAnalysisResults:
 			reference_weights: NDArray[np.float64],
 			metadata: Optional[dict[str, Any]] = None,
 		) -> None:
-			"""Store predictions and weights from a model with one cause omitted."""
+			"""
+			Store the reduced model that omits a single cause variable.
+
+			Args:
+				cause: Name of the omitted cause variable.
+				reference_predictions: Predicted values from the reduced model.
+				reference_weights: Coefficient matrix of the reduced model.
+				metadata: Optional metadata describing the restricted fit.
+			"""
 			self.reference_snapshots[cause] = ModelSnapshot(
 				predictions=ensure_2d(reference_predictions),
 				weights=np.asarray(reference_weights, dtype=np.float64),
@@ -182,7 +331,18 @@ class GrangerAnalysisResults:
 			self._metric_cache.clear()
 
 	def n_restrictions_for(self, cause: str) -> NDArray[np.int_]:
-		"""Count tested coefficients for one cause separately for every effect."""
+		"""
+		Count which coefficients are active for one cause across all effects.
+
+		Args:
+			cause: Name of the cause whose coefficient block is being counted.
+
+		Returns:
+			1D array containing the number of active restrictions for each effect.
+
+		Raises:
+			ValueError: If the cause name is not part of the configured causal set.
+		"""
 		if cause not in self.causes:
 			raise ValueError(f"Unknown cause '{cause}'")
 		if self.mask.size == 0:
@@ -199,7 +359,14 @@ class GrangerAnalysisResults:
 		return np.asarray(mask_block.sum(axis=1), dtype=np.int_)
 
 	def n_unrestricted_parameters(self) -> int:
-		"""Return the parameter count used for residual degrees of freedom."""
+		"""
+		Calculate the model-width proxy used for residual degree-of-freedom
+		calculations.
+
+		Returns:
+			Number of unrestricted parameters, falling back to the stored
+			explanatory matrix width when no base snapshot is present.
+		"""
 		if self.base_snapshot is not None and self.base_snapshot.weights is not None:
 			weights = self._weights_as_feature_output(self.base_snapshot.weights)
 			return int(max(weights.shape[1], 1))
@@ -208,7 +375,15 @@ class GrangerAnalysisResults:
 		return 1
 
 	def base_rss_per_output(self) -> NDArray[np.float64]:
-		"""Compute unrestricted-model RSS separately for every model output."""
+		"""
+		Compute the residual sum of squares for the unrestricted base model.
+
+		Returns:
+			1D array of RSS values, one per output variable.
+
+		Raises:
+			ValueError: If no base snapshot has been registered.
+		"""
 		if self.base_snapshot is None:
 			raise ValueError("Base snapshot is not available")
 		if "base" not in self._rss_cache:
@@ -219,7 +394,19 @@ class GrangerAnalysisResults:
 		return self._rss_cache["base"]
 
 	def reference_rss_per_output(self, cause: str) -> NDArray[np.float64]:
-		"""Compute omitted-cause RSS separately for every model output."""
+		"""
+		Compute the residual sum of squares for the restricted model omitting
+		one cause.
+
+		Args:
+			cause: Name of the omitted cause variable.
+
+		Returns:
+			RSS values for each output in the reference model.
+
+		Raises:
+			ValueError: If the cause does not have a stored reference snapshot.
+		"""
 		if cause not in self.reference_snapshots:
 			raise ValueError(f"Reference snapshot for cause '{cause}' is not available")
 		cache_key = f"reference:{cause}"
@@ -237,7 +424,17 @@ class GrangerAnalysisResults:
 		name: str = "result",
 		metadata: Optional[dict[str, Any]] = None,
 	) -> CausalityMatrix:
-		"""Build an effects-by-causes matrix and attach metric metadata."""
+		"""
+		Build a metric matrix indexed by effects and causes.
+
+		Args:
+			values: Numeric values to populate the matrix with.
+			name: Identifier used by the returned CausalityMatrix.
+			metadata: Optional metadata attached to the output matrix.
+
+		Returns:
+			A CausalityMatrix with an effects-by-causes DataFrame payload.
+		"""
 		matrix = self._effect_cause_matrix(values, name=name)
 		if metadata:
 			matrix.metadata.update(metadata)
@@ -252,7 +449,20 @@ class GrangerAnalysisResults:
 			force: bool = False,
 			**kwargs: Any,
 		) -> CausalityMatrix:
-			"""Evaluate and optionally cache a metric, restoring removed variables."""
+			"""
+			Resolve and evaluate a Granger-causality metric.
+
+			Args:
+				metric: Metric name or callable to execute.
+				restore_removed: If true, rebuild removed-variable entries before
+					returning the metric.
+				cache: Whether to reuse a previously computed result.
+				force: Ignore cached results when true.
+				**kwargs: Extra arguments forwarded to the metric implementation.
+
+			Returns:
+				The metric matrix with optional restoration applied.
+			"""
 			from .metrics import resolve_metric
 
 			metric_func = resolve_metric(metric)
@@ -282,7 +492,19 @@ class GrangerAnalysisResults:
 			with_sign: bool = False,
 			metric: str | Callable[..., CausalityMatrix] = "f_test_p_value",
 		) -> pd.DataFrame:
-			"""Return a binary thresholded causality table, optionally signed."""
+			"""
+			Return a thresholded effect-cause table for the selected metric.
+
+			Args:
+				threshold: Significance threshold used to convert a continuous
+					statistic into binary evidence.
+				with_sign: Whether to multiply the binary result by the net causal
+					sign matrix.
+				metric: Metric to evaluate before thresholding.
+
+			Returns:
+				DataFrame with 1/0 indicator values after thresholding.
+			"""
 			metric_matrix = self.evaluate(metric, restore_removed=True)
 			result_df = metric_matrix.data.copy()
 			binary = (result_df < threshold).astype(int)
@@ -291,7 +513,12 @@ class GrangerAnalysisResults:
 			return binary
 
 	def _sign_matrix(self) -> pd.DataFrame:
-		"""Extract one causal sign per effect-cause pair from base weights."""
+		"""
+		Summarize the net direction of each causal effect from base weights.
+
+		Returns:
+			DataFrame containing a sign value for each effect-cause pair.
+		"""
 		if self.base_snapshot is None or self.base_snapshot.weights is None:
 			return pd.DataFrame(np.zeros((len(self.effects), len(self.causes))), index=self.effects, columns=self.causes, dtype=np.float64)
 		weights_matrix = self._weights_as_feature_output(self.base_snapshot.weights)
@@ -308,6 +535,7 @@ class GrangerAnalysisResults:
 		return pd.DataFrame(sign_values, index=self.effects, columns=self.causes)
 
 	def __repr__(self) -> str:
+		"""Return a compact textual summary of the result container."""
 		return (
 			f"GrangerAnalysisResults(effects={self.effects}, causes={self.causes}, "
 			f"dof_method={self.dof_method!r})"

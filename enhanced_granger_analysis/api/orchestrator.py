@@ -286,7 +286,8 @@ class MultiTaskGrangerAPI:
 
 		results.set_base_snapshot( 
 			predictions=base_pred_real,
-			weights=base_weight_matrix
+			weights=base_weight_matrix,
+			metadata={"backend": self.backend},
 		)
 
 		# Reuse a single reference model object; reinitialize state for each cause.
@@ -323,8 +324,9 @@ class MultiTaskGrangerAPI:
 
 			results.set_reference_snapshot(
 				cause=cause_name,
-				predictions=ref_pred_real,
-				weights=ref_weight_matrix,
+				reference_predictions=ref_pred_real,
+				reference_weights=ref_weight_matrix,
+				metadata={"backend": self.backend}
 			)
 
 		results.set_preparation_context(
