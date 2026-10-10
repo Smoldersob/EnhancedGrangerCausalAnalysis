@@ -13,9 +13,11 @@ from ..backends import BackendFactory
 from ..core.lag_config import LagConfiguration
 from ..preprocessing.stationarity import StationarityTransformer
 from ..preprocessing.lag import BaseLagSelector
+from ..preprocessing.missing import BaseImputer, ConstantImputer
+from ..preprocessing.sampling import SamplingStrategy, ConstantImputer
 from ..preprocessing.prepare_data import PreparedData, prepare_data
 
-from ..results.granger_results import GrangerAnalysisResults, ResultsError, PreparationContext
+from ..results.granger_results import GrangerAnalysisResults, PreparationContext
 from ..hiperopt.hyperoptimization import MultiTaskGrangerHyperparameterOptimizer
 
 # Preprocessing utility functions for run-specific callback handling and regularizer specification.
@@ -135,9 +137,13 @@ class MultiTaskGrangerAPI:
 		lag_config: Optional[LagConfiguration] = None,
 		lag_selector: Optional[BaseLagSelector] = None,
 		stationarity_transformer: Optional[StationarityTransformer] = None,
+		missing_value_imputer: Optional[BaseImputer] = ConstantImputer(value=0.0),
+		schema_policy: str = "error",
 		prepared_data: Optional[PreparedData] = None,
 		backend_sample_fraction: float = 1.0,
 		backend_max_samples: Optional[int] = None,
+		random_state: Optional[int] = None,
+		sampling_strategy: Optional[SamplingStrategy] = None,
 		x_scaler: Optional[Any] = "standard",
 		y_scaler: Optional[Any] = "standard",
 		regularizer: Optional[Any] = None,
@@ -158,13 +164,17 @@ class MultiTaskGrangerAPI:
 			prepared = prepare_data(
 				data=data,
 				causes=causes,
-				tested_causes=tested_causes.copy(),
-				effects=effects.copy(),
+				tested_causes=tested_causes,
+				effects=effects,
 				lag_config=lag_config,
 				lag_selector=lag_selector,
 				stationarity_transformer=stationarity_transformer,
+				missing_value_imputer=missing_value_imputer,
+				schema_policy=schema_policy,
 				backend_sample_fraction=backend_sample_fraction,
 				backend_max_samples=backend_max_samples,
+				random_state=random_state,
+				sampling_strategy=sampling_strategy,
 				x_scaler=x_scaler,
 				y_scaler=y_scaler,
 			)

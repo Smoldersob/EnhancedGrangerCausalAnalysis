@@ -19,6 +19,30 @@ Metric = Callable[..., CausalityMatrix]
 
 _METRICS: dict[str, Metric] = {}
 
+def register_metric(*names: str):
+    """Register aliases used by ``GrangerAnalysisResults.evaluate``."""
+    def decorator(func: Metric) -> Metric:
+        for name in names:
+            if name in _METRICS:
+                raise ResultsError(f"Metric '{name}' is already registered.")
+            _METRICS[name] = func
+        return func
+
+    return decorator
+
+
+def resolve_metric(metric: str | Metric) -> Metric:
+    """Resolve a registered metric name or accept a custom metric callable."""
+    if callable(metric):
+        return metric
+
+    normalized = str(metric).strip().lower()
+    try:
+        return _METRICS[normalized]
+    except KeyError as exc:
+        available = ", ".join(sorted(_METRICS))
+        raise ResultsError(f"Unknown metric '{metric}'. Available metrics: {available}.") from exc
+
 
 def _statistic_matrix(results: Any, name: str) -> CausalityMatrix:
     """Reuse a cached statistic or evaluate it once without restoration."""
@@ -81,31 +105,6 @@ def _p_value_metric_name(results: Any) -> str:
             "No registered metric has a <metric>_p_value companion."
         ) from exc
     return default_name
-
-
-def register_metric(*names: str):
-    """Register aliases used by ``GrangerAnalysisResults.evaluate``."""
-    def decorator(func: Metric) -> Metric:
-        for name in names:
-            if name in _METRICS:
-                raise ResultsError(f"Metric '{name}' is already registered.")
-            _METRICS[name] = func
-        return func
-
-    return decorator
-
-
-def resolve_metric(metric: str | Metric) -> Metric:
-    """Resolve a registered metric name or accept a custom metric callable."""
-    if callable(metric):
-        return metric
-
-    normalized = str(metric).strip().lower()
-    try:
-        return _METRICS[normalized]
-    except KeyError as exc:
-        available = ", ".join(sorted(_METRICS))
-        raise ResultsError(f"Unknown metric '{metric}'. Available metrics: {available}.") from exc
 
 
 @register_metric("f_statistic", "f")
