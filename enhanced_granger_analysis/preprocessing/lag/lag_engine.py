@@ -62,8 +62,8 @@ def _create_lagged_data(
     n_rows, n_vars = x.shape
     total_cols = int((max_lags - min_lags + 1).sum())
     X = np.empty((n_rows, total_cols), dtype=x.dtype)
-
-    col_offsets = np.concatenate(
+    
+    block_boundaries = np.concatenate(
         [[0], (max_lags - min_lags + 1).cumsum(dtype=int)]
     )
 
@@ -76,7 +76,7 @@ def _create_lagged_data(
             elif lag == 0:
                 pass  # no shift needed
             cols.append(col)
-        X[:, col_offsets[k]:col_offsets[k + 1]] = np.column_stack(cols)
+        X[:, block_boundaries[k]:block_boundaries[k + 1]] = np.column_stack(cols)
 
     # Drop rows that contain NaNs (first max(max_lags) rows)
     valid_start = int(max_lags.max())
@@ -174,7 +174,7 @@ class LagEngine:
 
     >>> cfg = LagConfiguration(max_lag=6, use_lag_zero=True)
     >>> engine = LagEngine(config=cfg)
-    >>> X, y, col_idx = engine.prepare(data_list, effects=["y1"])
+    >>> X, y, block_boundaries = engine.prepare(data_list, effects=["y1"])
 
     Automatic per-pair selection:
 
@@ -182,7 +182,7 @@ class LagEngine:
     >>> sel = ICLagSelector(max_lag=20, use_bic=True, n_jobs=-1)
     >>> cfg = LagConfiguration(max_lag=20, custom_lags={"x3": (2, 8)})
     >>> engine = LagEngine(config=cfg, selector=sel)
-    >>> X, y, col_idx = engine.prepare(data_list, effects=["y1", "y2"])
+    >>> X, y, block_boundaries = engine.prepare(data_list, effects=["y1", "y2"])
     """
 
     def __init__(
@@ -209,6 +209,7 @@ class LagEngine:
         self,
         data_list: List[pd.DataFrame],
         effects: List[str],
+        causes: Optional[List[str]] = None,
     ) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
         """
         Determine lags, build lagged features, and align targets.
@@ -228,9 +229,11 @@ class LagEngine:
             Concatenated lagged feature matrix.
         y : ndarray of shape (n_total_usable, n_effects)
             Concatenated aligned target matrix.
-        col_index : ndarray of shape (n_features + 1,)
-            Cumulative column offsets.  ``X[:, col_index[k]:col_index[k+1]]``
-            contains the lagged block for the *k*-th variable.
+        block_boundaries : ndarray of shape (n_predictors + 1,)
+            Boundaries of consecutive predictor blocks.
+            Predictor k occupies columns
+            X[:, block_boundaries[k]:block_boundaries[k + 1]].
+            The final boundary equals X.shape[1].
 
         Raises
         ------
@@ -247,6 +250,22 @@ class LagEngine:
             allow_superset_columns=False,
             copy=False,
         )
+
+        predictors = list(columns) if causes is None else list(causes)
+        targets = list(effects)
+
+        if not predictors:
+            raise LagPreparationError("No predictor variables were selected.")
+        if not targets:
+            raise LagPreparationError("No effect variables were selected.")
+
+        if len(predictors) != len(set(predictors)):
+            raise LagPreparationError("causes contains duplicated names.")
+        if len(targets) != len(set(targets)):
+            raise LagPreparationError("effects contains duplicated names.")
+
+        validate_columns_present(columns, predictors, context="causes")
+        validate_columns_present(columns, targets, context="effects")
 
         n_vars = len(columns)
 
@@ -285,20 +304,70 @@ class LagEngine:
                 self.mask_ = np.ones((n_vars, total_cols), dtype=int)
 
         # Store fitted lag order
+        full_boundaries = np.concatenate(
+            [[0], (max_lags - min_lags + 1).cumsum(dtype=int)]
+        )
+
+        predictor_indices = [columns.index(name) for name in predictors]
+        target_indices = [columns.index(name) for name in targets]
+
+        feature_indices = np.concatenate([
+            np.arange(
+                full_boundaries[index],
+                full_boundaries[index + 1],
+                dtype=int,
+            )
+            for index in predictor_indices
+        ])
+
+        # The existing mask construction uses the complete variable schema.
+        # Retain only selected output rows and predictor columns.
+        self.mask_ = np.asarray(self.mask_)[
+            np.ix_(target_indices, feature_indices)
+        ].copy()
+
+        predictor_min_lags = min_lags[predictor_indices]
+        predictor_max_lags = max_lags[predictor_indices]
+
+        self.lag_order_ = {
+            "min": predictor_min_lags.copy(),
+            "max": predictor_max_lags.copy(),
+        }
         self.lag_order_ = {"min": min_lags.copy(), "max": max_lags.copy()}
 
         # Build lagged features in parallel
         X = self._build_features(data_list, min_lags, max_lags)
 
-        # Align targets
-        y = self._align_targets(data_list, effects, int(max_lags.max()))
 
-        # Column index for downstream usage
-        col_index = np.concatenate(
+        self.predictor_names_ = tuple(predictors)
+        self.output_names_ = tuple(targets)
+
+        predictor_data = [
+            dataframe.loc[:, predictors]
+            for dataframe in data_list
+        ]
+
+        X = self._build_features(
+            predictor_data,
+            predictor_min_lags,
+            predictor_max_lags,
+        )
+        
+        # Align targets
+        n_drop = int(predictor_max_lags.max())
+        y = self._align_targets(data_list, targets, n_drop)
+        
+        if X.shape[0] != y.shape[0]:
+            raise LagPreparationError(
+                "Lagged predictors and targets are not aligned."
+            )
+
+        # Predictor block boundaries for downstream usage.
+        block_boundaries = np.concatenate(
             [[0], (max_lags - min_lags + 1).cumsum(dtype=int)]
         )
 
-        return X, y, col_index
+        return X, y, block_boundaries
 
     def _determine_lags(
         self,
@@ -524,13 +593,13 @@ class LagEngine:
 
         # Local pair edits: zero block then set only requested lag window to 1.
         if pair_overrides:
-            col_index = np.concatenate(
+            block_boundaries = np.concatenate(
                 [[0], (max_lags - min_lags + 1).cumsum(dtype=int)]
             )
 
             for t_idx, p_idx, pair_min, pair_max in pair_overrides:
-                block_start = int(col_index[p_idx])
-                block_end = int(col_index[p_idx + 1])
+                block_start = int(block_boundaries[p_idx])
+                block_end = int(block_boundaries[p_idx + 1])
                 block_len = block_end - block_start
 
                 if t_idx >= self.mask_.shape[0]:
@@ -562,20 +631,26 @@ class LagEngine:
         align: str = "overlap",
     ) -> np.ndarray:
         """Remap predictor blocks while preserving overlap values."""
-        old_min = np.asarray(old_min, dtype=int)
-        old_max = np.asarray(old_max, dtype=int)
-        new_min = np.asarray(new_min, dtype=int)
-        new_max = np.asarray(new_max, dtype=int)
-
         n_targets = int(mask.shape[0])
-        old_offsets = np.concatenate([[0], (old_max - old_min + 1).cumsum(dtype=int)])
-        new_offsets = np.concatenate([[0], (new_max - new_min + 1).cumsum(dtype=int)])
+        
+        old_boundaries = np.concatenate([
+            [0],
+            (old_max - old_min + 1).cumsum(dtype=int),
+        ])
+        new_boundaries = np.concatenate([
+            [0],
+            (new_max - new_min + 1).cumsum(dtype=int),
+        ])
 
-        out = np.full((n_targets, int(new_offsets[-1])), int(fill_new), dtype=mask.dtype)
+        out = np.full(
+            (n_targets, int(new_boundaries[-1])),
+            int(fill_new),
+            dtype=mask.dtype,
+        )
 
         for j in range(len(old_min)):
-            old_start = int(old_offsets[j])
-            new_start = int(new_offsets[j])
+            old_start = int(old_boundaries[j])
+            new_start = int(new_boundaries[j])
 
             old_w = int(old_max[j] - old_min[j] + 1)
             new_w = int(new_max[j] - new_min[j] + 1)
@@ -653,12 +728,15 @@ class LagEngine:
         n_targets, n_features = pred_lag_matrix.shape
         block_widths = max_lags - min_lags + 1
         total_cols = int(block_widths.sum())
-        col_offsets = np.concatenate([[0], block_widths.cumsum(dtype=int)])
+        block_boundaries = np.concatenate([
+            [0],
+            block_widths.cumsum(dtype=int),
+        ])
 
         mask = np.zeros((n_targets, total_cols), dtype=int)
 
         for j in range(n_features):
-            blk_start = int(col_offsets[j])
+            blk_start = int(block_boundaries[j])
             blk_width = int(block_widths[j])
             mn_j = int(min_lags[j])
 

@@ -2,13 +2,14 @@ import numpy as np
 import pandas as pd
 
 from dataclasses import dataclass, field
-from typing import Any, List, Literal, Optional, Sequence
+from typing import Any, Literal, Optional, Sequence
 
 from .lag import LagEngine, LagConfiguration, BaseLagSelector
 from .stationarity import StationarityTransformer
 from .missing import BaseImputer
 from .sampling import NoSampling, SamplingStrategy
 
+_DEFAULT_STATIONARITY = object()
 
 @dataclass(frozen=True)
 class VariableRoles:
@@ -31,9 +32,8 @@ class RemovedVariable:
 
 @dataclass
 class PreparedData:
-	stationarity_transformer: Optional[StationarityTransformer] = None
+	stationarity_transformer: Any = _DEFAULT_STATIONARITY,
 	lag_engine: Optional[LagEngine] = None
-	col_offsets: np.ndarray = field(default_factory=lambda: np.empty(0, dtype=int))
 	x_scaler: Any = None
 	y_scaler: Any = None
 	X_scaled: np.ndarray = field(default_factory=lambda: np.empty((0, 0), dtype=float))
@@ -41,11 +41,6 @@ class PreparedData:
 	X_raw: np.ndarray = field(default_factory=lambda: np.empty((0, 0), dtype=float))
 	y_raw: np.ndarray = field(default_factory=lambda: np.empty((0, 0), dtype=float))
 	base_mask: Optional[np.ndarray] = None
-	causes: List[str] = field(default_factory=list)
-	tested_causes: List[str] = field(default_factory=list)
-	effects: List[str] = field(default_factory=list)
-	predictor_slices: dict[str, slice] = field(default_factory=dict)
-	removed_variable_info: dict[str, dict[str, Any]] = field(default_factory=dict)
 	requested_roles: VariableRoles = field(
 		default_factory=lambda: VariableRoles((), (), ())
 	)
@@ -53,19 +48,41 @@ class PreparedData:
 		default_factory=lambda: VariableRoles((), (), ())
 	)
 	cause_slices: dict[str, slice] = field(default_factory=dict)
-	tested_cause_slices: dict[str, slice] = field(default_factory=dict)
 	removed_variables: dict[str, RemovedVariable] = field(default_factory=dict)
 	sample_indices: np.ndarray = field(
 		default_factory=lambda: np.empty(0, dtype=int)
 	)
 
+	@property
+	def causes(self) -> tuple[str, ...]:
+		return self.effective_roles.causes
+
+	@property
+	def effects(self) -> tuple[str, ...]:
+		return self.effective_roles.effects
+
+	@property
+	def tested_causes(self) -> tuple[str, ...]:
+		return self.effective_roles.tested_causes
+
+	@property
+	def tested_cause_slices(self) -> dict[str, slice]:
+		return {
+			name: self.cause_slices[name]
+			for name in self.effective_roles.tested_causes
+		}
+
+	@property
+	def predictor_slices(self) -> dict[str, slice]:
+		"""Compatibility alias; prefer cause_slices."""
+		return dict(self.cause_slices)
+
 	@classmethod
 	def empty(cls) -> "PreparedData":
 		"""Create an empty stage container that can be filled progressively."""
 		return cls(
-			stationarity_transformer=None,
+			stationarity_transformer=_DEFAULT_STATIONARITY,
 			lag_engine=None,
-			col_offsets=np.empty(0, dtype=int),
 			x_scaler=None,
 			y_scaler=None,
 			X_scaled=np.empty((0, 0), dtype=float),
@@ -73,15 +90,9 @@ class PreparedData:
 			X_raw=np.empty((0, 0), dtype=float),
 			y_raw=np.empty((0, 0), dtype=float),
 			base_mask=None,
-			causes=[],
-			tested_causes=[],
-			effects=[],
-			predictor_slices={},
-			removed_variable_info={},
 			requested_roles=VariableRoles((), (), ()),
 			effective_roles=VariableRoles((), (), ()),
 			cause_slices={},
-			tested_cause_slices={},
 			removed_variables={},
 			sample_indices=np.empty(0, dtype=int),
 		)
@@ -96,7 +107,7 @@ def prepare_data(
 		lag_selector: Optional[BaseLagSelector] = None,
 		stationarity_transformer: Optional[StationarityTransformer] = None,
 		missing_value_imputer: Optional[BaseImputer] = None,
-		schema_policy: str = "error",
+		schema_policy: str = "union",
 		backend_sample_fraction: float = 1.0,
 		backend_max_samples: Optional[int] = None,
 		random_state: Optional[int] = None,
@@ -105,6 +116,12 @@ def prepare_data(
 		y_scaler: Optional[Any] = "standard",
 ) -> PreparedData:
 	from .pipeline import DataPreparer, DataPreparationConfig
+
+	if stationarity_transformer is _DEFAULT_STATIONARITY:
+		stationarity_transformer = StationarityTransformer()
+
+	if sampling_strategy is None:
+		sampling_strategy = NoSampling()
 
 	config = DataPreparationConfig(
 		schema_policy=schema_policy,

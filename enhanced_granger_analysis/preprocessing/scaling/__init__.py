@@ -5,9 +5,9 @@ from .scalers import (
     RobustScaler,
     StandardScaler,
     _BaseScaler,
-    register_scaler,
-    resolve_scaler,
 )
+from .registy import register_scaler, resolve_scaler
+from .block_scalers import BlockScaler
 
 __all__ = [
     "StandardScaler",
@@ -16,6 +16,7 @@ __all__ = [
     "MaxAbsScaler",
     "IdentityScaler",
     "_BaseScaler",
+    "BlockScaler",
     "register_scaler",
     "resolve_scaler",
 ]

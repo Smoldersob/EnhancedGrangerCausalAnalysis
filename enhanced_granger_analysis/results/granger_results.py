@@ -8,14 +8,14 @@ from __future__ import annotations
 
 from collections.abc import Callable
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING, Any, Iterable, Literal, Optional
+from typing import TYPE_CHECKING, Any, Iterable, Literal, Optional, Mapping
 
 import numpy as np
 import pandas as pd
 from numpy.typing import NDArray
 
 if TYPE_CHECKING:
-	from ..preprocessing.prepare_data import PreparedData
+	from ..preprocessing.prepare_data import PreparedData, RemovedVariable, VariableRoles
 
 from .causality_matrix import CausalityMatrix
 from .restoration import restore_removed_matrix
@@ -82,14 +82,23 @@ class PreparationContext:
 		return self.prepared_data.y_scaler
 
 	@property
-	def removed_variables(self) -> dict[str, dict[str, Any]]:
-		"""Return the bookkeeping for variables removed during preprocessing.
+	def removed_variables(self) -> dict[str, RemovedVariable]:
+		"""Return typed metadata for variables removed during preparation."""
+		return self.prepared_data.removed_variables
 
-		Returns: Dictionary keyed by removed variable name and containing the
-		corresponding restoration metadata.
+	@property
+	def requested_roles(self) -> VariableRoles:
 		"""
-		return self.prepared_data.removed_variable_info
+		Return the variable roles requested by the user.
+		"""
+		return self.prepared_data.requested_roles
 
+	@property
+	def effective_roles(self) -> VariableRoles:
+		"""
+		Return the variable roles actually used by the analysis after preprocessing.
+		"""
+		return self.prepared_data.effective_roles
 
 class GrangerAnalysisResults:
 	"""
@@ -105,7 +114,7 @@ class GrangerAnalysisResults:
 		effects: Optional[Iterable[str]] = None,
 		causes: Optional[Iterable[str]] = None,
 		mask: Optional[NDArray[np.int64]] = None,
-		col_offsets: Optional[NDArray[np.int_]] = None,
+		cause_slices: Optional[Mapping[str, slice]] = None,
 		y_true: Optional[NDArray[np.float64]] = None,
 		X_true: Optional[NDArray[np.float64]] = None,
 	) -> None:
@@ -115,8 +124,7 @@ class GrangerAnalysisResults:
 			effects: Names of the response variables being evaluated.
 			causes: Names of the candidate causal drivers being tested.
 			mask: Boolean mask describing which coefficient slots are active.
-			col_offsets: Offsets delimiting each cause block within the feature
-				matrix.
+			cause_slices: Mapping from cause name to the corresponding slice in the feature matrix.
 			y_true: Observed response matrix used to compute residual sums of
 				squares.
 			X_true: Original explanatory data matrix used as a fallback source
@@ -125,7 +133,7 @@ class GrangerAnalysisResults:
 		self.effects = list(effects or [])
 		self.causes = list(causes or [])
 		self.mask = np.asarray(mask, dtype=bool) if mask is not None else np.empty((0, 0), dtype=bool)
-		self.col_offsets = np.asarray(col_offsets, dtype=np.int_) if col_offsets is not None else np.asarray([], dtype=np.int_)
+		self.cause_slices = dict(cause_slices or {})
 		self.y_true = ensure_2d(np.asarray(y_true, dtype=np.float64)) if y_true is not None else np.empty((0, 0), dtype=np.float64)
 		self.X_true = ensure_2d(np.asarray(X_true, dtype=np.float64)) if X_true is not None else np.empty((0, 0), dtype=np.float64)
 		self.dof_method: DofMethod = "structural"
@@ -348,13 +356,15 @@ class GrangerAnalysisResults:
 		if self.mask.size == 0:
 			return np.zeros(len(self.effects), dtype=np.int_)
 		cause_index = self.causes.index(cause)
-		if cause_index >= len(self.col_offsets) - 1:
+		if cause_index >= len(self.cause_slices) - 1:
 			return np.zeros(len(self.effects), dtype=np.int_)
-		start = int(self.col_offsets[cause_index])
-		end = int(self.col_offsets[cause_index + 1])
-		mask_block = self.mask[:, start:end]
+		block = self.cause_slices[cause]
+		mask_block = self.mask[:, block]
 		if self.dof_method == "active_support" and self.base_snapshot is not None and self.base_snapshot.weights is not None:
-			weight_block = np.abs(self._weights_as_feature_output(self.base_snapshot.weights)[:, start:end])
+			weights = self._weights_as_feature_output(
+				self.base_snapshot.weights
+			)
+			weight_block = np.abs(weights[:, block])
 			mask_block = mask_block & (weight_block > 0.0)
 		return np.asarray(mask_block.sum(axis=1), dtype=np.int_)
 
@@ -477,8 +487,8 @@ class GrangerAnalysisResults:
 				result = CausalityMatrix(
 					data=restore_removed_matrix(
 						result,
-						effects=self.effects,
-						causes=self.causes,
+						effects=self.preparation_context.requested_roles.effects,
+						causes=self.preparation_context.requested_roles.tested_causes,
 						removed_variables=self.preparation_context.removed_variables,
 					),
 					name=result.name,
@@ -524,12 +534,10 @@ class GrangerAnalysisResults:
 		weights_matrix = self._weights_as_feature_output(self.base_snapshot.weights)
 		sign_values = np.zeros((len(self.effects), len(self.causes)), dtype=np.float64)
 		for cause_index, cause in enumerate(self.causes):
-			if cause_index >= len(self.col_offsets) - 1:
-				continue
-			start = int(self.col_offsets[cause_index])
-			end = int(self.col_offsets[cause_index + 1])
-			block = weights_matrix[:, start:end]
-			sum_coefficients = block.sum(axis=1)
+			block = self.cause_slices[cause]
+			coefficients = weights_matrix[:, block]
+
+			sum_coefficients = coefficients.sum(axis=1)
 			sign_values[:, cause_index] = np.sign(sum_coefficients)
 			sign_values[np.abs(sum_coefficients) < 1e-12, cause_index] = 1.0
 		return pd.DataFrame(sign_values, index=self.effects, columns=self.causes)

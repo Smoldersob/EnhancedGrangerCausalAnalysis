@@ -2,7 +2,10 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+import copy
+import warnings
+
+from dataclasses import dataclass, field
 from typing import Any, Optional, Sequence
 
 import numpy as np
@@ -12,10 +15,11 @@ from ..core.exceptions import DataValidationError
 from .lag import BaseLagSelector, LagConfiguration, LagEngine
 from .missing import BaseImputer
 from .prepare_data import PreparedData, RemovedVariable, VariableRoles
-from .sampling import NoSampling, RandomSampling, SamplingStrategy
-from .scaling.scalers import resolve_scaler
+from .sampling import NoSampling, SamplingStrategy
+from .scaling import resolve_scaler, BlockScaler
 from .stationarity import StationarityTransformer
 
+_UNSET = object()
 
 @dataclass(frozen=True)
 class DataPreparationConfig:
@@ -31,8 +35,9 @@ class DataPreparationConfig:
     lag_selector: Optional[BaseLagSelector] = None
     stationarity_transformer: Optional[StationarityTransformer] = None
     missing_value_imputer: Optional[BaseImputer] = None
-    sampling_strategy: Optional[SamplingStrategy] = None
-
+    sampling_strategy: Optional[SamplingStrategy] = field(
+        default_factory=NoSampling
+    )
 
 def _to_dataframe_list(data: pd.DataFrame | Sequence[pd.DataFrame]) -> list[pd.DataFrame]:
     if isinstance(data, pd.DataFrame):
@@ -59,6 +64,8 @@ class DataPreparer:
         self.config = config or DataPreparationConfig(**config_overrides)
         self.data_list: Optional[list[pd.DataFrame]] = None
         self.prepared_data_: Optional[PreparedData] = PreparedData.empty()
+        self._roles_assigned = False
+        self._redundancy_removed = False
 
     @property
     def effective_roles(self) -> VariableRoles:
@@ -67,17 +74,26 @@ class DataPreparer:
     @property
     def requested_roles(self) -> VariableRoles:
         return self.prepared_data_.requested_roles
-
-    @property
-    def effects(self) -> list[str]:
-        return self.prepared_data_.effects
         
     def set_data(
         self,
         data: pd.DataFrame | Sequence[pd.DataFrame],
     ) -> "DataPreparer":
-        self.data_list = _to_dataframe_list(data)
+        data_list = _to_dataframe_list(data)
+        if not data_list:
+            raise DataValidationError("The input data list is empty.")
+
+        for index, dataframe in enumerate(data_list):
+            if dataframe.columns.duplicated().any():
+                raise DataValidationError(
+                    f"DataFrame at index {index} contains "
+                    "duplicated column names."
+                )
+
+        self.data_list = data_list
         self.prepared_data_ = PreparedData.empty()
+        self._roles_assigned = False
+        self._redundancy_removed = False
         return self
 
     def set_roles(
@@ -87,19 +103,87 @@ class DataPreparer:
         tested_causes: Optional[Sequence[str]] = None,
         effects: Optional[Sequence[str]] = None,
     ) -> "DataPreparer":
-        request_causes = tuple(causes) if causes is not None else ()
-        request_tested = tuple(tested_causes) if tested_causes is not None else ()
-        request_effects = tuple(effects) if effects is not None else ()
-        self.prepared_data_.requested_roles = VariableRoles(
-            effects=request_effects,
-            causes=request_causes,
-            tested_causes=request_tested,
+        if self.data_list is None:
+            raise RuntimeError(
+                "set_data() must be called before set_roles()."
+            )
+        if self._redundancy_removed:
+            raise RuntimeError(
+                "Roles cannot be reassigned after remove_redundant(). "
+                "Start again with set_data()."
+            )
+        if self.prepared_data_.lag_engine is not None:
+            raise RuntimeError(
+                "Roles must be assigned before lag()."
+            )
+
+        columns = tuple(dict.fromkeys(
+            column
+            for dataframe in self.data_list
+            for column in dataframe.columns
+        ))
+        available = set(columns)
+
+        def normalize(values, default):
+            if values is None:
+                return tuple(default)
+            if isinstance(values, str):
+                values = (values,)
+            result = tuple(values)
+            return result if result else tuple(default)
+
+        cause_names = normalize(causes, columns)
+        effect_names = normalize(effects, columns)
+        tested_names = normalize(tested_causes, cause_names)
+
+        for role_name, names in (
+            ("causes", cause_names),
+            ("effects", effect_names),
+            ("tested_causes", tested_names),
+        ):
+            if len(names) != len(set(names)):
+                raise DataValidationError(
+                    f"{role_name} contains duplicated names."
+                )
+
+            unknown = [name for name in names if name not in available]
+            if unknown:
+                raise DataValidationError(
+                    f"Unknown variables in {role_name}: {unknown}"
+                )
+
+        cause_set = set(cause_names)
+        invalid_tested = [
+            name for name in tested_names if name not in cause_set
+        ]
+        if invalid_tested:
+            raise DataValidationError(
+                "tested_causes must be a subset of causes. "
+                f"Variables outside causes: {invalid_tested}"
+            )
+
+        external_effects = [
+            name for name in effect_names if name not in cause_set
+        ]
+        if external_effects:
+            warnings.warn(
+                "Some effects are not included in causes. "
+                "Their lagged values will not be model inputs: "
+                f"{external_effects}. This configuration is allowed.",
+                UserWarning,
+                stacklevel=2,
+            )
+
+        roles = VariableRoles(
+            effects=effect_names,
+            causes=cause_names,
+            tested_causes=tested_names,
         )
-        self.prepared_data_.effective_roles = VariableRoles(
-            effects=request_effects,
-            causes=request_causes,
-            tested_causes=request_tested,
-        )
+
+        self.prepared_data_.requested_roles = roles
+        self.prepared_data_.effective_roles = roles
+
+        self._roles_assigned = True
         return self
 
     def align(
@@ -126,46 +210,51 @@ class DataPreparer:
         self.data_list = aligned_data
         return self
 
-    def imput(self, imputer: Optional[BaseImputer] = None) -> "DataPreparer":
+    def imput(self, imputer: Any = _UNSET) -> "DataPreparer":
         if self.data_list is None:
-            raise RuntimeError("DataPreparer.set_data() must be called before imput().")
-        imputer = self.config.missing_value_imputer if imputer is None else imputer
-        imputed_data = [df.copy() for df in self.data_list]
-        if imputer is not None:
-            imputed_data = imputer.fit_transform(imputed_data)
-        self.data_list = [df.copy() for df in imputed_data]
+            raise RuntimeError("set_data() must be called before imput().")
+        if self.prepared_data_.lag_engine is not None:
+            raise RuntimeError("imput() must be called before lag().")
+
+        effective = (
+            self.config.missing_value_imputer
+            if imputer is _UNSET
+            else imputer
+        )
+        result = [df.copy() for df in self.data_list]
+        if effective is not None:
+            result = effective.fit_transform(result)
+
+        self.data_list = [df.copy() for df in result]
         return self
 
-    def remove_redundant(
-        self,
-        *,
-        causes: Optional[Sequence[str]] = None,
-        tested_causes: Optional[Sequence[str]] = None,
-        effects: Optional[Sequence[str]] = None,
-    ) -> "DataPreparer":
+    def remove_redundant(self) -> "DataPreparer":
         if self.data_list is None:
-            raise RuntimeError("DataPreparer.set_data() must be called before remove_redundant().")
+            raise RuntimeError(
+                "set_data() must be called before remove_redundant()."
+            )
+        if not self._roles_assigned:
+            raise RuntimeError(
+                "set_roles() must be called before remove_redundant()."
+            )
+        if self.prepared_data_.lag_engine is not None:
+            raise RuntimeError(
+                "remove_redundant() must be called before lag()."
+            )
+        if self._redundancy_removed:
+            return self
 
-        if causes is not None:
-            self.prepared_data_.effective_roles = VariableRoles(
-                effects= self.prepared_data_.effective_roles.effects,
-                causes=tuple(causes),
-                tested_causes=self.prepared_data_.effective_roles.tested_causes,
-            )
-        if tested_causes is not None:
-            self.prepared_data_.effective_roles = VariableRoles(
-                effects=self.prepared_data_.effective_roles.effects,
-                causes=self.prepared_data_.effective_roles.causes,
-                tested_causes=tuple(tested_causes),
-            )
-        if effects is not None:
-            self.prepared_data_.effective_roles  = VariableRoles(
-                effects=tuple(effects),
-                causes=self.prepared_data_.effective_roles.causes,
-                tested_causes=self.prepared_data_.effective_roles.tested_causes,
-            )
+        roles = self.prepared_data_.effective_roles
+        required_columns = list(dict.fromkeys(
+            (*roles.causes, *roles.effects)
+        ))
 
-        data_list = [df.copy() for df in self.data_list]
+        # Select relevant columns before redundancy diagnostics and lagging.
+        data_list = [
+            dataframe.loc[:, required_columns].copy()
+            for dataframe in self.data_list
+        ]
+
         all_columns = list(dict.fromkeys(column for dataframe in data_list for column in dataframe.columns))
         aligned_data = [df.astype(float).copy() for df in data_list]
 
@@ -194,12 +283,9 @@ class DataPreparer:
 
         cleaned_data = [df.drop(columns=list(removed_columns), errors="ignore") for df in data_without_constants]
 
-        requested_causes = tuple(self.prepared_data_.requested_roles.causes) or tuple(all_columns)
-        requested_effects = tuple(self.prepared_data_.requested_roles.effects) or tuple(all_columns)
-        requested_tested = tuple(self.prepared_data_.requested_roles.tested_causes) or requested_causes
-        causes_list = list(requested_causes)
-        effects_list = list(requested_effects)
-        tested_causes_list = list(requested_tested)
+        causes_list = list(roles.causes)
+        effects_list = list(roles.effects)
+        tested_causes_list = list(roles.tested_causes)
 
         unknown_tested_role = [column for column in tested_causes_list if column not in causes_list]
         if unknown_tested_role:
@@ -248,7 +334,6 @@ class DataPreparer:
         tested_causes_list = [column for column in tested_causes_list if column not in removed_columns]
         effects_list = [column for column in effects_list if column not in removed_columns]
 
-        self.prepared_data_.removed_variable_info = removed_variable_info
         self.prepared_data_.removed_variables = {
             name: RemovedVariable(
                 name=name,
@@ -258,94 +343,231 @@ class DataPreparer:
             )
             for name, info in removed_variable_info.items()
         }
-        self.prepared_data_.effective_roles = VariableRoles(
+
+        effective = VariableRoles(
             effects=tuple(effects_list),
             causes=tuple(causes_list),
             tested_causes=tuple(tested_causes_list),
         )
-        self.data_list = [df.copy() for df in cleaned_data]
 
+        self.prepared_data_.effective_roles = effective
+
+        remaining_columns = list(dict.fromkeys(
+            (*effective.causes, *effective.effects)
+        ))
+        self.data_list = [
+            dataframe.loc[:, remaining_columns].copy()
+            for dataframe in cleaned_data
+        ]
+
+        self._redundancy_removed = True
         return self
-
+    
     def force_stationarity(
         self,
-        transformer: Optional[StationarityTransformer] = None,
+        transformer: Any = _UNSET,
     ) -> "DataPreparer":
         if self.data_list is None:
-            raise RuntimeError("DataPreparer.set_data() must be called before force_stationarity().")
-        transformer = self.config.stationarity_transformer if transformer is None else transformer
-        if transformer is None:
-            stationary_data = [df.copy() for df in self.data_list]
-        else:
-            stationary_data = transformer.fit_transform(self.data_list)
-        self.prepared_data_.stationarity_transformer = transformer
-        self.data_list = [df.copy() for df in stationary_data]
+            raise RuntimeError(
+                "set_data() must be called before force_stationarity()."
+            )
+        if self.prepared_data_.lag_engine is not None:
+            raise RuntimeError(
+                "force_stationarity() must be called before lag()."
+            )
+
+        effective = (
+            self.config.stationarity_transformer
+            if transformer is _UNSET
+            else transformer
+        )
+
+        result = (
+            [df.copy() for df in self.data_list]
+            if effective is None
+            else effective.fit_transform(self.data_list)
+        )
+
+        self.data_list = [df.copy() for df in result]
+        self.prepared_data_.stationarity_transformer = effective
         return self
 
     def scale(
         self,
         *,
-        x_scaler: Optional[Any] = None,
-        y_scaler: Optional[Any] = None,
+        x_scaler: Any = _UNSET,
+        y_scaler: Any = _UNSET,
     ) -> "DataPreparer":
-        self._x_scaler = self.config.x_scaler if x_scaler is None else x_scaler
-        self._y_scaler = self.config.y_scaler if y_scaler is None else y_scaler
-        if self.prepared_data_ is None or self.prepared_data_.lag_engine is None:
-            return self
-        x_scaler_obj = _create_scaler(self._x_scaler)
-        y_scaler_obj = _create_scaler(self._y_scaler)
-        self.prepared_data_.x_scaler = x_scaler_obj
-        self.prepared_data_.y_scaler = y_scaler_obj
-        self.prepared_data_.X_scaled = x_scaler_obj.fit_transform(
-            self.prepared_data_.X_raw
+        prepared = self.prepared_data_
+        if prepared.lag_engine is None:
+            raise RuntimeError("lag() must be called before scale().")
+
+        x_spec = self.config.x_scaler if x_scaler is _UNSET else x_scaler
+        y_spec = self.config.y_scaler if y_scaler is _UNSET else y_scaler
+
+        x_obj = copy.deepcopy(resolve_scaler(x_spec))
+        y_obj = copy.deepcopy(resolve_scaler(y_spec))
+
+        X_scaled = x_obj.fit_transform(prepared.X_raw)
+        y_scaled = y_obj.fit_transform(prepared.y_raw)
+
+        prepared.x_scaler = x_obj
+        prepared.y_scaler = y_obj
+        prepared.X_scaled = X_scaled
+        prepared.y_scaled = y_scaled
+        return self
+
+    def block_scale(
+        self,
+        *,
+        x_scaler: Any = _UNSET,
+        y_scaler: Any = _UNSET,
+    ) -> "DataPreparer":
+        prepared = self.prepared_data_
+        if prepared.lag_engine is None:
+            raise RuntimeError(
+                "lag() must be called before block_scale()."
+            )
+
+        x_spec = self.config.x_scaler if x_scaler is _UNSET else x_scaler
+        y_spec = self.config.y_scaler if y_scaler is _UNSET else y_scaler
+
+        x_obj = BlockScaler(
+            blocks=prepared.cause_slices,
+            scaler=x_spec,
         )
-        self.prepared_data_.y_scaled = y_scaler_obj.fit_transform(
-            self.prepared_data_.y_raw
-        )
+        y_obj = copy.deepcopy(resolve_scaler(y_spec))
+        y_obj = copy.deepcopy(resolve_scaler(y_spec))
+
+        X_scaled = x_obj.fit_transform(prepared.X_raw)
+        y_scaled = y_obj.fit_transform(prepared.y_raw)
+
+        prepared.x_scaler = x_obj
+        prepared.y_scaler = y_obj
+        prepared.X_scaled = X_scaled
+        prepared.y_scaled = y_scaled
         return self
 
     def reduce_workload(
         self,
         *,
-        backend_sample_fraction: Optional[float] = None,
-        backend_max_samples: Optional[int] = None,
-        random_state: Optional[int] = None,
-        sampling_strategy: Optional[SamplingStrategy] = NoSampling(),
+        backend_sample_fraction: Any = _UNSET,
+        backend_max_samples: Any = _UNSET,
+        random_state: Any = _UNSET,
+        sampling_strategy: Any = _UNSET,
     ) -> "DataPreparer":
-        backend_sample_fraction = self.config.backend_sample_fraction if backend_sample_fraction is None else backend_sample_fraction
-        backend_max_samples = self.config.backend_max_samples if backend_max_samples is None else backend_max_samples
-        random_state = self.config.random_state if random_state is None else random_state
-        sampling_strategy = self.config.sampling_strategy if sampling_strategy is None else sampling_strategy
+        prepared = self.prepared_data_
+        if prepared.lag_engine is None:
+            raise RuntimeError(
+                "lag() must be called before reduce_workload()."
+            )
 
-        if not 0 < backend_sample_fraction <= 1:
-            raise DataValidationError("backend_sample_fraction must be in the interval (0, 1].")
-        if backend_max_samples is not None and backend_max_samples <= 0:
-            raise DataValidationError("backend_max_samples must be positive.")
-        if random_state is not None and not isinstance(random_state, (int, np.integer)):
-            raise DataValidationError("random_state must be an integer or None.")
-        if self.prepared_data_ is None or self.prepared_data_.lag_engine is None:
+        fraction = (
+            self.config.backend_sample_fraction
+            if backend_sample_fraction is _UNSET
+            else backend_sample_fraction
+        )
+        maximum = (
+            self.config.backend_max_samples
+            if backend_max_samples is _UNSET
+            else backend_max_samples
+        )
+        seed = (
+            self.config.random_state
+            if random_state is _UNSET
+            else random_state
+        )
+        strategy = (
+            self.config.sampling_strategy
+            if sampling_strategy is _UNSET
+            else sampling_strategy
+        )
+        if strategy is None:
+            strategy = NoSampling()
+
+        if not isinstance(strategy, SamplingStrategy):
+            raise TypeError(
+                "sampling_strategy must be a SamplingStrategy or None."
+            )
+        if (
+            isinstance(fraction, (bool, np.bool_))
+            or not isinstance(fraction, (int, float, np.number))
+            or not 0 < fraction <= 1
+        ):
+            raise DataValidationError(
+                "backend_sample_fraction must be in (0, 1]."
+            )
+        if maximum is not None and (
+            isinstance(maximum, (bool, np.bool_))
+            or not isinstance(maximum, (int, np.integer))
+            or maximum <= 0
+        ):
+            raise DataValidationError(
+                "backend_max_samples must be a positive integer or None."
+            )
+        if seed is not None and (
+            isinstance(seed, (bool, np.bool_))
+            or not isinstance(seed, (int, np.integer))
+            or seed < 0
+        ):
+            raise DataValidationError(
+                "random_state must be a non-negative integer or None."
+            )
+
+        n = prepared.X_raw.shape[0]
+        fields = ["X_raw", "y_raw"]
+        if prepared.x_scaler is not None:
+            fields.append("X_scaled")
+        if prepared.y_scaler is not None:
+            fields.append("y_scaled")
+
+        for name in fields:
+            if getattr(prepared, name).shape[0] != n:
+                raise DataValidationError(
+                    f"{name} is not aligned with the prepared data."
+                )
+
+        source = prepared.sample_indices
+        if source.shape != (n,):
+            raise DataValidationError(
+                "sample_indices is not aligned with the prepared data."
+            )
+
+        if n == 0:
             return self
-        if not isinstance(self.prepared_data_.X_raw, np.ndarray) or not isinstance(self.prepared_data_.y_raw, np.ndarray):
-            raise TypeError("X_raw and y_raw must be numpy arrays")
-        if self.prepared_data_.X_raw.size == 0 or self.prepared_data_.y_raw.size == 0:
-            self.prepared_data_.sample_indices = np.empty(0, dtype=int)
-            return self
-        
-        n = self.prepared_data_.X_raw.shape[0]
-        n_keep = max(1, int(np.floor(backend_sample_fraction * n)))
-        if backend_max_samples is not None:
-            n_keep = min(n_keep, backend_max_samples)
-        strategy = sampling_strategy or self.config.sampling_strategy or RandomSampling()
-        idx = strategy.select(
+
+        n_keep = max(1, int(np.floor(fraction * n)))
+        if maximum is not None:
+            n_keep = min(n_keep, int(maximum))
+
+        indices = np.asarray(strategy.select(
             n,
             n_keep=n_keep,
-            random_state=np.random.default_rng(random_state),
-        )
-        self.prepared_data_.sample_indices = idx
+            random_state=np.random.default_rng(seed),
+        ))
 
-        self.prepared_data_.X_raw = self.prepared_data_.X_raw[idx]
-        self.prepared_data_.y_raw = self.prepared_data_.y_raw[idx]
+        if (
+            indices.ndim != 1
+            or indices.dtype.kind not in {"i", "u"}
+            or indices.size == 0
+        ):
+            raise DataValidationError(
+                "Sampling must return a non-empty 1D integer index array."
+            )
+        if (
+            np.any(indices >= n)
+            or (indices.dtype.kind == "i" and np.any(indices < 0))
+            or np.any(indices[1:] <= indices[:-1])
+        ):
+            raise DataValidationError(
+                "Sampling indices must be valid, unique and increasing."
+            )
 
+        indices = indices.astype(np.intp, copy=False)
+        for name in fields:
+            setattr(prepared, name, getattr(prepared, name)[indices])
+
+        prepared.sample_indices = source[indices].copy()
         return self
 
     def lag(
@@ -355,89 +577,109 @@ class DataPreparer:
         lag_selector: Optional[BaseLagSelector] = None,
     ) -> 'DataPreparer':
         if self.data_list is None:
-            raise RuntimeError("DataPreparer.set_data() must be called before lag().")
+            raise RuntimeError("set_data() must be called before lag().")
+        if not self._roles_assigned:
+            raise RuntimeError("set_roles() must be called before lag().")
 
-        data_list = [df.copy() for df in self.data_list]
-        if not self.prepared_data_.effective_roles.causes and not self.prepared_data_.effective_roles.effects and not self.prepared_data_.effective_roles.tested_causes:
-            all_columns = data_list[0].columns.tolist()
-            
-            self.prepared_data_.effective_roles = VariableRoles(
-                effects=tuple(all_columns),
-                causes=tuple(all_columns),
-                tested_causes=tuple(all_columns),
+        prepared = self.prepared_data_
+        roles = prepared.effective_roles
+
+        for role_name in ("effects", "tested_causes", "causes"):
+            if not getattr(roles, role_name):
+                suffix = (
+                    " After remove_redundant(), this can mean that "
+                    "no variables remain for the requested causal analysis; "
+                    "it is not a statistical conclusion about causality."
+                    if self._redundancy_removed
+                    else ""
+                )
+                raise DataValidationError(
+                    f"No effective {role_name} remain." + suffix
+                )
+
+        if not set(roles.tested_causes).issubset(roles.causes):
+            raise DataValidationError(
+                "Effective tested_causes must be a subset of causes."
             )
-
-        if not self.prepared_data_.effective_roles.effects:
-            causes_list = list(self.prepared_data_.effective_roles.causes)
-            effects_list = list(self.prepared_data_.effective_roles.effects) or list(self.data_list[0].columns)
-            tested_causes_list = list(self.prepared_data_.effective_roles.tested_causes) or causes_list
-            self.prepared_data_.effective_roles = VariableRoles(
-                effects=tuple(effects_list),
-                causes=tuple(causes_list),
-                tested_causes=tuple(tested_causes_list),
-            )
-
+        
         engine = LagEngine(
-            config=lag_config or self.config.lag_config or LagConfiguration(),
-            selector=lag_selector or self.config.lag_selector,
+            config=(
+                lag_config
+                if lag_config is not None
+                else self.config.lag_config or LagConfiguration()
+            ),
+            selector=(
+                lag_selector
+                if lag_selector is not None
+                else self.config.lag_selector
+            ),
         )
         
-        X_raw, y_raw, col_offsets = engine.prepare(data_list, effects=list(self.prepared_data_.effective_roles.effects))
+        X_raw, y_raw, block_boundaries = engine.prepare(
+            self.data_list,
+            causes=list(roles.causes),
+            effects=list(roles.effects),
+        )
 
-        all_columns = data_list[0].columns.tolist()
-        base_mask = None
-        if engine.mask_ is not None:
-            mask_arr = np.asarray(engine.mask_, dtype=np.float64)
-            if mask_arr.shape[0] == len(self.prepared_data_.effective_roles.effects):
-                base_mask = mask_arr
-            else:
-                effect_indices = [
-                    all_columns.index(effect_name)
-                    for effect_name in self.prepared_data_.effective_roles.effects
-                ]
-                base_mask = mask_arr[effect_indices, :]
+        if X_raw.shape[0] == 0 or y_raw.shape[0] == 0:
+                raise DataValidationError(
+                    "No observations remain after lag preparation."
+                )
 
-        predictor_slices = {
-            column: slice(int(col_offsets[index]), int(col_offsets[index + 1]))
-            for index, column in enumerate(all_columns)
+        cause_slices = {
+            name: slice(int(start), int(stop))
+            for name, start, stop in zip(
+                roles.causes,
+                block_boundaries[:-1],
+                block_boundaries[1:],
+            )
         }
-        self.prepared_data_.base_mask = base_mask
+
         self.prepared_data_.lag_engine = engine
-        self.prepared_data_.col_offsets = col_offsets
+        self.prepared_data_.base_mask = np.asarray(
+            engine.mask_, dtype=np.float64
+        ).copy()
+
         self.prepared_data_.X_raw = X_raw
         self.prepared_data_.y_raw = y_raw
-        self.prepared_data_.causes = list(self.prepared_data_.effective_roles.causes)
-        self.prepared_data_.tested_causes = list(
-            self.prepared_data_.effective_roles.tested_causes
-        )
-        self.prepared_data_.effects = list(self.prepared_data_.effective_roles.effects)
-        self.prepared_data_.predictor_slices = {
-            cause: predictor_slices[cause]
-            for cause in self.prepared_data_.effective_roles.causes
-        }
         self.prepared_data_.cause_slices = {
-            cause: predictor_slices[cause]
+            cause: cause_slices[cause]
             for cause in self.prepared_data_.effective_roles.causes
         }
-        self.prepared_data_.tested_cause_slices = {
-            cause: predictor_slices[cause]
-            for cause in self.prepared_data_.effective_roles.tested_causes
-        }
+
+        self.prepared_data_.sample_indices = np.arange(X_raw.shape[0], dtype=int)
+        self.prepared_data_.x_scaler = None
+        self.prepared_data_.y_scaler = None
+        self.prepared_data_.X_scaled = np.empty((0, X_raw.shape[1]), dtype=float)
+        self.prepared_data_.y_scaled = np.empty((0, y_raw.shape[1]), dtype=float)
         return self
 
     def fit(
-        self,
+    self,
         data: pd.DataFrame | Sequence[pd.DataFrame],
         roles: Optional[VariableRoles] = None,
     ) -> "DataPreparer":
         self.set_data(data)
-        if roles is not None:
+
+        if roles is None:
+            self.set_roles()
+        else:
             self.set_roles(
                 causes=roles.causes,
                 tested_causes=roles.tested_causes,
                 effects=roles.effects,
             )
-        self.align().imput().remove_redundant().force_stationarity().lag().reduce_workload().scale()
+
+        (
+            self
+            .align()
+            .imput()
+            .remove_redundant()
+            .force_stationarity()
+            .lag()
+            .scale()
+            .reduce_workload()
+        )
         return self
     
     def get_feature_map(self) -> dict[str, slice]:

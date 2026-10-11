@@ -7,13 +7,22 @@ time series data represented as 2D arrays: ``(n_samples, n_features)``.
 
 from __future__ import annotations
 
-from typing import Any, Callable, Optional, Tuple
+from typing import Optional, Tuple
 
 import numpy as np
 from numpy.typing import NDArray
 
+from .registy import register_scaler
 from ...core.exceptions import DataShapeError, InvalidFeatureRangeError, ScalerNotFittedError
 
+def _as_2d_float64(data: NDArray[np.float64]) -> NDArray[np.float64]:
+	"""Return a float64 2D array copy suitable for numerical scaling."""
+	arr = np.asarray(data, dtype=np.float64)
+	if arr.ndim != 2:
+		raise DataShapeError(
+			f"Expected 2D array of shape (n_samples, n_features), got ndim={arr.ndim}"
+		)
+	return arr.copy()
 
 class _BaseScaler:
 	"""Shared fit-state handling for concrete scalers."""
@@ -33,78 +42,6 @@ class _BaseScaler:
 	def _ensure_fitted(self) -> None:
 		if not self._fitted:
 			raise ScalerNotFittedError("Scaler is not fitted. Call fit first.")
-
-_SCALERS: dict[str, _BaseScaler] = {}
-
-
-def register_scaler(*names: str):
-    """Register aliases used by DataPreparer to resolve scaler objects."""
-    def decorator(func:_BaseScaler) -> _BaseScaler:
-        for name in names:
-            normalized = name.strip().lower()
-            if normalized in _SCALERS:
-                raise ValueError(f"Scaler '{normalized}' is already registered.")
-            _SCALERS[normalized] = func
-        return func
-
-    return decorator
-
-
-def resolve_scaler(name: Optional[Any]) -> Any:
-    """Resolve a scaler alias or accept a scaler instance/object."""
-    if name is None:
-        return IdentityScaler()
-
-    if isinstance(name, str):
-        normalized = name.strip().lower()
-        try:
-            return _SCALERS[normalized]()
-        except KeyError as exc:
-            available = ", ".join(sorted(_SCALERS))
-            raise ValueError(f"Unsupported scaler: {name}. Available scalers: {available}") from exc
-
-    if isinstance(name, type) and issubclass(name, _BaseScaler):
-        return name()
-    if isinstance(name, _BaseScaler):
-        return name
-    if all(hasattr(name, attr) and callable(getattr(name, attr)) for attr in ("fit_transform", "transform", "inverse_transform")):
-        return name
-    raise ValueError(f"Unsupported scaler: {name}")
-
-
-def _as_2d_float64(data: NDArray[np.float64]) -> NDArray[np.float64]:
-	"""Return a float64 2D array copy suitable for numerical scaling."""
-	arr = np.asarray(data, dtype=np.float64)
-	if arr.ndim != 2:
-		raise DataShapeError(
-			f"Expected 2D array of shape (n_samples, n_features), got ndim={arr.ndim}"
-		)
-	return arr.copy()
-
-
-@register_scaler("standard", "zscore")
-def _standard_scaler_factory() -> "StandardScaler":
-    return StandardScaler()
-
-
-@register_scaler("minmax")
-def _min_max_scaler_factory() -> "MinMaxScaler":
-    return MinMaxScaler()
-
-
-@register_scaler("robust")
-def _robust_scaler_factory() -> "RobustScaler":
-    return RobustScaler()
-
-
-@register_scaler("maxabs", "max_abs")
-def _max_abs_scaler_factory() -> "MaxAbsScaler":
-    return MaxAbsScaler()
-
-
-@register_scaler("identity", "none")
-def _identity_scaler_factory() -> "IdentityScaler":
-    return IdentityScaler()
 
 
 class StandardScaler(_BaseScaler):
@@ -237,7 +174,7 @@ class MaxAbsScaler(_BaseScaler):
 		x = _as_2d_float64(data)
 		return x * self.max_abs_
 
-
+@register_scaler("identity", "none")
 class IdentityScaler(_BaseScaler):
 	"""No-op scaler useful for pipelines that require a scaler interface."""
 
@@ -257,4 +194,25 @@ class IdentityScaler(_BaseScaler):
 		self._ensure_fitted()
 		return _as_2d_float64(data)
 
+@register_scaler("standard", "zscore")
+def _standard_scaler_factory() -> "StandardScaler":
+	return StandardScaler()
 
+@register_scaler("minmax")
+def _min_max_scaler_factory() -> "MinMaxScaler":
+    return MinMaxScaler()
+
+
+@register_scaler("robust")
+def _robust_scaler_factory() -> "RobustScaler":
+    return RobustScaler()
+
+
+@register_scaler("maxabs", "max_abs")
+def _max_abs_scaler_factory() -> "MaxAbsScaler":
+    return MaxAbsScaler()
+
+
+@register_scaler("identity", "none")
+def _identity_scaler_factory() -> "IdentityScaler":
+    return IdentityScaler()

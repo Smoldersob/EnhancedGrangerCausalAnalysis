@@ -1,11 +1,15 @@
 from __future__ import annotations
 
-from typing import Any, Iterable
+from collections.abc import Iterable, Mapping
+from typing import TYPE_CHECKING
 
 import numpy as np
 import pandas as pd
 
 from .causality_matrix import CausalityMatrix
+
+if TYPE_CHECKING:
+    from ..preprocessing.prepare_data import RemovedVariable
 
 
 def restore_removed_matrix(
@@ -13,48 +17,72 @@ def restore_removed_matrix(
     *,
     effects: Iterable[str],
     causes: Iterable[str],
-    removed_variables: dict[str, dict[str, Any]],
+    removed_variables: Mapping[str, RemovedVariable],
 ) -> pd.DataFrame:
-    """Restore removed variables using the value declared by the metric."""
-    if not removed_variables:
-        return matrix.data.copy() if isinstance(matrix, CausalityMatrix) else matrix.copy()
+    """Restore requested axes using typed removal metadata.
 
-    frame = matrix.data if isinstance(matrix, CausalityMatrix) else matrix
-    metadata = matrix.metadata if isinstance(matrix, CausalityMatrix) else {}
+    effects:
+        Requested output variables, in their original order.
+    causes:
+        Requested tested causes, in their original order.
+    removed_variables:
+        Mapping of removed variable names to their removal metadata.
+    """
+    frame = (
+        matrix.data
+        if isinstance(matrix, CausalityMatrix)
+        else matrix
+    )
+    metadata = (
+        matrix.metadata
+        if isinstance(matrix, CausalityMatrix)
+        else {}
+    )
+
     missing_value = metadata.get("removed_signal_value", np.nan)
-    full_effects = list(dict.fromkeys(effects))
-    full_causes = list(dict.fromkeys(causes))
-    full_effects.extend(
-        name for name, info in removed_variables.items()
-        if "effect" in info.get("roles", []) and name not in full_effects
-    )
-    full_causes.extend(
-        name for name, info in removed_variables.items()
-        if "tested_cause" in info.get("roles", []) and name not in full_causes
-    )
+    full_effects = list(effects)
+    full_causes = list(causes)
 
-    result = pd.DataFrame(missing_value, index=full_effects, columns=full_causes, dtype=np.float64)
-    result.loc[frame.index.intersection(result.index), frame.columns.intersection(result.columns)] = frame.loc[
-        frame.index.intersection(result.index), frame.columns.intersection(result.columns)
-    ]
+    if len(full_effects) != len(set(full_effects)):
+        raise ValueError("Requested effects contain duplicated names.")
+    if len(full_causes) != len(set(full_causes)):
+        raise ValueError(
+            "Requested tested causes contain duplicated names."
+        )
+    if not frame.index.is_unique or not frame.columns.is_unique:
+        raise ValueError(
+            "The input matrix must have unique row and column names."
+        )
 
+    result = frame.reindex(
+        index=full_effects,
+        columns=full_causes,
+        fill_value=missing_value,
+    ).astype(np.float64)
+
+    # Restore duplicate effects from computed representative rows.
     for removed_name, info in removed_variables.items():
-        roles = info.get("roles", [])
-        retained = info.get("retained_column")
-        if info.get("reason") != "duplicate":
-            continue
-        if "effect" in roles and retained in result.index and removed_name in result.index:
-            result.loc[removed_name, :] = result.loc[retained, :].to_numpy(dtype=np.float64)
-        if "tested_cause" in roles and retained in result.columns and removed_name in result.columns:
-            result.loc[:, removed_name] = result.loc[:, retained].to_numpy(dtype=np.float64)
         if (
-            "effect" in roles
-            and "tested_cause" in roles
-            and retained in result.index
-            and retained in result.columns
+            info.reason == "duplicate"
+            and "effect" in info.removed_roles
             and removed_name in result.index
-            and removed_name in result.columns
+            and info.retained_variable in frame.index
         ):
-            result.loc[removed_name, removed_name] = result.loc[retained, retained]
+            result.loc[removed_name, :] = result.loc[
+                info.retained_variable, :
+            ].to_numpy(copy=True)
+
+    # Restore duplicate tested causes after restoring effect rows.
+    # A representative that was only an input has no computed test column.
+    for removed_name, info in removed_variables.items():
+        if (
+            info.reason == "duplicate"
+            and "tested_cause" in info.removed_roles
+            and removed_name in result.columns
+            and info.retained_variable in frame.columns
+        ):
+            result.loc[:, removed_name] = result.loc[
+                :, info.retained_variable
+            ].to_numpy(copy=True)
 
     return result
