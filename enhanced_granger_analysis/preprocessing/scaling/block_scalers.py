@@ -56,7 +56,7 @@ class BlockScaler:
                 "Blocks must cover every feature exactly once."
             )
 
-    def fit(self, data: NDArray[np.float64]) -> "_BlockScaler":
+    def fit(self, data: NDArray[np.float64]) -> "BlockScaler":
         import copy
 
         x = _as_2d_float64(data)
