@@ -13,6 +13,8 @@ from ...core.exceptions import (
     ModelNotFittedError,
     TrainingError,
 )
+from ..callbacks.keras_reset import clone_keras_callback
+from ..callbacks.reset_utils import reset_callback_list
 from .keras_device import DeviceManager
 
 if find_spec("keras") is not None:
@@ -614,81 +616,60 @@ class KerasGrangerModel(BaseGrangerModel):
             dtype=np.float32,
         )
 
-    def get_weights(self) -> List[NDArray[Any]]:
-        """Return coefficient weights only; exclude the feature mask."""
+    def get_weights(self) -> List[NDArray[np.float64]]:
         layer = self._get_coefficient_layer()
 
         return [
-            np.array(weight, copy=True)
-            for weight in layer.get_weights()
+            np.array(value, dtype=np.float64, copy=True)
+            for value in layer.get_weights()
         ]
 
     def set_weights(
-            self,
-            weights: Any|
-                NDArray[Any]|
-                List[NDArray[Any]]|
-                tuple[NDArray[Any],
-            ],
+        self,
+        weights: List[NDArray[np.float64]],
     ) -> None:
-        """Set coefficient weights only; preserve mask and optimizer state."""
         layer = self._get_coefficient_layer()
 
-        if isinstance(weights, np.ndarray):
-            supplied = [weights]
-        elif isinstance(weights, (list, tuple)):
-            supplied = list(weights)
-        else:
+        if not layer.use_bias:
             raise TrainingError(
-                "weights must be a kernel ndarray, [kernel], "
-                "or [kernel, bias]."
+                "This linear model's weight contract requires a bias."
             )
-
-        expected_count = 2 if layer.use_bias else 1
-
-        if len(supplied) not in {1, expected_count}:
-            description = (
-                "kernel or [kernel, bias]"
-                if layer.use_bias
-                else "kernel or [kernel]"
-            )
-            raise TrainingError(
-                f"Invalid number of weight arrays. Expected {description}."
-            )
-
-        variables = list(layer.weights)
-        proposed: List[NDArray[Any]] = []
-
-        # Validate all supplied arrays before modifying the layer.
-        for index, (value, variable) in enumerate(
-                zip(supplied, variables)
-        ):
-            try:
-                array = np.asarray(value)
-            except (TypeError, ValueError) as exc:
-                raise TrainingError(
-                    f"Weight {index} cannot be converted to an array."
-                ) from exc
-
-            expected_shape = tuple(variable.shape)
-            if array.shape != expected_shape:
-                raise TrainingError(
-                    f"Weight {index} has shape {array.shape}, "
-                    f"expected {expected_shape}."
-                )
-
-            proposed.append(array)
-
-        # Kernel-only updates preserve the current bias.
-        if layer.use_bias and len(proposed) == 1:
-            proposed.append(layer.get_weights()[1])
 
         try:
-            layer.set_weights(proposed)
+            validated = self._validated_weight_arrays(
+                weights,
+                [
+                    (self._n_features, self._n_outputs),
+                    (self._n_outputs,),
+                ],
+            )
         except (TypeError, ValueError) as exc:
-            raise TrainingError(
-                f"Cannot set coefficient weights: {exc}"
-            ) from exc
+            raise TrainingError(str(exc)) from exc
+
+        variables = list(layer.weights)
+        converted = []
+
+        for index, (array, variable) in enumerate(
+            zip(validated, variables)
+        ):
+            tensor = keras.ops.convert_to_tensor(
+                array,
+                dtype=variable.dtype,
+            )
+            value = np.array(
+                keras.ops.convert_to_numpy(tensor),
+                copy=True,
+            )
+
+            if not np.all(np.isfinite(value)):
+                raise TrainingError(
+                    f"Weight {index} is not finite "
+                    "in the model's numeric dtype."
+                )
+
+            converted.append(value)
+
+        layer.set_weights(converted)
 
     def omit_variables(self, variable_indices: List[int]) -> None:
         """Replace the omitted feature set without changing coefficients."""
@@ -735,284 +716,16 @@ class KerasGrangerModel(BaseGrangerModel):
         self._validate_keras_components()
 
     def reset_callbacks(
-            self,
-            run_name: Optional[str] = None,
-            callback_updates: Optional[
-                Mapping[Union[int, str, type], Mapping[str, Any]]
-            ] = None,
+        self,
+        run_name: str,
+        callback_updates: Optional[
+            Mapping[Union[int, str, type], Mapping[str, Any]]
+        ] = None,
     ) -> None:
-        """
-        Prepare callbacks for a new experiment without changing the model.
-
-        Built-in callbacks supported here are reconstructed using their current
-        configuration, discarding previous training state.
-
-        Custom callbacks must implement either:
-          - get_reset_config(): return constructor keyword arguments; or
-          - reset_state(): clear runtime state in place.
-
-        TensorBoard's original log_dir is remembered as its root directory.
-        An explicit log_dir update changes that root.
-        With run_name, output goes to <root>/<run_name>.
-
-        Call between fit() calls, not during training.
-        """
-        if self.model is None:
-            raise ModelNotFittedError(
-                "Model is not initialized. Call initialize(...) first."
-            )
-
-        self._validate_keras_components()
-
-        if run_name is not None:
-            if not isinstance(run_name, str) or not run_name.strip():
-                raise ConstraintConfigurationError(
-                    "run_name must be None or a non-empty string."
-                )
-            if (
-                    run_name in {".", ".."}
-                    or "/" in run_name
-                    or "\\" in run_name
-                    or "\x00" in run_name
-            ):
-                raise ConstraintConfigurationError(
-                    "run_name must be a single directory name."
-                )
-
-        if callback_updates is None:
-            callback_updates = {}
-        elif not isinstance(callback_updates, Mapping):
-            raise ConstraintConfigurationError(
-                "callback_updates must be a mapping or None."
-            )
-
-        # Resolve and validate all updates before changing any callback.
-        resolved_updates = [{} for _ in self.callbacks]
-
-        for selector, values in callback_updates.items():
-            if not isinstance(values, Mapping):
-                raise ConstraintConfigurationError(
-                    "Each callback_updates value must be a mapping."
-                )
-
-            for name in values:
-                if not isinstance(name, str) or name.startswith("_"):
-                    raise ConstraintConfigurationError(
-                        f"Invalid callback configuration key: {name!r}."
-                    )
-
-            matches = [
-                index
-                for index, callback in enumerate(self.callbacks)
-                if self._callback_matches(selector, callback, index)
-            ]
-
-            if not matches:
-                raise ConstraintConfigurationError(
-                    f"Callback selector {selector!r} matches no callback."
-                )
-
-            for index in matches:
-                resolved_updates[index].update(values)
-
-        # Records contain (callback instance, original TensorBoard root).
-        previous_roots = getattr(self, "_tensorboard_reset_roots", {})
-        next_roots = {}
-        fresh_callbacks = []
-        in_place_resets = []
-
-        for index, callback in enumerate(self.callbacks):
-            updates = resolved_updates[index]
-            config = self._callback_reset_config(callback)
-
-            if config is None:
-                # Custom callback with an explicit in-place reset protocol.
-                for name in updates:
-                    if not hasattr(callback, name):
-                        raise ConstraintConfigurationError(
-                            f"{type(callback).__name__} has no public "
-                            f"configuration attribute {name!r}."
-                        )
-
-                in_place_resets.append((callback, updates))
-                fresh_callbacks.append(callback)
-                continue
-
-            unknown = set(updates) - set(config)
-            if unknown:
-                raise ConstraintConfigurationError(
-                    f"Unsupported configuration updates for "
-                    f"{type(callback).__name__}: {sorted(unknown)}."
-                )
-
-            config.update(updates)
-
-            root = None
-            if isinstance(callback, keras.callbacks.TensorBoard):
-                record = previous_roots.get(index)
-
-                if "log_dir" in updates:
-                    root = os.fspath(updates["log_dir"])
-                elif record is not None and record[0] is callback:
-                    root = record[1]
-                else:
-                    root = os.fspath(callback.log_dir)
-
-                if run_name is not None:
-                    config["log_dir"] = os.path.join(root, run_name)
-
-            try:
-                fresh_callback = type(callback)(**config)
-            except Exception as exc:
-                raise ConstraintConfigurationError(
-                    f"Could not reconstruct {type(callback).__name__}. "
-                    "Check its configuration or implement "
-                    "get_reset_config() for a custom callback."
-                ) from exc
-
-            fresh_callbacks.append(fresh_callback)
-
-            if root is not None:
-                next_roots[index] = (fresh_callback, root)
-
-        # These callbacks explicitly opt into mutation.
-        # A failing custom reset_state() can partially mutate its callback.
-        for callback, updates in in_place_resets:
-            for name, value in updates.items():
-                setattr(callback, name, value)
-            callback.reset_state()
-
-        self.callbacks = fresh_callbacks
-        self._tensorboard_reset_roots = next_roots
-        self.model.stop_training = False
-
-    @staticmethod
-    def _callback_matches(
-            selector: Union[int, str, type],
-            callback: Any,
-            index: int,
-    ) -> bool:
-        """Match an index, exact class name, or callback type."""
-        if isinstance(selector, int) and not isinstance(selector, bool):
-            return selector == index
-
-        if isinstance(selector, str):
-            return selector == type(callback).__name__
-
-        if (
-                isinstance(selector, type)
-                and issubclass(selector, keras.callbacks.Callback)
-        ):
-            return isinstance(callback, selector)
-
-        raise ConstraintConfigurationError(
-            f"Invalid callback selector: {selector!r}. "
-            "Use an integer index, class name, or Keras callback type."
-        )
-
-    @staticmethod
-    def _callback_reset_config(
-            callback: Any,
-    ):
-        """
-        Return constructor configuration, or None for an in-place reset.
-
-        Exact type checks avoid reconstructing subclasses with incomplete
-        configuration. Subclasses should implement the custom reset protocol.
-        """
-        provider = getattr(callback, "get_reset_config", None)
-        if callable(provider):
-            config = provider()
-            if not isinstance(config, Mapping):
-                raise ConstraintConfigurationError(
-                    "get_reset_config() must return a mapping."
-                )
-
-            config = dict(config)
-            if any(
-                    not isinstance(name, str) or name.startswith("_")
-                    for name in config
-            ):
-                raise ConstraintConfigurationError(
-                    "get_reset_config() must contain public constructor "
-                    "argument names."
-                )
-            return config
-
-        callback_type = type(callback)
-
-        if callback_type is keras.callbacks.EarlyStopping:
-            return {
-                "monitor": callback.monitor,
-                "min_delta": abs(callback.min_delta),
-                "patience": callback.patience,
-                "verbose": callback.verbose,
-                "mode": callback.mode,
-                "baseline": callback.baseline,
-                "restore_best_weights": callback.restore_best_weights,
-                "start_from_epoch": callback.start_from_epoch,
-            }
-
-        if callback_type is keras.callbacks.ReduceLROnPlateau:
-            return {
-                "monitor": callback.monitor,
-                "factor": callback.factor,
-                "patience": callback.patience,
-                "verbose": callback.verbose,
-                "mode": callback.mode,
-                "min_delta": abs(callback.min_delta),
-                "cooldown": callback.cooldown,
-                "min_lr": callback.min_lr,
-            }
-
-        if callback_type is keras.callbacks.TensorBoard:
-            # Keras retains profile_batch as private start/stop settings.
-            # Read these settings; do not modify writer or counter internals.
-            if not (
-                    hasattr(callback, "_start_batch")
-                    and hasattr(callback, "_stop_batch")
-            ):
-                raise ConstraintConfigurationError(
-                    "Cannot recover TensorBoard profile_batch in this "
-                    "Keras version. Use a TensorBoard subclass implementing "
-                    "get_reset_config()."
-                )
-
-            start = callback._start_batch
-            stop = callback._stop_batch
-            profile_batch = 0 if start == 0 and stop == 0 else (start, stop)
-
-            return {
-                "log_dir": callback.log_dir,
-                "histogram_freq": callback.histogram_freq,
-                "write_graph": callback.write_graph,
-                "write_images": callback.write_images,
-                "write_steps_per_second": callback.write_steps_per_second,
-                "update_freq": callback.update_freq,
-                "profile_batch": profile_batch,
-                "embeddings_freq": callback.embeddings_freq,
-                "embeddings_metadata": callback.embeddings_metadata,
-            }
-
-        if callback_type is keras.callbacks.ModelCheckpoint:
-            return {
-                "filepath": callback.filepath,
-                "monitor": callback.monitor,
-                "verbose": callback.verbose,
-                "save_best_only": callback.save_best_only,
-                "save_weights_only": callback.save_weights_only,
-                "mode": callback.mode,
-                "save_freq": callback.save_freq,
-                # Do not use callback.best: it contains previous-run results.
-                # Supply a non-default threshold through callback_updates.
-                "initial_value_threshold": None,
-            }
-
-        if callable(getattr(callback, "reset_state", None)):
-            return None
-
-        raise ConstraintConfigurationError(
-            f"No safe reset implementation for {callback_type.__name__}. "
-            "Implement get_reset_config() to reconstruct it, or reset_state() "
-            "to clear its runtime state in place."
+        self.callbacks = reset_callback_list(
+            self.callbacks,
+            run_name,
+            callback_updates,
+            expected_type=keras.callbacks.Callback,
+            clone_callback=clone_keras_callback,
         )

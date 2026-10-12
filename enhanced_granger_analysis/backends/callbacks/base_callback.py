@@ -22,6 +22,15 @@ class Callback(ABC):
 		"""Called once after training ends."""
 
 	@abstractmethod
-	def clone_for_run(self, run_name: str) -> "Callback":
-		"""Create a clean callback for a new run; do not copy any state from previous runs."""
-	
+	def clone_for_run(
+		self,
+		run_name: str,
+		callback_updates: Optional[Mapping[str, Any]] = None,
+	) -> "Callback":
+		"""Return a clean callback for a new run.
+
+		Preserve configuration, then apply explicit updates.
+		Do not copy runtime state or modify the source callback.
+		Logging paths must be derived from a stable root.
+		"""
+		raise NotImplementedError

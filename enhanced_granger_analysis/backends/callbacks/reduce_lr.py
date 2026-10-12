@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from typing import Any, Dict
+from typing import Any, Dict, Optional, Mapping
 
 import numpy as np
 
@@ -66,14 +66,27 @@ class ReduceLearningRate(Callback):
 		self._num_bad_epochs = 0
 		return True
 
-	def clone_for_run(self, run_name: str) -> "ReduceLearningRate":
+	def clone_for_run(self, run_name: str, callback_updates: Optional[Mapping[str, Any]] = None) -> "ReduceLearningRate":
 		"""Create a clean callback; do not copy the best loss or stored weights."""
 		del run_name  # This callback has no run-specific destination.
 
+		if callback_updates:
+			patience = callback_updates.get("patience", self.patience)
+			factor = callback_updates.get("factor", self.factor)
+			min_lr = callback_updates.get("min_lr", self.min_lr)
+			min_delta = callback_updates.get("min_delta", self.min_delta)
+			monitor = callback_updates.get("monitor", self.monitor)
+		else:
+			patience = self.patience
+			factor = self.factor
+			min_lr = self.min_lr
+			min_delta = self.min_delta
+			monitor = self.monitor
+
 		return type(self)(
-			patience=self.patience,
-			factor=self.factor,
-			min_lr=self.min_lr,
-			min_delta=self.min_delta,
-			monitor=self.monitor,
+			patience=patience,
+			factor=factor,
+			min_lr=min_lr,
+			min_delta=min_delta,
+			monitor=monitor,
 		)

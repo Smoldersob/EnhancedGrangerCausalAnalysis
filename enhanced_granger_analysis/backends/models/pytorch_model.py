@@ -9,6 +9,10 @@ from numpy.typing import NDArray
 
 from .base_model import BaseGrangerModel
 from ..callbacks.base_callback import Callback
+from ..callbacks.reset_utils import (
+    clone_custom_callback,
+    reset_callback_list,
+)
 from ...core.exceptions import (
 	BackendNotAvailableError,
 	ConstraintConfigurationError,
@@ -413,7 +417,7 @@ class PyTorchGrangerModel(BaseGrangerModel):
 
 		self.model.eval()
 		with torch.no_grad():
-			forecasts_t = self.model(X_tensor)
+			forecasts_t = self.model(x_tensor)
 		forecasts = forecasts_t.detach().cpu().numpy()
 
 		self._fitted = True
@@ -450,65 +454,69 @@ class PyTorchGrangerModel(BaseGrangerModel):
 		return pred.detach().cpu().numpy().astype(np.float64)
 
 	def set_weights(
-		self, weights: NDArray[np.float64]|List[NDArray[np.float64]]
+		self,
+		weights: List[NDArray[np.float64]],
 	) -> None:
-		"""Set coefficient-layer weights (kernel or kernel+bias)."""
 		if self._coefficient_layer is None:
-			raise ModelNotFittedError("Model is not initialized. Call initialize(...) first.")
+			raise ModelNotFittedError(
+				"Model is not initialized. Call initialize(...) first."
+			)
 
-		expected_kernel_shape = tuple(self._coefficient_layer.weight.shape)
-		expected_kernel_external_shape = tuple(self._coefficient_layer.weight.T.shape)
+		layer = self._coefficient_layer
 
-		def _resolve_and_validate_kernel(kernel: NDArray[np.float64]) -> Any:
-			kernel_arr = np.asarray(kernel, dtype=np.float64)
-			if kernel_arr.ndim != 2:
-				raise TrainingError(
-					"kernel weights must be a 2D array with shape "
-					f"{expected_kernel_external_shape} (external) or {expected_kernel_shape} (internal)"
-				)
+		try:
+			kernel, bias = self._validated_weight_arrays(
+				weights,
+				[
+					(self._n_features, self._n_outputs),
+					(self._n_outputs,),
+				],
+			)
+		except (TypeError, ValueError) as exc:
+			raise TrainingError(str(exc)) from exc
 
-			if kernel_arr.shape == expected_kernel_external_shape:
-				return torch.tensor(kernel_arr.T, dtype=torch.float32, device=self.device)
+		kernel_tensor = torch.tensor(
+			kernel.T,
+			dtype=layer.weight.dtype,
+			device=layer.weight.device,
+		)
+		bias_tensor = torch.tensor(
+			bias,
+			dtype=layer.bias.dtype,
+			device=layer.bias.device,
+		)
 
-			if kernel_arr.shape == expected_kernel_shape:
-				return torch.tensor(kernel_arr, dtype=torch.float32, device=self.device)
-
+		if (
+			not torch.isfinite(kernel_tensor).all().item()
+			or not torch.isfinite(bias_tensor).all().item()
+		):
 			raise TrainingError(
-				"kernel weights shape mismatch: got "
-				f"{kernel_arr.shape}, expected {expected_kernel_external_shape} (external) "
-				f"or {expected_kernel_shape} (internal)"
+				"Weights are not finite in the model's numeric dtype."
 			)
 
 		with torch.no_grad():
-			if isinstance(weights, list):
-				if len(weights) == 1:
-					w = _resolve_and_validate_kernel(weights[0])
-					self._coefficient_layer.weight.copy_(w)
-				elif len(weights) == 2:
-					w = _resolve_and_validate_kernel(weights[0])
-					bias_arr = np.asarray(weights[1], dtype=np.float64)
-					expected_bias_shape = tuple(self._coefficient_layer.bias.shape)
-					if bias_arr.ndim != 1 or bias_arr.shape != expected_bias_shape:
-						raise TrainingError(
-							"bias weights shape mismatch: got "
-							f"{bias_arr.shape}, expected {expected_bias_shape}"
-						)
-					b = torch.tensor(bias_arr, dtype=torch.float32, device=self.device)
-					self._coefficient_layer.weight.copy_(w)
-					self._coefficient_layer.bias.copy_(b)
-				else:
-					raise TrainingError("weights list must contain kernel or [kernel, bias]")
-			else:
-				w = _resolve_and_validate_kernel(weights)
-				self._coefficient_layer.weight.copy_(w)
+			layer.weight.copy_(kernel_tensor)
+			layer.bias.copy_(bias_tensor)
 
 	def get_weights(self) -> List[NDArray[np.float64]]:
-		"""Return coefficient-layer kernel in a one-element list."""
 		if self._coefficient_layer is None:
-			raise ModelNotFittedError("Model is not initialized. Call initialize(...) first.")
+			raise ModelNotFittedError(
+				"Model is not initialized. Call initialize(...) first."
+			)
 
-		kernel = self._coefficient_layer.weight.detach().cpu().numpy().T
-		bias = self._coefficient_layer.bias.detach().cpu().numpy()
+		layer = self._coefficient_layer
+
+		kernel = np.array(
+			layer.weight.detach().cpu().numpy().T,
+			dtype=np.float64,
+			copy=True,
+		)
+		bias = np.array(
+			layer.bias.detach().cpu().numpy(),
+			dtype=np.float64,
+			copy=True,
+		)
+
 		return [kernel, bias]
 	
 	def omit_variables(self, variable_indices: List[int]) -> None:
@@ -545,127 +553,14 @@ class PyTorchGrangerModel(BaseGrangerModel):
 		self,
 		run_name: str,
 		callback_updates: Optional[
-			Mapping[Union[int, str, Type[Callback]], Mapping[str, Any]]
+			Mapping[Union[int, str, type], Mapping[str, Any]]
 		] = None,
 	) -> None:
-		"""
-		Replace callbacks with clean instances prepared for a new training run.
-
-		The model, its weights, layers, loss function, and optimizer
-		configuration are preserved. Each callback is responsible for
-		returning a new instance without runtime state through clone_for_run().
-
-		Parameters
-		----------
-		run_name:
-			Identifier of the new training run. Logging callbacks should use it
-			to create a separate output location or TensorBoard log directory.
-		callback_updates:
-			Optional configuration updates applied to a cloned callback.
-			A selector can be:
-			- callback index in self.callbacks,
-			- callback class name,
-			- callback type.
-
-			Example:
-			{
-				"EarlyStoppingCallback": {
-					"patience": 20,
-					"min_delta": 1e-5,
-				},
-				TensorBoardCallback: {
-					"log_root": "artifacts/tensorboard",
-				},
-			}
-		"""
-		if not isinstance(run_name, str) or not run_name.strip():
-			raise ConstraintConfigurationError(
-				"run_name must be a non-empty string when resetting callbacks."
-			)
-
-		self._validate_callbacks()
-
-		has_callback_updates = bool(callback_updates)
-		fresh_callbacks: List[Callback] = []
-
-		for index, callback in enumerate(self.callbacks):
-			fresh_callback = callback.clone_for_run(run_name)
-
-			if not isinstance(fresh_callback, Callback):
-				raise ConstraintConfigurationError(
-					f"{callback.__class__.__name__}.clone_for_run() must return "
-					"an instance of callbacks.base_callback.Callback."
-				)
-
-			if has_callback_updates:
-				updates = self._get_callback_updates(
-					callback=callback,
-					index=index,
-					callback_updates=callback_updates,
-				)
-				if updates:
-					self._apply_callback_updates(fresh_callback, updates)
-
-			fresh_callbacks.append(fresh_callback)
-
+		fresh_callbacks = reset_callback_list(
+			self.callbacks,
+			run_name,
+			callback_updates,
+			expected_type=Callback,
+			clone_callback=clone_custom_callback,
+		)
 		self.callbacks = fresh_callbacks
-		self._validate_callbacks()
-
-	def _get_callback_updates(
-		self,
-		*,
-		callback: Callback,
-		index: int,
-		callback_updates: Mapping[
-			Union[int, str, Type[Callback]], Mapping[str, Any]
-		],
-	) -> Dict[str, Any]:
-		"""Merge all configuration updates matching a callback."""
-		updates: Dict[str, Any] = {}
-
-		for selector, values in callback_updates.items():
-			if not isinstance(values, Mapping):
-				raise ConstraintConfigurationError(
-					"Each callback_updates value must be a mapping of "
-					"attribute names to values."
-				)
-
-			matches = (
-				selector == index
-				or selector == callback.__class__.__name__
-				or (
-					isinstance(selector, type)
-					and issubclass(selector, Callback)
-					and isinstance(callback, selector)
-				)
-			)
-
-			if matches:
-				updates.update(values)
-
-		return updates
-
-	def _apply_callback_updates(
-		self,
-		callback: Callback,
-		updates: Mapping[str, Any],
-	) -> None:
-		"""
-		Apply updates to public callback configuration attributes.
-
-		Private attributes are excluded because they are implementation-level
-		runtime fields and should be initialized by clone_for_run().
-		"""
-		for attribute, value in updates.items():
-			if attribute.startswith("_"):
-				raise ConstraintConfigurationError(
-					f"Cannot update private callback attribute: {attribute!r}"
-				)
-
-			if not hasattr(callback, attribute):
-				raise ConstraintConfigurationError(
-					f"{callback.__class__.__name__} has no configurable "
-					f"attribute {attribute!r}"
-				)
-
-			setattr(callback, attribute, value)

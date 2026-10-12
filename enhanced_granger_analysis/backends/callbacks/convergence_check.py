@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from typing import Any, Dict
+from typing import Any, Dict, Mapping, Optional
 
 import numpy as np
 
@@ -36,10 +36,19 @@ class ConvergenceCheck(Callback):
 
 		return True
 
-	def clone_for_run(self, run_name: str) -> "ConvergenceCheck":
+	def clone_for_run(
+		self,
+		run_name: str,
+		callback_updates: Optional[Mapping[str, Any]] = None,
+	) -> "ConvergenceCheck":
 		"""Create a clean callback; do not copy the best loss or stored weights."""
 		del run_name  # This callback has no run-specific destination.
 
+		if callback_updates:
+			relative_change_threshold = callback_updates.get("relative_change_threshold", self.relative_change_threshold)
+		else:
+			relative_change_threshold = self.relative_change_threshold
+
 		return type(self)(
-			relative_change_threshold=self.relative_change_threshold
+			relative_change_threshold=relative_change_threshold
 		)

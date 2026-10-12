@@ -4,6 +4,7 @@ from typing import Any, Dict, Mapping, Optional, Sequence, Tuple, List
 from pathlib import Path
 
 import pandas as pd
+import numpy as np
 
 from ..core.exceptions import DataValidationError
 from ..core.lag_config import LagConfiguration
@@ -210,3 +211,13 @@ class MultiTaskGrangerBuilder:
 	def run(self) -> GrangerAnalysisResults:
 		"""Alias for fit()."""
 		return self.fit()
+
+	@staticmethod
+	def _assign_initializer_weights(
+		model: Any,
+		weights: List[np.ndarray],
+	) -> None:
+		model.set_weights([
+			np.array(value, dtype=np.float64, copy=True)
+			for value in weights
+		])

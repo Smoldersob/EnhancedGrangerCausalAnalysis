@@ -8,6 +8,10 @@ from sklearn.linear_model._base import LinearModel, _preprocess_data
 
 from .base_model import BaseGrangerModel
 from ..callbacks.base_callback import Callback
+from ..callbacks.reset_utils import (
+    clone_custom_callback,
+    reset_callback_list,
+)
 from ...core.exceptions import (
 	ConstraintConfigurationError,
 	RegularizerConfigurationError,
@@ -271,6 +275,14 @@ class ScikitConstrainedGrangerModel(LinearModel, RegressorMixin, BaseGrangerMode
 		self._n_outputs = y.shape[1]
 		self._variable_control_layer = _VariableControlLayer(self._n_features)
 		self._variable_mask = self._variable_control_layer.mask
+		self.coef_ = np.zeros(
+			(self._n_outputs, self._n_features),
+			dtype=np.float64,
+		)
+		self.intercept_ = np.zeros(
+			self._n_outputs,
+			dtype=np.float64,
+		)
 		self._X_train = X
 		self._y_train = y
 		self._loss_history = []
@@ -307,7 +319,22 @@ class ScikitConstrainedGrangerModel(LinearModel, RegressorMixin, BaseGrangerMode
 
 		n_samples, n_features = X_proc.shape
 		n_outputs = y_proc.shape[1]
-		coef = np.zeros((n_outputs, n_features), dtype=np.float64)
+
+		if n_samples == 0:
+			raise TrainingError("Cannot train on an empty dataset.")
+
+		coef = np.array(self.coef_, dtype=np.float64, copy=True)
+		if coef.shape != (n_outputs, n_features):
+			raise TrainingError(
+				"Current coefficients do not match the training data."
+			)
+
+		self._fitted = False
+		self.coef_ = coef.copy()
+		self._update_analytic_intercept(X_offset, y_offset)
+
+		# Reset training-loop learning rate, separately from callback reset.
+		self._optimizer_proxy = _OptimizerProxy(self.learning_rate)
 
 		self._loss_history = []
 		callback_state: Dict[str, Any] = {
@@ -354,8 +381,10 @@ class ScikitConstrainedGrangerModel(LinearModel, RegressorMixin, BaseGrangerMode
 				coef = self._newton_update(coef, grad, hessian, lr, active_features)
 				coef = self._apply_constraint(coef)
 
-			self.coef_ = coef
-			pred_full = X_proc @ coef.T
+			self.coef_ = coef.copy()
+			self._update_analytic_intercept(X_offset, y_offset)
+
+			pred_full = X_proc @ self.coef_.T
 			mse = float(np.mean((pred_full - y_proc) ** 2))
 			reg_penalty, _ = self._evaluate_regularizer(coef)
 			epoch_loss = float(mse + reg_penalty)
@@ -380,15 +409,22 @@ class ScikitConstrainedGrangerModel(LinearModel, RegressorMixin, BaseGrangerMode
 		self.coef_ = coef
 		self._run_callback_hook("on_train_end", callback_state)
 
-		if not hasattr(self, "coef_"):
-			raise TrainingError("Training ended without coefficient assignment")
-
-		self._set_intercept(X_offset, y_offset, X_scale)
+		# Do not overwrite weights restored by an end-of-epoch callback.
+		self._update_analytic_intercept(X_offset, y_offset)
 		self._fitted = True
 
-		forecasts = X_proc @ self.coef_.T
-		final_loss = self._loss_history[-1] if self._loss_history else float("nan")
+		self._run_callback_hook("on_train_end", callback_state)
 
+		# Callbacks may restore a previous kernel.
+		# In this backend the intercept is derived analytically from that kernel.
+		self._update_analytic_intercept(X_offset, y_offset)
+
+		forecasts = self.predict(self._X_train)
+
+		reg_penalty, _ = self._evaluate_regularizer(self.coef_)
+		final_loss = float(
+			np.mean((forecasts - self._y_train) ** 2) + reg_penalty
+		)
 		return {
 			"test_statistic": final_loss,
 			"p_value": np.nan,
@@ -412,37 +448,75 @@ class ScikitConstrainedGrangerModel(LinearModel, RegressorMixin, BaseGrangerMode
 
 		return x_arr @ self.coef_.T + self.intercept_
 
-	def set_weights(self, weights: NDArray[np.float64]|List[NDArray[np.float64]]) -> None:
+	def set_weights(
+		self,
+		weights: List[NDArray[np.float64]],
+	) -> None:
+		"""Assign coefficients without changing the input-control mask."""
 		if self._n_features is None or self._n_outputs is None:
-			raise ModelNotFittedError("Model is not initialized. Call initialize(...) first.")
-
-		if isinstance(weights, list):
-			if len(weights) == 0:
-				raise TrainingError("weights list cannot be empty")
-			coef = np.asarray(weights[0], dtype=np.float64)
-			if len(weights) >= 2:
-				self.intercept_ = np.asarray(weights[1], dtype=np.float64).squeeze()
-		else:
-			coef = np.asarray(weights, dtype=np.float64)
-
-		if coef.ndim == 1:
-			coef = coef[np.newaxis, :]
-		if coef.ndim != 2:
-			raise TrainingError("weights must be 1D or 2D")
-
-		if coef.shape == (self._n_features, self._n_outputs):
-			coef = coef.T
-		if coef.shape != (self._n_outputs, self._n_features):
-			raise TrainingError(
-				f"Invalid coefficient shape: got {coef.shape}, expected {(self._n_outputs, self._n_features)}"
+			raise ModelNotFittedError(
+				"Model is not initialized. Call initialize(...) first."
 			)
 
-		self.coef_ = coef
+		if not isinstance(weights, list) or len(weights) != 2:
+			raise TrainingError(
+				"This linear model requires [kernel, bias]."
+			)
+
+		kernel = np.array(weights[0], dtype=np.float64, copy=True)
+		bias = np.array(weights[1], dtype=np.float64, copy=True)
+
+		expected_kernel = (self._n_features, self._n_outputs)
+		expected_bias = (self._n_outputs,)
+
+		if kernel.shape != expected_kernel:
+			raise TrainingError(
+				f"Kernel shape is {kernel.shape}, "
+				f"expected {expected_kernel}."
+			)
+		if bias.shape != expected_bias:
+			raise TrainingError(
+				f"Bias shape is {bias.shape}, expected {expected_bias}."
+			)
+		if not np.all(np.isfinite(kernel)) or not np.all(np.isfinite(bias)):
+			raise TrainingError("Weights must contain finite values.")
+		if not self.fit_intercept and np.any(bias != 0.0):
+			raise TrainingError(
+				"Non-zero bias is not allowed with fit_intercept=False."
+			)
+
+		self.coef_ = kernel.T.copy()
+		self.intercept_ = bias.copy()
 
 	def get_weights(self) -> List[NDArray[np.float64]]:
-		if not hasattr(self, "coef_"):
-			raise ModelNotFittedError("Model is not fitted. Call fit(...) first.")
-		return [np.asarray(self.coef_, dtype=np.float64).T]
+		"""Return coefficient copies: [kernel, bias].
+
+		kernel: (n_features, n_outputs)
+		bias:   (n_outputs,)
+		Input-control state is excluded.
+		"""
+		if (
+			self._n_features is None
+			or self._n_outputs is None
+			or not hasattr(self, "coef_")
+			or not hasattr(self, "intercept_")
+		):
+			raise ModelNotFittedError(
+				"Model is not initialized. Call initialize(...) first."
+			)
+
+		kernel = np.array(
+			self.coef_.T,
+			dtype=np.float64,
+			copy=True,
+		)
+		bias = np.array(
+			self.intercept_,
+			dtype=np.float64,
+			copy=True,
+		).reshape(self._n_outputs)
+
+		return [kernel, bias]
 
 	def omit_variables(self, variable_indices: List[int]) -> None:
 		if self._n_features is None:
@@ -462,143 +536,39 @@ class ScikitConstrainedGrangerModel(LinearModel, RegressorMixin, BaseGrangerMode
 	def set_constraint(self, constraint: Any) -> None:
 		self._validate_components()
 		self.constraint = constraint
-
+	
 	def reset_callbacks(
 		self,
 		run_name: str,
 		callback_updates: Optional[
-			Mapping[Union[int, str, Type[Callback]], Mapping[str, Any]]
+			Mapping[Union[int, str, type], Mapping[str, Any]]
 		] = None,
 	) -> None:
-		"""
-		Replace callbacks with clean instances prepared for a new training run.
-
-		The model, its weights, layers, loss function, and optimizer
-		configuration are preserved. Each callback is responsible for
-		returning a new instance without runtime state through clone_for_run().
-
-		Parameters
-		----------
-		run_name:
-			Identifier of the new training run. Logging callbacks should use it
-			to create a separate output location or TensorBoard log directory.
-		callback_updates:
-			Optional configuration updates applied to a cloned callback.
-			A selector can be:
-			- callback index in self.callbacks,
-			- callback class name,
-			- callback type.
-
-			Example:
-			{
-				"EarlyStoppingCallback": {
-					"patience": 20,
-					"min_delta": 1e-5,
-				},
-				TensorBoardCallback: {
-					"log_root": "artifacts/tensorboard",
-				},
-			}
-		"""
-		if not isinstance(run_name, str) or not run_name.strip():
-			raise ConstraintConfigurationError(
-				"run_name must be a non-empty string when resetting callbacks."
-			)
-
-		self._validate_callbacks()
-
-		has_callback_updates = bool(callback_updates)
-		fresh_callbacks: List[Callback] = []
-
-		for index, callback in enumerate(self.callbacks):
-			fresh_callback = callback.clone_for_run(run_name)
-
-			if not isinstance(fresh_callback, Callback):
-				raise ConstraintConfigurationError(
-					f"{callback.__class__.__name__}.clone_for_run() must return "
-					"an instance of callbacks.base_callback.Callback."
-				)
-
-			if has_callback_updates:
-				updates = self._get_callback_updates(
-					callback=callback,
-					index=index,
-					callback_updates=callback_updates,
-				)
-				if updates:
-					self._apply_callback_updates(fresh_callback, updates)
-
-			fresh_callbacks.append(fresh_callback)
-
+		fresh_callbacks = reset_callback_list(
+			self.callbacks,
+			run_name,
+			callback_updates,
+			expected_type=Callback,
+			clone_callback=clone_custom_callback,
+		)
 		self.callbacks = fresh_callbacks
-		self._validate_callbacks()
 
-	def _get_callback_updates(
+	def _update_analytic_intercept(
 		self,
-		*,
-		callback: Callback,
-		index: int,
-		callback_updates: Mapping[
-			Union[int, str, Type[Callback]], Mapping[str, Any]
-		],
-	) -> Dict[str, Any]:
-		"""Merge all configuration updates matching a callback."""
-		updates: Dict[str, Any] = {}
-
-		for selector, values in callback_updates.items():
-			if not isinstance(values, Mapping):
-				raise ConstraintConfigurationError(
-					"Each callback_updates value must be a mapping of "
-					"attribute names to values."
-				)
-
-			matches = (
-				selector == index
-				or selector == callback.__class__.__name__
-				or (
-					isinstance(selector, type)
-					and issubclass(selector, Callback)
-					and isinstance(callback, selector)
-				)
-			)
-
-			if matches:
-				updates.update(values)
-
-		return updates
-
-	def _apply_callback_updates(
-		self,
-		callback: Callback,
-		updates: Mapping[str, Any],
+		X_offset: NDArray[np.float64],
+		y_offset: NDArray[np.float64],
 	) -> None:
-		"""
-		Apply updates to public callback configuration attributes.
-
-		Private attributes are excluded because they are implementation-level
-		runtime fields and should be initialized by clone_for_run().
-		"""
-		for attribute, value in updates.items():
-			if attribute.startswith("_"):
-				raise ConstraintConfigurationError(
-					f"Cannot update private callback attribute: {attribute!r}"
-				)
-
-			if not hasattr(callback, attribute):
-				raise ConstraintConfigurationError(
-					f"{callback.__class__.__name__} has no configurable "
-					f"attribute {attribute!r}"
-				)
-
-			setattr(callback, attribute, value)
-
-	def _validate_callbacks(self) -> None:
-			"""Validate callback list passed to model initializer."""
-			if not isinstance(self.callbacks, list):
-				raise ConstraintConfigurationError("callbacks must be a list of Callback objects")
-	
-			for cb in self.callbacks:
-				if not isinstance(cb, Callback):
-					raise ConstraintConfigurationError(
-						"All PyTorch callbacks must inherit from callbacks.base_callback.Callback"
-					)
+		"""Update the intercept for current coefficients and masked inputs."""
+		if self.fit_intercept:
+			bias = (
+				np.asarray(y_offset, dtype=np.float64)
+				- np.asarray(X_offset, dtype=np.float64) @ self.coef_.T
+			)
+			self.intercept_ = np.asarray(
+				bias, dtype=np.float64
+			).reshape(self._n_outputs).copy()
+		else:
+			self.intercept_ = np.zeros(
+				self._n_outputs,
+				dtype=np.float64,
+			)
