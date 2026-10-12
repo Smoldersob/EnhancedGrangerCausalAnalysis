@@ -1,5 +1,5 @@
 import numpy as np
-from abc import ABC, abstractmethod, staticmethod
+from abc import ABC, abstractmethod
 from numpy.typing import NDArray
 from typing import Any, Dict, List, Mapping, Optional, Union
 

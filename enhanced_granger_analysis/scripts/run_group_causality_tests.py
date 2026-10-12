@@ -196,6 +196,15 @@ def _load_dataframes(cfg: Dict[str, Any]) -> List[pd.DataFrame]:
     return frames
 
 
+def _format_case_description(param_names: List[str], case_values: List[Any]) -> str:
+    """Return a compact human-readable description of a parameter sweep case."""
+    if not case_values:
+        return "default"
+    return ", ".join(
+        f"{_short_param_name(k)}={v}" for k, v in zip(param_names, case_values)
+    )
+
+
 def _align_dataframe_columns(frames: List[pd.DataFrame]) -> List[pd.DataFrame]:
     """Align all frames to the union of columns and fill missing values with zeros."""
     if not frames:
@@ -203,21 +212,16 @@ def _align_dataframe_columns(frames: List[pd.DataFrame]) -> List[pd.DataFrame]:
 
     all_columns: List[str] = []
     seen: set[str] = set()
-    changed = False
     for frame in frames:
         for column in frame.columns:
             if column not in seen:
                 seen.add(column)
                 all_columns.append(column)
-        if list(frame.columns) != all_columns:
-            changed = True
 
-    aligned: List[pd.DataFrame] = []
-    for frame in frames:
-        aligned_frame = frame.reindex(columns=all_columns, fill_value=0)
-        aligned.append(aligned_frame)
+    if all(list(frame.columns) == all_columns for frame in frames):
+        return frames
 
-    return aligned if changed else frames
+    return [frame.reindex(columns=all_columns, fill_value=0) for frame in frames]
 
 
 def _resolve_path(base_dir: Path, raw_path: str | Path) -> Path:
@@ -359,13 +363,12 @@ def run_from_config(script_config_path: str | Path, save_mode: str = "minimum", 
         p_value_path = output_dir / _build_result_filename(case_idx, backend, param_names, case_values, "p_value")
         test_path = output_dir / _build_result_filename(case_idx, backend, param_names, case_values, selected_test + "_test")
         sign_path = output_dir / _build_result_filename(case_idx, backend, param_names, case_values, "sign")
-        
+
         # Print case header
-        case_desc = ", ".join(
-            f"{_short_param_name(k)}={v}" for k, v in zip(param_names, case_values)
-        ) if case_values else "default"
-        print(f"[Case {case_idx:3d}] {backend:15s} | {case_desc}")
-        
+        case_desc = _format_case_description(param_names, case_values)
+        cache_status = "cache-hit" if cached_prepared_data is not None else "fresh-prep"
+        print(f"[Case {case_idx:3d}] {backend:15s} | {case_desc} | {cache_status}")
+
         # Run Granger analysis
         start = time.perf_counter()
         try:
@@ -373,25 +376,25 @@ def run_from_config(script_config_path: str | Path, save_mode: str = "minimum", 
             if cached_prepared_data is not None:
                 builder.prepared_data(cached_prepared_data)
             results = builder.fit()
-            
+
             # Extract and save all result matrices
             statistic_name, p_value_name = test_metrics[selected_test]
             test_df = results.evaluate(statistic_name)
             p_value_df = results.evaluate(p_value_name)
 
-            sign_df = results.sign 
+            sign_df = results.sign
             causality_df = results.result(
                 threshold=threshold,
                 metric=p_value_name,
                 with_sign=with_sign,
             )
-                
+
             # Measure per-case execution time excluding file-save operations.
             elapsed_s = time.perf_counter() - start
             if cached_prepared_data is not None:
                 elapsed_s += cached_preparation_time
             total_time += elapsed_s
-            
+
             causality_df.to_csv(causality_path)
             if save_mode == "matrices":
                 p_value_df.data.to_csv(p_value_path)
@@ -403,10 +406,10 @@ def run_from_config(script_config_path: str | Path, save_mode: str = "minimum", 
                     "prepared_data": results.preparation_context.prepared_data,
                     "preparation_time_seconds": results.preparation_context.metadata.get("preparation_time_seconds", 0.0),
                 }
-            
+
             # Compute metrics against ground truth
             metrics = MetricCalculator(str(ground_truth_path), str(causality_path)).evaluate()
-            
+
             # Build summary row
             row: Dict[str, Any] = {
                 "case_id": case_idx,
@@ -416,13 +419,14 @@ def run_from_config(script_config_path: str | Path, save_mode: str = "minimum", 
                 "signed_result": "True" if with_sign else "False",
                 "p_value_file": p_value_path.name if save_mode == "matrices" else "NOT_SAVED",
                 "test_file": test_path.name if save_mode == "matrices" else "NOT_SAVED",
+                "sign_file": sign_path.name if save_mode == "matrices" else "NOT_SAVED",
                 "execution_time_seconds": round(elapsed_s, 2),
             }
             for p, v in zip(param_names, case_values):
                 row[p] = v
             row.update(metrics)
             summary_rows.append(row)
-            
+
             # Print timing
             print(f"        ✓ Completed in {elapsed_s:.2f}s | Accuracy: {metrics.get('accuracy', 0):.3f} | F1: {metrics.get('f1', 0):.3f}")
         

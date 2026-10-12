@@ -211,8 +211,3 @@ def _robust_scaler_factory() -> "RobustScaler":
 @register_scaler("maxabs", "max_abs")
 def _max_abs_scaler_factory() -> "MaxAbsScaler":
     return MaxAbsScaler()
-
-
-@register_scaler("identity", "none")
-def _identity_scaler_factory() -> "IdentityScaler":
-    return IdentityScaler()

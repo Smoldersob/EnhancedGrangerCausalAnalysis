@@ -6,8 +6,8 @@ This document provides a comprehensive guide to the main API elements available 
 
 The library provides three main analysis APIs:
 
-1. **MultiTaskGrangerAPI** — Advanced multi-variable Granger causality analysis with configurable backends, regularization, constraints, and callbacks. Best for production workflows and complex causal studies.
-2. **MultitaskGrangerBuilder** — Fluent builder interface for MultiTaskGrangerAPI. Best for building workflows step-by-step or working with configuration files.
+1. **MultiTaskGrangerAPI** — Thin orchestrator for the standard multitask pipeline. It delegates execution to the stateful builder.
+2. **MultiTaskGrangerBuilder** — Stateful builder with both fluent configuration and executable pipeline stages. It can be paused after any completed stage.
 3. **SimpleGrangerAPI** — Pair-wise Granger causality analysis using statsmodels. Best for quick exploratory analysis and benchmarking.
 
 Related utilities:
@@ -19,9 +19,10 @@ Related utilities:
 
 ### 1. MultiTaskGrangerAPI (Orchestrator)
 
-**Purpose:** The main orchestration engine for multitask Granger causality analysis.
+**Purpose:** The standard orchestration entry point for multitask Granger causality
+analysis.
 
-**Scope:** Handles data preparation, stationarity transformation, lag engineering, scaling, backend model creation, hyperoptimization, base/reference model training, and result aggregation.
+**Scope:** Creates a builder, invokes the standard preparation, component, model, base-fit, and restricted-fit stages, then returns the accumulated results. It does not maintain a second model implementation.
 
 **Key Method:**
 
@@ -54,11 +55,15 @@ results: GrangerAnalysisResults
 ```
 
 **Features:**
-- Conditional model initialization based on backend capabilities (`needs_reinit` flag).
-- Hot-start from base model weights for reference model training.
+- One model object is reused for the base and restricted runs.
+- Each restricted run starts from an independent copy of the base weights.
 - Relation-based constraint specification (e.g., `{"y->x1": {"zero": true}}`).
-- Hyperoptimization over model config or regularization parameters.
 - Backend abstraction via `BackendFactory` strategy pattern.
+- Optional initializer support through the builder.
+
+`hiperoptimalization_state` and `hiperoptimalization_conf` are accepted for
+configuration compatibility, but hyperoptimization is not currently executed by the
+standard pipeline.
 
 **When to use:**
 - Production analyses requiring fine-grained control.
@@ -71,9 +76,9 @@ results: GrangerAnalysisResults
 
 **Purpose:** Fluent builder for configuring and running MultiTaskGrangerAPI workflows.
 
-**Scope:** Provides method chaining for builder initialization, data assignment, variable specification, configuration loading, and final execution.
+**Scope:** Provides method chaining for configuration and executable pipeline stages. Each stage runs immediately and stores its artifacts, so an analysis can be inspected or paused before training.
 
-**Key Methods:**
+**Configuration methods:**
 
 ```python
 builder = MultitaskGrangerBuilder(backend="pytorch", reuse_data=True)
@@ -90,6 +95,26 @@ builder = builder.from_file("config.json")  # load from file
 
 output = builder.fit()  # or .run()
 ```
+
+Configuration methods only update builder settings. Execution methods run immediately
+and save their artifacts:
+
+```python
+builder.prepare_data()
+builder.prepare_components()  # backend, constraints, regularizer, callbacks
+builder.build_model()
+builder.initialize_weights()  # a no-op when no initializer is configured
+builder.fit_base()
+builder.fit_restricted_models()
+output = builder.get_results()  # no additional training
+```
+
+The same model object is reused for the base and restricted runs. Every restricted run
+starts from an independent copy of the base weights and selects its input block by
+cause name. `fit_restricted(cause)` requires `fit_base()` first. `get_results()` only
+returns the current result object and does not perform additional training.
+Configuration changes that affect preparation, components, or the model invalidate
+dependent execution artifacts; rerun the corresponding stages explicitly.
 
 **In Practice:**
 
@@ -109,7 +134,7 @@ output = (MultitaskGrangerBuilder(backend="pytorch")
     .fit()
 )
 
-causality = output.result(threshold=0.01, with_sign=True)
+causality = output.result(threshold=0.01, with_sign=True).data
 print(causality)  # DataFrame with signed causality indicators
 ```
 
@@ -280,13 +305,14 @@ For details, see [Configuration File Usage](config_file_usage.md).
 
 **Purpose:** Aggregates causality test results into matrices of p-values, test statistics, and signed indicators.
 
-**Scope:** Compares base model predictions/weights against reference models (one per tested cause) to derive causality signatures.
+**Scope:** Compares base model predictions/weights against restricted snapshots (one per
+tested cause) to derive causality signatures.
 
 **Key Information:**
 ```python
-results = GrangerAnalysisResults(effects=["y1", "y2"], causes=["x1", "x2"])
+results = builder.fit()
 
-# Populated by orchestrator.fit() via update_cause().
+# Populated by fit_base() and fit_restricted_models().
 # Metrics are exposed as DataFrames:
 results.p_value                  # p-values
 results.f_test                    # F-test statistics
@@ -297,7 +323,7 @@ results.sign                      # sign of the strongest contribution
 ```python
 results = builder.fit()
 causality = results.result(threshold=0.01, with_sign=True)
-print(causality)
+print(causality.data)
 # Output example:
 #      x1   x2
 # y1  1.0 -1.0
@@ -310,20 +336,22 @@ print(causality)
 
 | Aspect | **Builder** | **Orchestrator** | **Simple Granger** |
 |--------|-----------|-----------------|-------------------|
-| **Purpose** | Fluent config interface | Direct multitask engine | Pair-wise statsmodels |
-| **API Complexity** | High-level method chains | Lower-level fit() params | Simple fit() call |
+| **Purpose** | Configuration and executable stages | Standard pipeline coordinator | Pair-wise statsmodels |
+| **API Complexity** | Fluent or explicit stages | One fit() call | Simple fit() call |
 | **Multi-output** | ✓ Yes | ✓ Yes (primary) | ✗ No (per pair) |
 | **Constraints** | ✓ Yes (via relations) | ✓ Yes | ✗ No |
 | **Regularization** | ✓ Yes (L1, lag-dependent) | ✓ Yes | ✗ No |
 | **Callbacks** | ✓ Yes | ✓ Yes | ✗ No |
 | **Config files** | ✓ Yes (from_file, from_config) | ✗ Manual dicts | ✗ Manual dicts |
 | **Backend choice** | "pytorch" \ "tensorflow" \ "sklearn" | "pytorch" \ "tensorflow" \ "sklearn" | Fixed (statsmodels) |
-| **Hyperopt** | ✓ Yes | ✓ Yes | ✗ No |
+| **Hyperopt** | Configuration accepted; execution deferred | Configuration accepted; execution deferred | ✗ No |
 | **Use case** | Config-driven workflows | Fine-grained control | Quick exploration |
 
 **In Summary:**
 - **Use Builder** when you have YAML/JSON configs or prefer method chaining.
-- **Use Orchestrator** when you need direct Python control or are building custom workflows.
+- **Use Orchestrator** when you want the standard pipeline through one `fit()` call.
+- **Use explicit builder stages** when you need to inspect or pause between preparation,
+  model construction, base fitting, and restricted fitting.
 - **Use Simple Granger** for rapid pair-wise tests, validation, or when statsmodels is preferred.
 
 ---
@@ -336,6 +364,7 @@ print(causality)
 import pandas as pd
 import numpy as np
 from enhanced_granger_analysis.api import MultitaskGrangerBuilder
+from enhanced_granger_analysis.core.lag_config import LagConfiguration
 
 # Create synthetic dataset
 np.random.seed(42)
@@ -353,7 +382,7 @@ output = (MultitaskGrangerBuilder(backend="sklearn")
     .fit()
 )
 
-print(output.result(threshold=0.01, with_sign=True))
+print(output.result(threshold=0.01, with_sign=True).data)
 ```
 
 ### Test with Config File
@@ -372,7 +401,7 @@ output = MultitaskGrangerBuilder().from_config(cfg).data(df).fit()
 
 # Examine results
 print("Causality Matrix:")
-print(output.result(threshold=0.01, with_sign=True))
+print(output.result(threshold=0.01, with_sign=True).data)
 print("\nP-values:")
 print(output.p_value)
 ```
@@ -388,7 +417,7 @@ it = TestGroupConfigIterator.from_file("group_config.json")
 
 for i, cfg in enumerate(it):
     output = MultitaskGrangerBuilder().from_config(cfg).data(df).fit()
-    print(f"Test {i}:\n{output.result(threshold=0.01, with_sign=True)}")
+    print(f"Test {i}:\n{output.result(threshold=0.01, with_sign=True).data}")
 ```
 
 ### Test with Relations (Constraints)
@@ -412,7 +441,7 @@ output = (MultitaskGrangerBuilder(backend="pytorch")
     .fit()
 )
 
-print(output.result(threshold=0.01, with_sign=True))
+print(output.result(threshold=0.01, with_sign=True).data)
 ```
 
 ### Quick Exploration with SimpleGrangerAPI
@@ -473,7 +502,7 @@ print(output.p_value)
 
 5. **Extract Results**
    ```python
-   causality = output.result(threshold=0.01, with_sign=True)
+   causality = output.result(threshold=0.01, with_sign=True).data
    p_values = output.p_value
    print(causality)
    ```
@@ -497,5 +526,4 @@ print(output.p_value)
 
 - [Configuration File Usage](config_file_usage.md) — Detailed config structure reference.
 - [Configuration File Usage](config_file_usage.md) — Sweep expansion and iteration.
-- [Backend Usage](backend_usage.md) — Creating components (callbacks, regularizers, constraints).
 - [Components Loading](components_loading.md) — Backend-specific component formats.

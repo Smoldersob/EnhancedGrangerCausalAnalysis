@@ -1,223 +1,663 @@
 from __future__ import annotations
 
-from typing import Any, Dict, Mapping, Optional, Sequence, Tuple, List
+import copy
 from pathlib import Path
+from typing import Any, Dict, List, Mapping, Optional, Sequence
 
-import pandas as pd
 import numpy as np
+import pandas as pd
 
+from ..backends import BackendFactory
 from ..core.exceptions import DataValidationError
-from ..core.lag_config import LagConfiguration
-from ..results.granger_results import GrangerAnalysisResults
+from ..preprocessing.prepare_data import PreparedData, prepare_data as run_prepare_data
 from ..preprocessing.stationarity import StationarityTransformer
+from ..results.granger_results import GrangerAnalysisResults, PreparationContext
 from .config_loader import BuilderConfigLoader
-from .orchestrator import MultiTaskGrangerAPI
 
 
-def _normalize_optional_name_list(values: Optional[Sequence[str]]) -> Optional[List[str]]:
-	"""Return None for empty lists so callers fall back to all columns."""
-	if values is None:
-		return None
-	if isinstance(values, str):
-		return [values]
-	items = list(values)
-	return items if items else None
+def _normalize_optional_name_list(
+    values: Optional[Sequence[str]],
+) -> Optional[List[str]]:
+    """
+    Normalize a sequence of strings to a list of strings, or return None if the input is None.
+    Args:
+        values: A sequence of strings or None
+    Returns:
+        A list of strings or None
+    """
+
+    if values is None:
+        return None
+    if isinstance(values, str):
+        return [values]
+    items = list(values)
+    return items or None
 
 
 class MultiTaskGrangerBuilder:
-	"""
-	Fluent builder for MultiTaskGrangerAPI.
+    """Fluent builder for a multitask Granger causality analysis pipeline.
 
-	The builder stores configuration step by step and executes analysis via fit().
-	"""
+    The builder stores the analysis configuration and exposes a chainable API for
+    selecting the data, variables, lag settings, preprocessing, and model
+    configuration before executing the full pipeline via ``fit()``.
 
-	def __init__(
-		self,
-		backend: Optional[str] = None,
-		reuse_data: bool = False,
-	) -> None:
-		self._backend: Optional[str] = backend
-		self._data: Optional[pd.DataFrame | Sequence[pd.DataFrame]] = None
-		self._reuse_data: bool = bool(reuse_data)
+    Example:
+        builder = MultiTaskGrangerBuilder()
+        results = (
+            builder.data(data)
+            .variables(causes=["A"], effects=["B"])
+            .fit()
+        )
+    """
 
-		self._fit_kwargs: Dict[str, Any] = {
-			"causes": None,
-			"effects": None,
-			"tested_causes": None,
-			"relations": None,
-			"lag_config": None,
-			"lag_selector": None,
-			"stationarity_transformer": StationarityTransformer(),
-			"backend_sample_fraction": 1.0,
-			"backend_max_samples": None,
-			"x_scaler": "standard",
-			"y_scaler": "standard",
-			"regularizer": None,
-			"regularizer_spec": None,
-			"callbacks": None,
-			"hiperoptimalization_state": None,
-			"hiperoptimalization_conf": None,
-			"initializer": None,
-			"model_config": None,
-			"prepared_data": None,
-		}
+    def __init__(self, backend: Optional[str] = None, reuse_data: bool = False) -> None:
+        """Create a configured builder instance.
 
-	def backend(self, backend_name: Optional[str]) -> "MultiTaskGrangerBuilder":
-		self._backend = backend_name
-		return self
+        Args:
+            backend: Optional backend name used when preparing the execution
+                strategy for the analysis.
+            reuse_data: Reuse policy passed to the pipeline configuration.
+        """
+        self._backend = backend
+        self._data: Optional[pd.DataFrame | Sequence[pd.DataFrame]] = None
+        self._reuse_data = bool(reuse_data)
+        self._fit_kwargs: Dict[str, Any] = {
+            "causes": None, "effects": None, "tested_causes": None,
+            "relations": None, "lag_config": None, "lag_selector": None,
+            "stationarity_transformer": StationarityTransformer(),
+            "missing_value_imputer": None, "schema_policy": "error",
+            "backend_sample_fraction": 1.0, "backend_max_samples": None,
+            "random_state": None, "sampling_strategy": None,
+            "x_scaler": "standard", "y_scaler": "standard",
+            "regularizer": None, "regularizer_spec": None, "callbacks": None,
+            "hiperoptimalization_state": None, "hiperoptimalization_conf": None,
+            "initializer": None, "model_config": None,
+        }
+        self._prepared_data: Optional[PreparedData] = None
+        self._strategy: Any = None
+        self._constraint: Any = None
+        self._regularizer: Any = None
+        self._callbacks: Optional[List[Any]] = None
+        self._model_config: Dict[str, Any] = {}
+        self._model: Any = None
+        self._initial_weights: Optional[List[np.ndarray]] = None
+        self._base_weights: Optional[List[np.ndarray]] = None
+        self._results: Optional[GrangerAnalysisResults] = None
+        self._hyperopt_result: Any = None
 
-	def data(self, data: pd.DataFrame | Sequence[pd.DataFrame]) -> "MultiTaskGrangerBuilder":
-		self._data = data
-		return self
+    # Configuration methods remain deliberately side-effect free.
+    def backend(self, backend_name: Optional[str]) -> "MultiTaskGrangerBuilder":
+        """
+        Configure the backend for the analysis.
 
-	def variables(
-		self,
-		causes: Optional[Sequence[str]] = None,
-		effects: Optional[Sequence[str]] = None,
-		tested_causes: Optional[Sequence[str]] = None,
-	) -> "MultiTaskGrangerBuilder":
-		self._fit_kwargs["causes"] = _normalize_optional_name_list(causes)
-		self._fit_kwargs["effects"] = _normalize_optional_name_list(effects)
-		self._fit_kwargs["tested_causes"] = _normalize_optional_name_list(tested_causes)
-		return self
+        Args:
+            backend_name: Name of the backend to use
 
-	def relations(
-		self,
-		relations: Optional[Mapping[Tuple[str, str], Any]],
-	) -> "MultiTaskGrangerBuilder":
-		self._fit_kwargs["relations"] = dict(relations) if relations is not None else None
-		return self
+        Returns:
+            Self for method chaining
+        """
+        self._backend = backend_name
+        return self
 
-	def lag(
-		self,
-		lag_config: Optional[LagConfiguration] = None,
-		lag_selector: Optional[Any] = None,
-	) -> "MultiTaskGrangerBuilder":
-		self._fit_kwargs["lag_config"] = lag_config
-		self._fit_kwargs["lag_selector"] = lag_selector
-		return self
+    def data(self, data: pd.DataFrame | Sequence[pd.DataFrame]) -> "MultiTaskGrangerBuilder":
+        """
+        Configure input data for the analysis.
 
-	def stationarity(
-		self,
-		transformer: Any = None,
-	) -> "MultiTaskGrangerBuilder":
-		self._fit_kwargs["stationarity_transformer"] = transformer or StationarityTransformer()
-		return self
+        Args:
+            data: Input data (pandas DataFrame or list of DataFrames)
 
-	def reuse_data(self, value: bool = True) -> "MultiTaskGrangerBuilder":
-		self._reuse_data = bool(value)
-		return self
+        Returns:
+            Self for method chaining
+        """
+        self._data = data
+        self._invalidate_from("data")
+        return self
 
-	def scaling(
-		self,
-		x_scaler: Optional[Any] = "standard",
-		y_scaler: Optional[Any] = "standard",
-	) -> "MultiTaskGrangerBuilder":
-		self._fit_kwargs["x_scaler"] = x_scaler
-		self._fit_kwargs["y_scaler"] = y_scaler
-		return self
+    def variables(self, causes=None, effects=None, tested_causes=None):
+        """
+        Configure causal relationships in the analysis.
 
-	def backend_load(
-		self,
-		backend_sample_fraction: float = 1.0,
-		backend_max_samples: Optional[int] = None,
-	) -> "MultiTaskGrangerBuilder":
-		self._fit_kwargs["backend_sample_fraction"] = float(backend_sample_fraction)
-		self._fit_kwargs["backend_max_samples"] = backend_max_samples
-		return self
+        Args:
+            causes: List of variable names to consider as causes
+            effects: List of variable names to consider as effects
+            tested_causes: List of variable names to test as causes
 
-	def regularization(
-		self,
-		regularizer: Optional[Any] = None,
-		regularizer_spec: Optional[Dict[str, Any]] = None,
-	) -> "MultiTaskGrangerBuilder":
-		self._fit_kwargs["regularizer"] = regularizer
-		self._fit_kwargs["regularizer_spec"] = dict(regularizer_spec) if regularizer_spec is not None else None
-		return self
+        Returns:
+            Self for method chaining
+        """
+        self._fit_kwargs.update({
+            "causes": _normalize_optional_name_list(causes),
+            "effects": _normalize_optional_name_list(effects),
+            "tested_causes": _normalize_optional_name_list(tested_causes),
+        })
+        self._invalidate_from("data")
+        return self
 
-	def callbacks(self, callbacks: Optional[Sequence[Any]] = None) -> "MultiTaskGrangerBuilder":
-		self._fit_kwargs["callbacks"] = list(callbacks) if callbacks is not None else None
-		return self
+    def relations(self, relations):
+        """
+        Configure explicit causal relations for the analysis.
 
-	def hyperoptimization(
-		self,
-		state: Optional[str] = None,
-		config: Optional[Dict[str, Any]] = None,
-	) -> "MultiTaskGrangerBuilder":
-		self._fit_kwargs["hiperoptimalization_state"] = state
-		self._fit_kwargs["hiperoptimalization_conf"] = dict(config) if config is not None else None
-		return self
+        Args:
+            relations: A dictionary mapping cause variables to lists of effect variables
 
-	def initializer(self, initializer: Optional[Any]) -> "MultiTaskGrangerBuilder":
-		self._fit_kwargs["initializer"] = initializer
-		return self
+        Returns:
+            Self for method chaining
+        """
+        self._fit_kwargs["relations"] = dict(relations) if relations is not None else None
+        self._invalidate_from("components")
+        return self
 
-	def prepared_data(self, prepared_data: Optional[Any]) -> "MultiTaskGrangerBuilder":
-		self._fit_kwargs["prepared_data"] = prepared_data
-		return self
+    def lag(self, lag_config=None, lag_selector=None):
+        """
+        Configure the lag structure for the analysis.
 
-	def model(self, model_config: Optional[Dict[str, Any]] = None) -> "MultiTaskGrangerBuilder":
-		self._fit_kwargs["model_config"] = dict(model_config) if model_config is not None else None
-		return self
+        Args:
+            lag_config: Configuration for the lag structure
+            lag_selector: Selector for the lag structure
 
-	def from_config(self, config: Mapping[str, Any]) -> "MultiTaskGrangerBuilder":
-		"""Load builder state from a config mapping using orchestrator fit keys."""
-		if "backend" in config:
-			self._backend = config.get("backend")
+        Returns:
+            Self for method chaining
+        """
+        self._fit_kwargs["lag_config"] = lag_config
+        self._fit_kwargs["lag_selector"] = lag_selector
+        self._invalidate_from("data")
+        return self
 
-		if "reuse_data" in config:
-			self._reuse_data = bool(config.get("reuse_data"))
+    def stationarity(self, transformer=None):
+        """
+        Configure the stationarity transformation for the analysis.
 
-		if "stationarity_transformer" in config:
-			self._fit_kwargs[key] = config.get("stationarity_transformer") or StationarityTransformer()
+        Args:
+            transformer: The transformer to use for stationarity adjustment
 
-		if "data" in config:
-			self._data = config.get("data")
+        Returns:
+            Self for method chaining
+        """
+        self._fit_kwargs["stationarity_transformer"] = transformer or StationarityTransformer()
+        self._invalidate_from("data")
+        return self
 
-		for key in self._fit_kwargs.keys():
-			if key in config:
-				value = config[key]
-				if key in {"regularizer_spec", "hiperoptimalization_conf", "model_config"} and value is not None:
-					self._fit_kwargs[key] = dict(value)
-				elif key in {"causes", "effects", "tested_causes"} and value is not None:
-					self._fit_kwargs[key] = _normalize_optional_name_list(value)
-				elif key == "relations" and value is not None:
-					self._fit_kwargs[key] = dict(value)
-				else:
-					self._fit_kwargs[key] = value
+    def reuse_data(self, value=True):
+        """
+        Configure whether to reuse the input data after preparation.
 
-		return self
+        Args:
+            value: Boolean indicating whether to reuse data
 
-	def from_file(self, path: str | Path) -> "MultiTaskGrangerBuilder":
-		"""Load builder state from a JSON/YAML config file."""
-		cfg = BuilderConfigLoader.load_file(path)
-		return self.from_config(cfg)
+        Returns:
+            Self for method chaining
+        """
+        self._reuse_data = bool(value)
+        return self
 
-	def fit(self) -> GrangerAnalysisResults:
-		if self._data is None:
-			raise DataValidationError("Builder requires data(...) before fit()")
+    def scaling(self, x_scaler="standard", y_scaler="standard"):
+        """
+        Configure the scaling for input and output variables.
+        Args:
+            x_scaler: Scaler for input variables (e.g., 'standard', 'minmax')
+            y_scaler: Scaler for output variables (e.g., 'standard', 'minmax')
+        Returns:
+            Self for method chaining
+        """
+        self._fit_kwargs["x_scaler"] = x_scaler
+        self._fit_kwargs["y_scaler"] = y_scaler
+        self._invalidate_from("data")
+        return self
 
-		try:
-			api = MultiTaskGrangerAPI(
-				backend=self._backend,
-				reuse_data=self._reuse_data,
-			)
-		except TypeError:
-			api = MultiTaskGrangerAPI(backend=self._backend)
-			if hasattr(api, "_reuse_data"):
-				setattr(api, "_reuse_data", self._reuse_data)
-		return api.fit(self._data, **self._fit_kwargs)
+    def backend_load(self, backend_sample_fraction=1.0, backend_max_samples=None):
+        """
+        Configure the backend data loading.
 
-	def run(self) -> GrangerAnalysisResults:
-		"""Alias for fit()."""
-		return self.fit()
+        Args:
+            backend_sample_fraction: The fraction of the backend data to use
+            backend_max_samples: The maximum number of samples to use from the backend
 
-	@staticmethod
-	def _assign_initializer_weights(
-		model: Any,
-		weights: List[np.ndarray],
-	) -> None:
-		model.set_weights([
-			np.array(value, dtype=np.float64, copy=True)
-			for value in weights
-		])
+        Returns:
+            Self for method chaining
+        """
+        self._fit_kwargs["backend_sample_fraction"] = float(backend_sample_fraction)
+        self._fit_kwargs["backend_max_samples"] = backend_max_samples
+        self._invalidate_from("data")
+        return self
+        
+    def regularization(self, regularizer=None, regularizer_spec=None):
+        """
+        Configure the regularization for the analysis.
+
+        Args:
+            regularizer: The regularizer to use
+            regularizer_spec: The specification for the regularizer
+
+        Returns:
+            Self for method chaining
+        """
+        self._fit_kwargs["regularizer"] = regularizer
+        self._fit_kwargs["regularizer_spec"] = copy.deepcopy(regularizer_spec)
+        self._invalidate_from("components")
+        return self
+
+    def callbacks(self, callbacks=None):
+        """
+        Configure the callbacks for the analysis.
+
+        Args:
+            callbacks: A list of callbacks to use
+
+        Returns:
+            Self for method chaining
+        """
+        self._fit_kwargs["callbacks"] = list(callbacks) if callbacks is not None else None
+        self._invalidate_from("model")
+        return self
+
+    def hyperoptimization(self, state=None, config=None):
+        """
+        Configure hyperparameter optimization for the analysis.
+
+        Args:
+            state: The state of the hyperparameter optimization
+            config: The configuration for the hyperparameter optimization
+        Returns:
+            Self for method chaining
+        """
+        self._fit_kwargs["hiperoptimalization_state"] = state
+        self._fit_kwargs["hiperoptimalization_conf"] = copy.deepcopy(config)
+        return self
+
+    def initializer(self, initializer):
+        """
+        Configure the initializer for model weights.
+        Args:
+            initializer: The initializer to use for model weights
+        Returns:
+            Self for method chaining
+        """
+        self._fit_kwargs["initializer"] = initializer
+        self._invalidate_from("model")
+        return self
+
+    def prepared_data(self, prepared_data):
+        """
+        Set the prepared data for the analysis.
+        Args:
+            prepared_data: The prepared data to use
+
+        Returns:
+            Self for method chaining
+        """
+        self._fit_kwargs["prepared_data"] = prepared_data
+        self._invalidate_from("data")
+        return self
+
+    def model(self, model_config=None):
+        """
+        Configure the model for the analysis.
+
+        Args:
+            model_config: The configuration for the model
+
+        Returns:
+            Self for method chaining
+        """
+        self._fit_kwargs["model_config"] = dict(model_config) if model_config is not None else None
+        self._invalidate_from("model")
+        return self
+
+    def from_config(self, config: Mapping[str, Any]) -> "MultiTaskGrangerBuilder":
+        """
+        Configure the builder from a configuration dictionary.
+        Args:
+            config: The configuration dictionary
+        Returns:
+            Self for method chaining
+        """
+        if "backend" in config:
+            self._backend = config["backend"]
+        if "reuse_data" in config:
+            self._reuse_data = bool(config["reuse_data"])
+        if "data" in config:
+            self._data = config["data"]
+        for key in self._fit_kwargs:
+            if key not in config:
+                continue
+            value = config[key]
+            if key in {"regularizer_spec", "hiperoptimalization_conf", "model_config"} and value is not None:
+                value = dict(value)
+            elif key in {"causes", "effects", "tested_causes"}:
+                value = _normalize_optional_name_list(value)
+            elif key == "relations" and value is not None:
+                value = dict(value)
+            self._fit_kwargs[key] = value
+        self._invalidate_from("data")
+        return self
+
+    def from_file(self, path: str | Path) -> "MultiTaskGrangerBuilder":
+        """
+        Configure the builder from a configuration file.
+        Args:
+           path (str | Path): Path to the configuration file (JSON, YAML, etc.)
+        Returns:
+            Self for method chaining
+        """
+        return self.from_config(BuilderConfigLoader.load_file(path))
+
+    # Executable stages.
+    def prepare_data(self, prepared_data: Optional[PreparedData] = None) -> PreparedData:
+        """
+        Prepare the data for the analysis.
+        Args:
+            prepared_data: The prepared data, if available.
+
+        Returns:
+            The prepared data.
+        """
+        if prepared_data is None:
+            prepared_data = self._fit_kwargs.get("prepared_data")
+        if prepared_data is None:
+            if self._data is None:
+                raise DataValidationError("Builder requires data(...) before prepare_data()")
+            prepared_data = run_prepare_data(data=self._data, **{
+                k: v for k, v in self._fit_kwargs.items()
+                if k in {"causes", "effects", "tested_causes", "lag_config", "lag_selector",
+                         "stationarity_transformer", "missing_value_imputer", "schema_policy",
+                         "backend_sample_fraction", "backend_max_samples", "random_state",
+                         "sampling_strategy", "x_scaler", "y_scaler"}
+            })
+        self._prepared_data = prepared_data
+        self._results = GrangerAnalysisResults(
+            effects=prepared_data.effects,
+            causes=prepared_data.tested_causes,
+            mask=prepared_data.base_mask,
+            cause_slices=prepared_data.cause_slices,
+            y_true=prepared_data.y_raw,
+            X_true=prepared_data.X_raw,
+        )
+        self._results.set_preparation_context(PreparationContext(
+            prepared_data=prepared_data,
+            metadata={"requested_roles": prepared_data.requested_roles,
+                      "effective_roles": prepared_data.effective_roles,
+                      "removed_variables": prepared_data.removed_variables},
+        ))
+        return prepared_data
+
+    def prepare_backend(self):
+        """
+        Prepare the backend for the analysis.
+        Returns:
+            The prepared backend.
+        """
+        self._require_prepared()
+        self._strategy = BackendFactory.get_strategy(self._backend)
+        return self._strategy
+
+    def prepare_constraint(self):
+        """
+        Prepare the constraint for the analysis.
+        Returns:
+            The prepared constraint.
+        """
+        self._require_components_data()
+        prepared = self._prepared_data
+        self._constraint = self._strategy.build_constraint_from_relations(
+            relations=dict(self._fit_kwargs["relations"] or {}),
+            predictor_names=list(prepared.causes),
+            output_names=list(prepared.effects),
+            col_offsets=np.asarray(
+                [prepared.cause_slices[name].start for name in prepared.causes],
+                dtype=int,
+            ),
+            n_features=prepared.X_scaled.shape[1],
+            base_mask=prepared.base_mask,
+        )
+        if self._results is not None and hasattr(self._constraint, "mask"):
+            self._results.mask = np.asarray(self._constraint.mask, dtype=bool).copy()
+        return self._constraint
+
+    def prepare_regularizer(self):
+        """
+        Prepare the regularizer for the analysis.
+        Returns:
+            The prepared regularizer.
+        """
+        self._require_components_data()
+        spec = dict(self._fit_kwargs.get("regularizer_spec") or {})
+        if str(spec.get("type", "")).lower() == "lag_dependent_l1":
+            selection = getattr(self._prepared_data.lag_engine, "selection_result_", None)
+            if selection is not None:
+                spec.setdefault("max_lags_per_pred", list(selection.max_lags_per_pred))
+                spec.setdefault("col_offsets", list(selection.col_offsets))
+        if spec:
+            self._regularizer = self._strategy.build_regularizer(spec)
+        else:
+            self._regularizer = self._fit_kwargs.get("regularizer")
+        return self._regularizer
+
+    def prepare_callbacks(self):
+        """
+        Prepare the callbacks for the analysis.
+        returns:
+            The list of prepared callbacks.
+        """
+        callbacks = self._fit_kwargs.get("callbacks")
+        self._callbacks = list(callbacks) if callbacks is not None else None
+        return self._callbacks
+
+    def prepare_components(self):
+        """Prepare all components for the analysis."""
+        self.prepare_backend()
+        self.prepare_constraint()
+        self.prepare_regularizer()
+        self.prepare_callbacks()
+        return self
+
+    def build_model(self, model_config: Optional[Mapping[str, Any]] = None):
+        """
+        Build the Granger model for the analysis.
+        Args:
+            model_config: Optional configuration for the model
+        Returns:
+            The built model.
+        """
+        self._require_components_data()
+        config = dict(self._fit_kwargs.get("model_config") or {})
+        if model_config is not None:
+            config.update(model_config)
+        if self._callbacks is not None:
+            config["callbacks"] = list(self._callbacks)
+        self._model_config = config
+        self._model = self._strategy.build_model(
+            n_features=self._prepared_data.X_scaled.shape[1],
+            n_outputs=self._prepared_data.y_scaled.shape[1],
+            regularizer=self._regularizer,
+            constraint=self._constraint,
+            **config,
+        )
+        self._model.initialize(self._prepared_data.X_scaled, targets=self._prepared_data.y_scaled)
+        self._initial_weights = None
+        self._base_weights = None
+        if self._results is not None:
+            self._results.base_snapshot = None
+            self._results.reference_snapshots.clear()
+        return self._model
+
+    
+    def initialize_weights(self, initializer=None):
+        """
+        Initialize the weights of the model.
+        Args:
+            initializer: Optional initializer object or class. If None, uses the one from fit_kwargs.
+        Returns:
+            The initialized weights.
+        """
+        self._require_model()
+        initializer = initializer if initializer is not None else self._fit_kwargs.get("initializer")
+        if initializer is None:
+            return None
+        init_obj = initializer(n_targets=self._prepared_data.y_scaled.shape[1],
+                               n_features_eff=self._prepared_data.X_scaled.shape[1]) if isinstance(initializer, type) else initializer
+        try:
+            A, B = init_obj(Y=self._prepared_data.y_scaled, X_lagged=self._prepared_data.X_scaled,
+                            mask=self._prepared_data.base_mask)
+        except TypeError:
+            A, B = init_obj()
+        self._initial_weights = [np.asarray(A, dtype=float).T.copy(), np.asarray(B, dtype=float).copy()]
+        self.set_weights(self._initial_weights)
+        return self._initial_weights
+
+    def set_weights(self, weights):
+        """
+        Set the weights of the model.
+        Args:
+            weights: The weights to set.
+        """
+        self._require_model()
+        self._model.set_weights([np.asarray(w, dtype=float).copy() for w in weights])
+
+    def reset_callbacks(self, run_name: str, callback_updates=None):
+        """
+        Reset the callbacks of the model for a new run.
+        Args:
+            run_name: The name of the run (e.g., 'base_model', 'reference_cause_X')            
+            callback_updates: Optional updates to the callbacks.
+        """
+        self._require_model()
+        self._model.reset_callbacks(run_name=run_name, callback_updates=callback_updates)
+
+    def fit_base(self):
+        """
+        Fit the base model for the analysis.
+        Returns:
+            The weights of the fitted base model.
+        """
+        self._require_model()
+        self._model.omit_variables([])
+        if self._initial_weights is not None:
+            self.set_weights(self._initial_weights)
+        self.reset_callbacks("base_model")
+        self._model.fit()
+        self._base_weights = [np.asarray(w, dtype=float).copy() for w in self._model.get_weights()]
+        self._save_snapshot(None)
+        return self._base_weights
+
+    def fit_restricted(self, cause: str):
+        """
+        Fit a restricted model for a specific cause.
+        Args:
+            cause: The cause for which to fit the restricted model.
+        """
+        self._require_model()
+        if self._base_weights is None:
+            raise DataValidationError("fit_base() must be completed before fit_restricted()")
+        if cause not in self._prepared_data.cause_slices:
+            raise DataValidationError(f"Unknown tested cause: {cause!r}")
+        block = self._prepared_data.cause_slices[cause]
+        self.set_weights(self._base_weights)
+        self._model.omit_variables(list(range(block.start, block.stop)))
+        self.reset_callbacks(f"reference_cause_{cause}")
+        self._model.fit()
+        self._save_snapshot(cause)
+
+    def fit_restricted_models(self):
+        """Fit restricted models for all tested causes."""
+        self._require_model()
+        for cause in self._prepared_data.tested_causes:
+            self.fit_restricted(cause)
+        return self._results
+
+    def _save_snapshot(self, cause: Optional[str]):
+        """
+        Save the predictions and weights of the model for a specific cause.
+        Args:
+            cause: The cause for which to save the snapshot. If None, saves the base model
+        """
+        predictions = self._prepared_data.y_scaler.inverse_transform(
+            np.asarray(self._model.predict(self._prepared_data.X_scaled), dtype=float))
+        weights = np.asarray(self._model.get_weights()[0], dtype=float).copy()
+        if cause is None:
+            self._results.set_base_snapshot(predictions, weights, {"backend": self._backend})
+        else:
+            self._results.set_reference_snapshot(cause, predictions, weights, {"backend": self._backend})
+
+    @property
+    def results(self):
+        """
+        Get the results of the Granger causality analysis.
+        """
+        return self.get_results()
+
+    def get_results(self):
+        """
+        Get the results of the Granger causality analysis.
+        Returns:
+            The results of the analysis.
+        """
+        if self._results is None:
+            raise DataValidationError("No results are available; prepare_data() has not run")
+        return self._results
+
+    def fit(self):
+        """Execute the Granger causality analysis pipeline.
+        
+        Performs all configuration steps and computes causality relationships.
+        """
+        self.prepare_data()
+        self.prepare_components()
+        self.build_model()
+        self.initialize_weights()
+        self.fit_base()
+        self.fit_restricted_models()
+        return self.get_results()
+
+    run = fit
+
+    def _require_prepared(self):
+        """
+        Ensure that the data has been prepared before proceeding.
+        Raises:    
+            DataValidationError: If the data has not been prepared yet.
+        """
+        if self._prepared_data is None:
+            raise DataValidationError("prepare_data() must be completed first")
+
+    def _require_components_data(self):
+        """
+        Ensure that the components (backend, constraint, regularizer) have been prepared before proceeding.
+        Raises:
+            DataValidationError: If the components have not been prepared yet.
+        """
+        self._require_prepared()
+        if self._strategy is None:
+            raise DataValidationError("prepare_backend() must be completed first")
+
+    def _require_model(self):
+        """
+        Ensure that the model has been built before proceeding.
+        Raises:
+            DataValidationError: If the model has not been built yet.
+        """
+        self._require_components_data()
+        if self._model is None:
+            raise DataValidationError("build_model() must be completed first")
+
+    def _invalidate_from(self, stage: str, preserve_results: bool = False):
+        """
+        Invalidate the builder from a specific stage.
+        Args:
+            stage: The stage from which to invalidate the builder.
+            preserve_results: If True, preserve the results.
+        """
+        if stage == "data":
+            self._prepared_data = None
+            self._strategy = self._constraint = self._regularizer = None
+            self._model = None
+        elif stage == "components":
+            self._constraint = self._regularizer = None
+            self._model = None
+        elif stage == "model":
+            self._model = None
+        self._initial_weights = self._base_weights = None
+        if not preserve_results:
+            self._results = None
+
+
+MultitaskGrangerBuilder = MultiTaskGrangerBuilder
