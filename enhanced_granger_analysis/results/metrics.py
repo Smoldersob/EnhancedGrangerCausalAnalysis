@@ -168,8 +168,15 @@ def wald_test(results: Any) -> CausalityMatrix:
         weights = weights.T
     values = np.empty((len(results.effects), len(results.causes)), dtype=np.float64)
     for cause_col, cause in enumerate(results.causes):
-        start = int(results.col_offsets[cause_col])
-        end = int(results.col_offsets[cause_col + 1])
+        if cause not in results.cause_slices:
+            raise ValueError(
+                f"Missing feature slice for tested cause: {cause!r}"
+            )
+
+        block = results.cause_slices[cause]
+        start = int(block.start)
+        end = int(block.stop)
+
         values[:, cause_col] = wald_test_value(
             weights=weights,
             covariance=covariance,
@@ -234,24 +241,66 @@ def p_value(results: Any) -> CausalityMatrix:
 
 
 @register_metric("sign")
+@register_metric("sign")
 def sign_metric(results: Any) -> CausalityMatrix:
-    """Return the sign of the summed base coefficients per output and cause."""
-    sign_matrix = np.zeros((len(results.effects), len(results.causes)), dtype=np.float64)
-    for cause_idx, cause in enumerate(results.causes):
-        weights = results.base_snapshot.weights if results.base_snapshot is not None else None
-        if weights is None:
-            continue
-        weights_arr = np.asarray(weights, dtype=np.float64)
-        if weights_arr.shape[1] == len(results.effects):
-            weights_arr = weights_arr.T
-        start = int(results.col_offsets[cause_idx])
-        end = int(results.col_offsets[cause_idx + 1])
-        block = weights_arr[:, start:end]
-        sums = block.sum(axis=1)
-        sign_matrix[:, cause_idx] = np.sign(sums)
-        sign_matrix[np.abs(sums) < 1e-12, cause_idx] = 1.0
-    return results.make_matrix(sign_matrix, name="sign", metadata={"removed_signal_value": 0.0})
+    """Return coefficient-sum signs for effective effects and tested causes."""
+    values = np.zeros(
+        (len(results.effects), len(results.causes)),
+        dtype=np.float64,
+    )
 
+    snapshot = results.base_snapshot
+    if snapshot is None or snapshot.weights is None:
+        return results.make_matrix(
+            values,
+            name="sign",
+            metadata={"removed_signal_value": 0.0},
+        )
+
+    weights = results._weights_as_feature_output(snapshot.weights)
+
+    if weights.shape[0] != len(results.effects):
+        raise ValueError(
+            f"Weight shape {weights.shape} is incompatible with "
+            f"{len(results.effects)} effects"
+        )
+
+    for cause_index, cause in enumerate(results.causes):
+        if cause not in results.cause_slices:
+            raise ValueError(
+                f"Missing feature slice for tested cause: {cause!r}"
+            )
+
+        block = results.cause_slices[cause]
+        if not isinstance(block, slice):
+            raise ValueError(
+                f"Expected slice for cause {cause!r}; "
+                f"got {type(block).__name__}"
+            )
+
+        if (
+            block.start is None
+            or block.stop is None
+            or block.step not in (None, 1)
+            or not 0 <= block.start <= block.stop <= weights.shape[1]
+        ):
+            raise ValueError(
+                f"Invalid feature slice for cause {cause!r}: {block!r}; "
+                f"weights have {weights.shape[1]} feature columns"
+            )
+
+        sums = weights[:, block].sum(axis=1)
+        signs = np.sign(sums)
+
+        # Preserve the existing convention for near-zero coefficient sums.
+        signs[np.abs(sums) < 1e-12] = 1.0
+        values[:, cause_index] = signs
+
+    return results.make_matrix(
+        values,
+        name="sign",
+        metadata={"removed_signal_value": 0.0},
+    )
 
 @register_metric("base_mse")
 def base_mse(results: Any) -> CausalityMatrix:

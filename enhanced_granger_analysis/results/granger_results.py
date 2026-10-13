@@ -219,12 +219,8 @@ class GrangerAnalysisResults:
 
 	@property
 	def sign(self) -> pd.DataFrame:
-		"""Return the signed direction matrix inferred from base-model coefficients.
-
-		Returns: DataFrame whose entries encode the net effect sign for each
-		effect-cause pair.
-		"""
-		return self._sign_matrix()
+		"""Return coefficient-derived signs with removed variables restored."""
+		return self.evaluate("sign", restore_removed=True).data
 
 	def set_dof_method(self, method: DofMethod) -> None:
 		"""
@@ -352,22 +348,60 @@ class GrangerAnalysisResults:
 			ValueError: If the cause name is not part of the configured causal set.
 		"""
 		if cause not in self.causes:
-			raise ValueError(f"Unknown cause '{cause}'")
+			raise ValueError(f"Unknown tested cause: {cause!r}")
+
+		if cause not in self.cause_slices:
+			raise ValueError(
+				f"Missing feature slice for tested cause: {cause!r}"
+			)
+
 		if self.mask.size == 0:
 			return np.zeros(len(self.effects), dtype=np.int_)
-		cause_index = self.causes.index(cause)
-		if cause_index >= len(self.cause_slices) - 1:
-			return np.zeros(len(self.effects), dtype=np.int_)
+
+		if self.mask.ndim != 2 or self.mask.shape[0] != len(self.effects):
+			raise ValueError(
+				"Expected mask with shape "
+				f"(n_effects, n_features); got {self.mask.shape}"
+			)
+
 		block = self.cause_slices[cause]
+		if not isinstance(block, slice):
+			raise ValueError(
+				f"Expected slice for cause {cause!r}; got {type(block).__name__}"
+			)
+
+		if (
+			block.start is None
+			or block.stop is None
+			or block.step not in (None, 1)
+			or not 0 <= block.start <= block.stop <= self.mask.shape[1]
+		):
+			raise ValueError(
+				f"Invalid feature slice for cause {cause!r}: {block!r}; "
+				f"mask has {self.mask.shape[1]} feature columns"
+			)
+
 		mask_block = self.mask[:, block]
-		if self.dof_method == "active_support" and self.base_snapshot is not None and self.base_snapshot.weights is not None:
+
+		if (
+			self.dof_method == "active_support"
+			and self.base_snapshot is not None
+			and self.base_snapshot.weights is not None
+		):
 			weights = self._weights_as_feature_output(
 				self.base_snapshot.weights
 			)
-			weight_block = np.abs(weights[:, block])
-			mask_block = mask_block & (weight_block > 0.0)
-		return np.asarray(mask_block.sum(axis=1), dtype=np.int_)
 
+			if weights.shape != self.mask.shape:
+				raise ValueError(
+					f"Weight shape {weights.shape} does not match "
+					f"mask shape {self.mask.shape}"
+				)
+
+			mask_block = mask_block & (np.abs(weights[:, block]) > 0.0)
+
+		return np.asarray(mask_block.sum(axis=1), dtype=np.int_)
+	
 	def n_unrestricted_parameters(self) -> int:
 		"""
 		Calculate the model-width proxy used for residual degree-of-freedom
@@ -516,32 +550,34 @@ class GrangerAnalysisResults:
 				DataFrame with 1/0 indicator values after thresholding.
 			"""
 			metric_matrix = self.evaluate(metric, restore_removed=True)
-			result_df = metric_matrix.data.copy()
-			binary = (result_df < threshold).astype(int)
-			if with_sign:
-				binary = binary.mul(self.sign)
-			return binary
+			binary = (metric_matrix.data < threshold).astype(int)
+
+			if not with_sign:
+				return binary
+
+			signs = self.sign
+
+			if (
+				not binary.index.equals(signs.index)
+				or not binary.columns.equals(signs.columns)
+			):
+				raise ValueError(
+					"Restored metric and sign matrices must have identical "
+					"effect and cause axes."
+				)
+
+			return binary.mul(signs)
 
 	def _sign_matrix(self) -> pd.DataFrame:
 		"""
 		Summarize the net direction of each causal effect from base weights.
-
+		Unused variables are not restored to the matrix before returning.
 		Returns:
 			DataFrame containing a sign value for each effect-cause pair.
 		"""
-		if self.base_snapshot is None or self.base_snapshot.weights is None:
-			return pd.DataFrame(np.zeros((len(self.effects), len(self.causes))), index=self.effects, columns=self.causes, dtype=np.float64)
-		weights_matrix = self._weights_as_feature_output(self.base_snapshot.weights)
-		sign_values = np.zeros((len(self.effects), len(self.causes)), dtype=np.float64)
-		for cause_index, cause in enumerate(self.causes):
-			block = self.cause_slices[cause]
-			coefficients = weights_matrix[:, block]
+		return self.evaluate("sign", restore_removed=False).data
 
-			sum_coefficients = coefficients.sum(axis=1)
-			sign_values[:, cause_index] = np.sign(sum_coefficients)
-			sign_values[np.abs(sum_coefficients) < 1e-12, cause_index] = 1.0
-		return pd.DataFrame(sign_values, index=self.effects, columns=self.causes)
-
+	
 	def __repr__(self) -> str:
 		"""Return a compact textual summary of the result container."""
 		return (
