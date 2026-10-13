@@ -42,7 +42,6 @@ class MultiTaskGrangerAPI:
         """
         self.backend = backend
         self._reuse_data = bool(reuse_data)
-        self._stationarity_transformer = StationarityTransformer()
 
     def fit(
         self,
@@ -53,9 +52,9 @@ class MultiTaskGrangerAPI:
         relations: Optional[Mapping[Tuple[str, str], Any]] = None,
         lag_config: Optional[LagConfiguration] = None,
         lag_selector: Optional[BaseLagSelector] = None,
-        stationarity_transformer: Optional[StationarityTransformer] = None,
+        stationarity_transformer: Optional[StationarityTransformer] = StationarityTransformer(),
         missing_value_imputer: Optional[BaseImputer] = None,
-        schema_policy: str = "error",
+        schema_policy: str = "union",
         prepared_data: Any = None,
         backend_sample_fraction: float = 1.0,
         backend_max_samples: Optional[int] = None,
@@ -98,10 +97,4 @@ class MultiTaskGrangerAPI:
             "hiperoptimalization_conf": hiperoptimalization_conf,
             "initializer": initializer, "model_config": model_config,
         })
-        builder.prepare_data(prepared_data)
-        builder.prepare_components()
-        builder.build_model()
-        builder.initialize_weights()
-        builder.fit_base()
-        builder.fit_restricted_models()
-        return builder.get_results()
+        return builder.fit()

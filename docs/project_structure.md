@@ -7,14 +7,13 @@ This document describes the repository layout and the role of each major package
 ```text
 enhanced_granger_analysis/
 ├── enhanced_granger_analysis/   # Installable package source
-│   ├── api/                    # Public API: builder, orchestrator, simple API, config loading
-│   ├── backends/               # Backend strategies and backend-specific implementations
-│   ├── core/                   # Core configs, protocols, exceptions, output dataclasses
-│   ├── initializers/           # Weight initialization helpers
-│   ├── preprocessing/          # Stationarity, lag preparation, scaling
-│   ├── results/                # Result containers and causality/statistics utilities
-│   ├── scripts/                # Scripted experiment runners and packaged data files
-│   ├── tests/                  # Unit/integration tests packaged with the library
+│   ├── api/                    # Stateful builder, standard orchestration, config loading
+│   ├── backends/               # Strategies, models, and backend-specific components
+│   ├── core/                   # Shared configurations, protocols, and exceptions
+│   ├── hiperopt/               # Hyperoptimization subsystem
+│   ├── initializers/           # Optional model-weight initialization
+│   ├── preprocessing/          # Staged preparation and PreparedData contract
+│   ├── results/                # Snapshots, metrics, restoration, and causality matrices
 │   └── utilities/              # Shared helper functions (validation, metrics, etc.)
 ├── docs/                       # User and developer documentation
 ├── example/                    # Example data and notebooks
@@ -33,12 +32,21 @@ enhanced_granger_analysis/
 
 ### api
 
-Main entry points for users:
+Public analysis entry points and configuration loading:
 
-- `builder.py`: `MultitaskGrangerBuilder` (fluent API).
-- `orchestrator.py`: `MultiTaskGrangerAPI` (direct orchestration control).
-- `simple_granger.py`: lightweight pair-wise Granger API.
-- `config_loader.py`: JSON/YAML config normalization and test-group iterator.
+- `builder.py`: `MultiTaskGrangerBuilder`, which stores configuration and
+  runtime artifacts and executes individual pipeline stages.
+- `orchestrator.py`: `MultiTaskGrangerAPI`, which coordinates the standard
+  workflow through the builder.
+- `simple_granger.py`: independent pair-wise statsmodels analysis.
+- `config_loader.py`: JSON/YAML configuration normalization and grouped
+  experiment configuration expansion.
+
+`MultitaskGrangerBuilder` is a compatibility alias of
+`MultiTaskGrangerBuilder`.
+
+Configuration methods and execution stages are distinct. The builder is not
+only a facade over the orchestrator.
 
 ### backends
 
@@ -67,22 +75,56 @@ Utilities for building model state before training:
 
 ### preprocessing
 
-Data preprocessing pipeline used before model fitting:
+Staged data preparation and the contract passed to model execution:
 
-- `stationarity/`: differencing and stationarity tests,
-- `lag/`: lag order selection and lagged matrix construction,
-- `scaling/`: deterministic scalers (`standard`, `minmax`, `robust`, `maxabs`, `identity`).
+- `prepare_data.py`: the convenience entry point and preparation data models,
+  including `PreparedData`, `VariableRoles`, and `RemovedVariable`.
+- `pipeline.py`: `DataPreparer` and `DataPreparationConfig`.
+- `missing/`: optional missing-value imputation.
+- `stationarity/`: stationarity tests and transformations.
+- `lag/`: lag selection, feature construction, and target alignment.
+- `scaling/`: input and target scaling, including block-wise scaling.
+- `sampling.py`: workload-reduction strategies.
 
-For details, see [data preprocessing](data_preprocessing.md).
+Prepared data separates requested roles from effective roles and maps inputs
+to feature blocks through named `cause_slices`.
+
+For stage order and defaults, see [Data Preprocessing](data_preprocessing.md).
 
 ### results
 
-Result containers and matrix/statistics logic:
+Model-run storage, metric evaluation, and labelled result matrices:
 
-- causality matrices,
-- p-values and test statistics,
-- aggregation of base/reference model outputs,
-- helpers for converting fitted model outputs into final causality reports.
+- `granger_results.py`: result container, model snapshots, preparation context,
+  metric evaluation, and convenience accessors.
+- `metrics.py`: registered statistical, diagnostic, and sign metrics.
+- `restoration.py`: restoration of requested result axes using preprocessing
+  metadata.
+- `causality_matrix.py`: labelled metric-matrix wrapper.
+- `statistics.py`: statistical helper calculations.
+
+Metrics are calculated for effective fitted variables.
+Restoration is applied when returning evaluated matrices.
+
+Signed results combine restored metric and sign matrices.
+Coefficient blocks are selected through named cause slices.
+
+For the public result contract, see [Results and Metrics](results_and_metrics.md).
+
+### hiperopt
+
+Hyperoptimization subsystem for evaluating candidate configurations.
+
+Its configuration can describe model, optimizer, and regularizer parameter
+groups.
+
+The standard builder pipeline currently accepts hyperoptimization settings
+but does not execute an optimization stage.
+
+Keep subsystem capabilities separate from their integration into the standard
+analysis workflow.
+
+(still under development)
 
 ### scripts
 

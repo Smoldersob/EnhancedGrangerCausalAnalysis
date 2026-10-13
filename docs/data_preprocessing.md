@@ -15,23 +15,89 @@ The `preprocessing` package contains:
 - `preprocessing/missing` and `preprocessing/sampling`: optional imputation and
   sample-reduction strategies.
 
-## Standard Preparation Order
+## Standard preparation order
 
-`prepare_data(...)` creates a `DataPreparer` and executes these stages:
+`prepare_data(...)` creates a `DataPreparer` and executes:
 
-1. **Schema alignment** (`schema_policy`)
-2. **Missing-value imputation**
-3. **Redundancy removal** (constant and duplicate variables)
-4. **Stationarity transform** (`StationarityTransformer`)
-5. **Lag preparation** (`LagEngine` plus an optional selector)
-6. **Scaling** (`x_scaler` and `y_scaler`)
-7. **Backend workload reduction** (`sampling_strategy`,
-   `backend_sample_fraction`, and `backend_max_samples`)
+1. Schema alignment.
+2. Optional missing-value imputation.
+3. Removal of constant and exactly duplicated variables.
+4. Optional stationarity transformation.
+5. Lagged input and target construction.
+6. Input and target scaling.
+7. Workload reduction through the configured sampling strategy.
 
-The order is significant. Stationarity is fitted before lagging, scalers are
-fitted on the lagged arrays, and workload reduction occurs after scaling. The
-same prepared arrays and metadata are then used by the base and all restricted
-model runs.
+Role assignment takes place before these stages.
+
+The standard workflow fits scalers on the lagged arrays before workload
+reduction. Consequently, reducing the workload does not reduce the data used
+to fit those scalers.
+
+The base model and all restricted runs use the same prepared observations and
+effect ordering.
+
+This workflow does not automatically create training, validation, and test
+partitions. Applications requiring held-out evaluation must define the split
+and transformation-fitting policy explicitly.
+
+## Defaults differ between entry points
+
+| Setting | `prepare_data()` | `DataPreparationConfig` | Analysis builder |
+| --- | --- | --- | --- |
+| Schema policy | `error` | `error` | `union` |
+| Stationarity transformer | `None` | `None` | Default `StationarityTransformer` |
+| Sampling | `NoSampling` | `NoSampling` | `None`, resolved to `NoSampling` |
+| Input scaler | `standard` | `standard` | `standard` |
+| Target scaler | `standard` | `standard` | `standard` |
+
+Use explicit settings when reproducing an experiment across entry points.
+
+For schema alignment:
+
+- `error` requires matching column names and order across segments.
+- `union` aligns segments to the union of columns. Absent columns become
+  missing values; alignment alone does not impute them.
+
+## Optional transformations
+
+For `DataPreparer`, omitting a stage argument uses its configuration.
+Passing `None` explicitly disables the optional transformation:
+
+```python
+preparer.imput(None)
+preparer.force_stationarity(None)
+```
+
+For example:
+
+```python
+from enhanced_granger_analysis.preprocessing.pipeline import (
+    DataPreparer,
+    DataPreparationConfig,
+)
+
+preparer = DataPreparer(
+    DataPreparationConfig(
+        stationarity_transformer=None,
+        missing_value_imputer=None,
+    )
+)
+```
+
+The analysis builder currently behaves differently:
+`.stationarity(None)` creates a default transformer.
+
+To disable stationarity through the builder configuration:
+
+```python
+builder.from_config({"stationarity_transformer": None})
+```
+
+For explicit no-op scaling, use `"identity"`:
+
+```python
+builder.scaling(x_scaler="identity", y_scaler="identity")
+```
 
 ## Staged `DataPreparer` Example
 
@@ -120,6 +186,14 @@ results = builder.get_results()
 
 The builder keeps the prepared arrays, feature slices, masks, scalers, and
 role metadata in the `PreparedData` object used by every model run.
+
+Supplying `PreparedData` bypasses preprocessing inside the builder.
+The supplied arrays, role metadata, feature mappings, masks, and fitted
+scalers are therefore authoritative for that execution.
+
+Changing preprocessing settings on the builder does not transform an already
+supplied `PreparedData` object. Rebuild prepared data explicitly when changing
+the preprocessing workflow.
 
 ## Lag-and-Scaling Example
 
@@ -277,6 +351,53 @@ Common behavior:
 - Explicit fitted-state checks (`ScalerNotFittedError` when used before fit).
 - `inverse_transform` to map outputs back to original scale.
 
+## Standard and block-wise scaling
+
+The standard `scale()` stage applies the configured scaler to the prepared
+input array and independently scales the targets.
+
+`block_scale()` is an alternative input-scaling stage. It constructs a
+`BlockScaler` from `cause_slices`; target scaling remains separate.
+
+```python
+preparer.lag()
+preparer.block_scale(x_scaler="standard", y_scaler="standard")
+preparer.reduce_workload()
+```
+
+The standard `fit()` workflow calls `scale()`, not `block_scale()`.
+
+## Workload reduction
+
+`NoSampling` is the default strategy. To enable reduction, configure a
+sampling strategy that selects a subset of observations.
+
+For non-empty prepared data, the requested sample budget is calculated as:
+
+```text
+n_keep = max(1, floor(backend_sample_fraction * n_samples))
+```
+
+If `backend_max_samples` is set, it further limits that budget.
+The configured strategy receives the requested budget and selects indices.
+
+Selection must return valid, unique, strictly increasing integer indices.
+
+Workload reduction is not a training/validation/test split.
+
+The standard workflow samples after scaling. A manual workflow can sample
+after lagging and before scaling, in which case the scalers are fitted on the
+retained subset:
+
+```python
+preparer.lag()
+preparer.reduce_workload()
+preparer.scale()
+```
+
+Changing this order changes the data used to fit scaling parameters and should
+be recorded as part of the experiment configuration.
+
 ## Integration with API
 
 In the public preparation function and builder:
@@ -296,29 +417,136 @@ This keeps preprocessing consistent across all supported backends (`pytorch`, `t
 
 ## PreparedData contract
 
-`PreparedData` is the contract between preprocessing and model execution:
+`PreparedData` connects preprocessing with model execution.
 
-- `requested_roles`: roles requested by the caller before cleanup;
-- `effective_roles`: roles after constants and duplicates are removed;
-- `causes`: effective model inputs;
-- `effects`: effective model outputs; an effect does not have to be a cause;
-- `tested_causes`: effective causes for which restricted runs are created;
-- `cause_slices`: mapping from each effective cause name to its lagged feature
-  slice in `X_scaled` and `X_raw`;
-- `base_mask`: lag/relationship mask used when constructing constraints;
-- `removed_variables`: typed metadata describing removed variables, including
-  reason, removed roles, and a retained duplicate where applicable;
-- `sample_indices`: indices retained after workload reduction.
+### Arrays and transforms
 
-`tested_causes` must be a subset of `causes`. The order of `tested_causes` only
-controls the order of restricted runs and result columns; it does not determine
-the feature block. Always use `prepared.cause_slices[cause_name]` when selecting
-an input block.
+- `X_raw`: lagged input features before scaling.
+- `y_raw`: aligned targets before scaling.
+- `X_scaled`: model inputs after scaling.
+- `y_scaled`: model targets after scaling.
+- `x_scaler` and `y_scaler`: fitted scaling objects.
+- `stationarity_transformer`: transformer used before lag construction,
+  or `None`.
+- `lag_engine`: lag-construction object and its selection artifacts.
+- `base_mask`: configured lag-activity mask.
 
-For multiple input segments, use `schema_policy="error"` when all schemas must
-match exactly. Use `schema_policy="union"` to align to the union of columns,
-with missing columns represented as missing values for the subsequent imputation
-stage.
+`raw` means unscaled at this preparation stage. It does not necessarily mean
+the original input values: stationarity transformation may already have been
+applied.
+
+Inverse target scaling reverses scaling, not differencing.
+
+### Variable roles
+
+- `requested_roles`: input, output, and tested-cause roles requested before
+  redundancy removal.
+- `effective_roles`: roles remaining after cleanup.
+- `causes`: effective model inputs.
+- `effects`: effective model outputs.
+- `tested_causes`: effective inputs tested through restricted runs.
+
+`tested_causes` must be a subset of `causes`.
+
+An effect does not have to belong to `causes`. In that case, its lagged history
+is not automatically included in the model inputs, and role assignment emits
+a warning.
+
+Omitted or empty role lists are currently interpreted as defaults during
+initial role assignment. They should not be used to request an intentionally
+empty role.
+
+If cleanup leaves no effective causes, effects, or tested causes, lag
+preparation raises `DataValidationError`. This is an inability to execute the
+requested analysis, not a statistical conclusion that causality is absent.
+
+### Named input blocks
+
+- `cause_slices`: maps each effective input name to its complete feature slice.
+- `tested_cause_slices`: exposes mappings for effective tested causes.
+- `predictor_slices`: compatibility alias; prefer `cause_slices` in new code.
+
+Example:
+
+```python
+cause_slices = {
+    "x1": slice(0, 2),
+    "x2": slice(2, 4),
+    "x3": slice(4, 6),
+}
+```
+
+For three model inputs, this mapping contains three entries. Each slice
+already stores both boundaries.
+
+The equivalent positional boundary array is:
+
+```python
+block_boundaries =[0][2][4][6]
+```
+
+It contains four entries because adjacent boundaries define each block.
+
+In general, a mapping for `n` inputs contains `n` slices, while a boundary
+array contains `n + 1` endpoints.
+
+Select an input block by name:
+
+```python
+block = prepared.cause_slices["x1"]
+x1_features = prepared.X_scaled[:, block]
+```
+
+The order of `tested_causes` does not determine feature-block positions.
+
+`PreparedData` does not expose `col_offsets` as its public mapping contract.
+Lower-level lag-selection and component interfaces may still use positional
+offsets internally.
+
+### Removed variables
+
+`removed_variables` maps names to `RemovedVariable` objects containing:
+
+- `name`;
+- `reason`: `"constant"` or `"duplicate"`;
+- `removed_roles`;
+- `retained_variable`, when the variable duplicates a retained signal.
+
+Constant and duplicate diagnostics operate on the combined input segments.
+Duplicate detection uses exact equality rather than a correlation threshold.
+
+### How removal metadata is used by results
+
+The preparation pipeline records removed variables but does not calculate
+their causality results. The result layer uses this metadata when restoring
+evaluated metric matrices to the requested roles.
+
+Restoration is metric-dependent:
+
+- newly added rows and columns use the metric's `removed_signal_value`;
+- duplicate effect rows are copied from available fitted representatives;
+- duplicate tested-cause columns are copied from available tested
+  representatives.
+
+A representative that was only a model input has no computed tested-cause
+column to copy.
+
+The sign metric uses the same restoration mechanism as other metrics, with
+a fill value of `0`. Statistical metrics can define different fill values,
+such as `1` for p-values or `0` for test statistics.
+
+Restoration preserves the requested layout according to these rules.
+It does not fit additional models or independently estimate signs for
+removed variables.
+
+### Observation tracking
+
+`sample_indices` stores positions in the combined lagged arrays before
+workload reduction. It is not a replacement for the original DataFrame index
+and does not encode segment identifiers or timestamps.
+
+Sampling updates raw arrays, already available scaled arrays, and
+`sample_indices` using the same selected positions.
 
 ## When to Use Which Component
 

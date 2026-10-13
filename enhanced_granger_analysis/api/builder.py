@@ -65,7 +65,7 @@ class MultiTaskGrangerBuilder:
             "causes": None, "effects": None, "tested_causes": None,
             "relations": None, "lag_config": None, "lag_selector": None,
             "stationarity_transformer": StationarityTransformer(),
-            "missing_value_imputer": None, "schema_policy": "error",
+            "missing_value_imputer": None, "schema_policy": "union",
             "backend_sample_fraction": 1.0, "backend_max_samples": None,
             "random_state": None, "sampling_strategy": None,
             "x_scaler": "standard", "y_scaler": "standard",
@@ -163,7 +163,7 @@ class MultiTaskGrangerBuilder:
         self._invalidate_from("data")
         return self
 
-    def stationarity(self, transformer=None):
+    def stationarity(self, transformer=StationarityTransformer()):
         """
         Configure the stationarity transformation for the analysis.
 
@@ -173,7 +173,7 @@ class MultiTaskGrangerBuilder:
         Returns:
             Self for method chaining
         """
-        self._fit_kwargs["stationarity_transformer"] = transformer or StationarityTransformer()
+        self._fit_kwargs["stationarity_transformer"] = transformer
         self._invalidate_from("data")
         return self
 
@@ -539,11 +539,12 @@ class MultiTaskGrangerBuilder:
         self._save_snapshot(None)
         return self._base_weights
 
-    def fit_restricted(self, cause: str):
+    def fit_restricted(self, cause: str, start_with_base: bool = True, start_with_initial: bool = False):
         """
         Fit a restricted model for a specific cause.
         Args:
             cause: The cause for which to fit the restricted model.
+            use_hot_start: Whether to use the base model weights as a starting point.
         """
         self._require_model()
         if self._base_weights is None:
@@ -551,7 +552,10 @@ class MultiTaskGrangerBuilder:
         if cause not in self._prepared_data.cause_slices:
             raise DataValidationError(f"Unknown tested cause: {cause!r}")
         block = self._prepared_data.cause_slices[cause]
-        self.set_weights(self._base_weights)
+        if start_with_initial and self._initial_weights is not None:
+            self.set_weights(self._initial_weights)
+        elif start_with_base and self._base_weights is not None:
+            self.set_weights(self._base_weights)
         self._model.omit_variables(list(range(block.start, block.stop)))
         self.reset_callbacks(f"reference_cause_{cause}")
         self._model.fit()

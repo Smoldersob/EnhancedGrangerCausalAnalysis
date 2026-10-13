@@ -107,7 +107,7 @@ def prepare_data(
 		lag_selector: Optional[BaseLagSelector] = None,
 		stationarity_transformer: Optional[StationarityTransformer] = None,
 		missing_value_imputer: Optional[BaseImputer] = None,
-		schema_policy: str = "union",
+		schema_policy: str = "error",
 		backend_sample_fraction: float = 1.0,
 		backend_max_samples: Optional[int] = None,
 		random_state: Optional[int] = None,
@@ -116,9 +116,6 @@ def prepare_data(
 		y_scaler: Optional[Any] = "standard",
 ) -> PreparedData:
 	from .pipeline import DataPreparer, DataPreparationConfig
-
-	if stationarity_transformer is _DEFAULT_STATIONARITY:
-		stationarity_transformer = StationarityTransformer()
 
 	if sampling_strategy is None:
 		sampling_strategy = NoSampling()
