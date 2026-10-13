@@ -138,13 +138,21 @@ For details, see [script usage](script_usage.md).
 
 ### tests
 
-Covers the main execution paths:
+Unit and integration tests for library components and execution workflows.
 
-- backend factory and backend integrations,
-- builder and orchestrator behavior,
-- config loading and group sweeps,
-- lag selection, constraints, and regularization,
-- result-object correctness and smoke tests.
+The test directory is located inside the source package, while package
+configuration excludes it from installed distribution packages.
+
+New lifecycle and result-contract changes should include regression tests
+for:
+
+- named feature-block selection;
+- single-input and final-input restriction counting;
+- tested-cause ordering independent of input ordering;
+- restored sign and metric axes;
+- callback and omission isolation;
+- snapshot independence;
+- metric-cache invalidation.
 
 ### utilities
 
