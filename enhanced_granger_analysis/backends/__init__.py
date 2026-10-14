@@ -11,9 +11,9 @@ __all__ = [
 if importlib.util.find_spec("keras") is not None:
 	try:
 		from .keras_backend import KerasBackendStrategy
-		__all__.append("TensorFlowBackendStrategy")
+		__all__.append("KerasBackendStrategy")
 	except Exception:
-		TensorFlowBackendStrategy = None
+		KerasBackendStrategy = None
 
 if importlib.util.find_spec("torch") is not None:
 	try:

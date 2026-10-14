@@ -241,7 +241,6 @@ def p_value(results: Any) -> CausalityMatrix:
 
 
 @register_metric("sign")
-@register_metric("sign")
 def sign_metric(results: Any) -> CausalityMatrix:
     """Return coefficient-sum signs for effective effects and tested causes."""
     values = np.zeros(

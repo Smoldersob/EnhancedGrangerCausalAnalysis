@@ -1,3 +1,4 @@
+import importlib
 from typing import Any, Dict, List, Optional, Mapping
 
 from numpy.typing import NDArray
@@ -67,11 +68,7 @@ class KerasBackendStrategy(BackendStrategy):
 			self._object_loader = KerasObjectLoader(keras, loading_verbose=loading_verbose)
 
 	def is_available(self) -> bool:
-		try:
-			import keras  # noqa: F401
-			return True
-		except ImportError:
-			return False
+		return importlib.util.find_spec("keras")
 
 	def build_model(
 		self,

@@ -158,7 +158,7 @@ def build_pytorch_constraint_from_relations(
 	n_features: int,
 	base_mask: Optional[NDArray[np.float64]] = None,
 	eps: float = 1e-8,
-) -> PyTorchMaskAndMinAbsSumConstraint:
+) -> PyTorchMaskAndMinAbsSumConstraint|PyTorchMaskConstraint:
 	"""Build PyTorch combined constraint from user-friendly relation mapping."""
 	spec = process_user_relations(
 		relations=relations,

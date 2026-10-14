@@ -19,7 +19,6 @@ from ...core.exceptions import (
 	RegularizerConfigurationError,
 	BackendCompatibilityError,
 	ModelNotFittedError,
-
 	TrainingError,
 )
 
@@ -34,6 +33,22 @@ else:  # pragma: no cover - runtime dependency check
 	TensorDataset = None
 	DataLoader = None
 
+
+if nn is not None:
+    class TorchFeatureMask(nn.Module):
+        """Elementwise input masking with a non-trainable buffer."""
+
+        def __init__(self, n_features: int):
+            super().__init__()
+            self.register_buffer(
+                "mask",
+                torch.ones(n_features, dtype=torch.float32),
+            )
+
+        def forward(self, x):
+            return x * self.mask
+else:
+    TorchFeatureMask = None
 
 class PyTorchGrangerModel(BaseGrangerModel):
 	"""PyTorch implementation of Granger model with variable masking and linear coefficients."""
@@ -275,10 +290,7 @@ class PyTorchGrangerModel(BaseGrangerModel):
 		n_features = x.shape[1]
 		n_outputs = y.shape[1]
 
-		variable_control_layer = nn.Linear(n_features, n_features, bias=False)
-		with torch.no_grad():
-			variable_control_layer.weight.copy_(torch.eye(n_features, dtype=torch.float32))
-		variable_control_layer.weight.requires_grad_(False)
+		variable_control_layer = TorchFeatureMask(n_features)
 
 		coefficient_layer = nn.Linear(n_features, n_outputs, bias=True)
 
@@ -520,23 +532,57 @@ class PyTorchGrangerModel(BaseGrangerModel):
 		return [kernel, bias]
 	
 	def omit_variables(self, variable_indices: List[int]) -> None:
-		"""Set selected variable mask entries to zero in non-trainable diagonal layer."""
-		if self._variable_control_layer is None or self._n_features is None:
-			raise ModelNotFittedError("Model is not initialized. Call initialize(...) first.")
-
-		# Every call starts from fully enabled inputs; omissions are non-cumulative.
-		self._variable_mask = np.ones(self._n_features, dtype=np.float64)
-
-		for idx in variable_indices:
-			if idx < 0 or idx >= self._n_features:
-				raise TrainingError(f"Variable index {idx} out of range [0, {self._n_features - 1}]")
-			self._variable_mask[idx] = 0.0
-
-		diagonal_kernel = np.diag(self._variable_mask).astype(np.float32)
-		with torch.no_grad():
-			self._variable_control_layer.weight.copy_(
-				torch.tensor(diagonal_kernel, dtype=torch.float32, device=self.device)
+		"""Replace omitted input features without changing coefficients."""
+		if (
+			self._variable_control_layer is None
+			or self._n_features is None
+		):
+			raise ModelNotFittedError(
+				"Model is not initialized. Call initialize(...) first."
 			)
+
+		indices = np.asarray(variable_indices)
+
+		if indices.ndim != 1:
+			raise TrainingError(
+				"variable_indices must be a one-dimensional list of integers."
+			)
+
+		if indices.size:
+			if indices.dtype.kind not in {"i", "u"}:
+				raise TrainingError(
+					"Variable indices must be integers, not floats or booleans."
+				)
+
+			if (
+				np.any(indices < 0)
+				or np.any(indices >= self._n_features)
+			):
+				raise TrainingError(
+					f"Variable indices must belong to "
+					f"[0, {self._n_features - 1}]."
+				)
+
+		indices = indices.astype(np.intp, copy=False)
+
+		variable_mask = np.ones(
+			self._n_features,
+			dtype=np.float64,
+		)
+		variable_mask[indices] = 0.0
+
+		mask_buffer = self._variable_control_layer.mask
+
+		with torch.no_grad():
+			mask_buffer.copy_(
+				torch.as_tensor(
+					variable_mask,
+					dtype=mask_buffer.dtype,
+					device=mask_buffer.device,
+				)
+			)
+
+		self._variable_mask = variable_mask
 
 	def set_regularizer(self, regularizer: Any) -> None:
 		"""Set regularizer with PyTorch component validation."""

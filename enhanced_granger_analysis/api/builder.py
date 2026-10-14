@@ -1,11 +1,12 @@
 from __future__ import annotations
 
 import copy
-from pathlib import Path
-from typing import Any, Dict, List, Mapping, Optional, Sequence
-
 import numpy as np
 import pandas as pd
+
+from pathlib import Path
+from typing import Any, Dict, List, Mapping, Optional, Sequence
+from time import perf_counter
 
 from ..backends import BackendFactory
 from ..core.exceptions import DataValidationError
@@ -546,20 +547,32 @@ class MultiTaskGrangerBuilder:
             cause: The cause for which to fit the restricted model.
             use_hot_start: Whether to use the base model weights as a starting point.
         """
-        self._require_model()
         if self._base_weights is None:
             raise DataValidationError("fit_base() must be completed before fit_restricted()")
         if cause not in self._prepared_data.cause_slices:
             raise DataValidationError(f"Unknown tested cause: {cause!r}")
-        block = self._prepared_data.cause_slices[cause]
+        self._require_model()
+        timings = {}
+        t0 = perf_counter()
         if start_with_initial and self._initial_weights is not None:
             self.set_weights(self._initial_weights)
         elif start_with_base and self._base_weights is not None:
             self.set_weights(self._base_weights)
+        timings["restore_weights"] = perf_counter() - t0
+
+        t0 = perf_counter()
+        block = self._prepared_data.cause_slices[cause]
         self._model.omit_variables(list(range(block.start, block.stop)))
+        timings["update_mask"] = perf_counter() - t0
+        
+        t0 = perf_counter()
         self.reset_callbacks(f"reference_cause_{cause}")
+        timings["reset_callbacks"] = perf_counter() - t0
+
+        t0 = perf_counter()
         self._model.fit()
-        self._save_snapshot(cause)
+        timings["fit_model"] = perf_counter() - t0
+        self._save_snapshot(cause, additional_metadata={"timings": timings})
 
     def fit_restricted_models(self):
         """Fit restricted models for all tested causes."""
@@ -568,7 +581,7 @@ class MultiTaskGrangerBuilder:
             self.fit_restricted(cause)
         return self._results
 
-    def _save_snapshot(self, cause: Optional[str]):
+    def _save_snapshot(self, cause: Optional[str], additional_metadata: Optional[Mapping[str, Any]] = None):
         """
         Save the predictions and weights of the model for a specific cause.
         Args:
@@ -577,10 +590,12 @@ class MultiTaskGrangerBuilder:
         predictions = self._prepared_data.y_scaler.inverse_transform(
             np.asarray(self._model.predict(self._prepared_data.X_scaled), dtype=float))
         weights = np.asarray(self._model.get_weights()[0], dtype=float).copy()
+        additional_metadata = dict(additional_metadata or {})
+        additional_metadata["backend"] = self._backend  
         if cause is None:
-            self._results.set_base_snapshot(predictions, weights, {"backend": self._backend})
+            self._results.set_base_snapshot(predictions, weights, additional_metadata)
         else:
-            self._results.set_reference_snapshot(cause, predictions, weights, {"backend": self._backend})
+            self._results.set_reference_snapshot(cause, predictions, weights, additional_metadata)
 
     @property
     def results(self):

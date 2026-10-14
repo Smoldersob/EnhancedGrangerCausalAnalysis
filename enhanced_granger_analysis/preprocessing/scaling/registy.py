@@ -1,5 +1,6 @@
 from typing import Any, Callable, Optional
 
+
 _SCALERS: dict[str, Any] = {}
 
 
@@ -35,7 +36,5 @@ def resolve_scaler(name: Optional[Any]) -> Any:
             return obj
         else:
             raise ValueError(f"Callable {name} does not return a valid scaler object.")   
-    if isinstance(name, object) and all(hasattr(name, attr) and callable(getattr(name, attr)) for attr in ("fit_transform", "transform", "inverse_transform")):
-        return name
     raise ValueError(f"Unsupported scaler: {name}")
     

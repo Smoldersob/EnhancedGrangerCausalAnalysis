@@ -12,18 +12,20 @@ __all__.extend([
 if importlib.util.find_spec("pandas") is not None:
 	try:
 		from .builder import MultiTaskGrangerBuilder, MultitaskGrangerBuilder
-		from .orchestrator import MultiTaskGrangerAPI, MultiTaskGrangerOutput
+		from .orchestrator import MultiTaskGrangerAPI
 		from .simple_granger import SimpleGrangerAPI, SimpleGrangerOutput
 
 		__all__.extend([
 			"MultiTaskGrangerBuilder",
 			"MultitaskGrangerBuilder",
 			"MultiTaskGrangerAPI",
-			"MultiTaskGrangerOutput",
 			"SimpleGrangerAPI",
 			"SimpleGrangerOutput",
 		])
-	except Exception:
+	except Exception as e:
 		# Keep lightweight utilities importable even if optional backend stack
 		# cannot be imported in a given environment.
+		print(f"Warning: Optional backend dependencies could not be imported. "
+			  f"MultiTaskGrangerBuilder and related classes will not be available."
+			  f"Error details: {e}")
 		pass

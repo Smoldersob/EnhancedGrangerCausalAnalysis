@@ -22,11 +22,11 @@ def _ensure_keras() -> None:
 
 @keras.utils.register_keras_serializable(
     package="EnhancedGrangerCausalAnalysis",
-    name="KerasZeroMaskConstraint"
+    name="KerasMaskConstraint"
 )
-class KerasZeroMaskConstraint(keras.constraints.Constraint):
+class KerasMaskConstraint(keras.constraints.Constraint):
     def __init__(self, mask):
-        _ensure_tensorflow()
+        _ensure_keras()
         mask_arr = keras.ops.array(mask, dtype="float32")
         self.mask = mask_arr
         self._mask_t = keras.ops.transpose(mask_arr)
@@ -270,7 +270,7 @@ def build_keras_constraint_from_relations(
     n_features: int,
     base_mask: Optional[NDArray[np.float32]] = None,
     eps: float = 1e-8,
-) -> TensorFlowMaskAndMinAbsSumConstraint:
+) -> KerasMaskAndMinAbsSumConstraint|KerasMaskConstraint:
     """Build TensorFlow combined constraint from user-friendly relation mapping."""
     spec = process_user_relations(
         relations=relations,
@@ -281,6 +281,6 @@ def build_keras_constraint_from_relations(
         base_mask=base_mask,
     )
     if len(spec.rules) == 0:
-        return KerasZeroMaskConstraint(spec.mask)
+        return KerasMaskConstraint(spec.mask)
     else:
         return KerasMaskAndMinAbsSumConstraint(spec=spec, eps=eps)

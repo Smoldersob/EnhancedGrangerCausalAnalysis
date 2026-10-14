@@ -16,17 +16,17 @@ __all__ = [
 try:
     if importlib.util.find_spec("keras") is not None:
         from .keras_constraints import (
-            TensorFlowZeroMaskConstraint,
-            TensorFlowMaskAndMinAbsSumConstraint,
+            KerasMaskConstraint,
+            KerasMaskAndMinAbsSumConstraint,
             build_keras_constraint_from_relations,
         )
         __all__.extend([
-            "KerasZeroMaskConstraint",
+            "KerasMaskConstraint",
             "KerasMaskAndMinAbsSumConstraint",
             "build_keras_constraint_from_relations",
         ])
 except Exception:
-    KerasZeroMaskConstraint = None
+    KerasMaskConstraint = None
     KerasMaskAndMinAbsSumConstraint = None
     build_keras_constraint_from_relations = None
 

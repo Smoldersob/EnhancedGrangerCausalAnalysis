@@ -154,7 +154,7 @@ class KerasGrangerModel(BaseGrangerModel):
 
     def __init__(
         self,
-        backend: str = "Keras",
+        backend: str = "keras",
         keras_backend: Optional[str] = None,
         regularizer: Optional[Any] = None,
         constraint: Optional[Any] = None,
@@ -465,8 +465,9 @@ class KerasGrangerModel(BaseGrangerModel):
 
         self._n_features = n_features
         self._n_outputs = n_outputs
-        self._X_train = X
-        self._y_train = y
+        with self.device_manager.scope():
+            self._X_train =  keras.ops.convert_to_tensor(X,dtype="float32")
+            self._y_train =  keras.ops.convert_to_tensor(y,dtype="float32")
         self._fitted = False
 
     def fit(self, return_history: bool = False) -> Dict[str, Any]:

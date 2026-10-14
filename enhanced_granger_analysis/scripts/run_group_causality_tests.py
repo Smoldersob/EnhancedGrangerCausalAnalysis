@@ -46,9 +46,9 @@ from typing import Any, Dict, List, Tuple
 import pandas as pd
 
 try:
-    from ..api import MultiTaskGrangerBuilder, TestGroupConfigIterator
-    from ..api.config_loader import BuilderConfigLoader
-    from ..utilities.metric_calculator import MetricCalculator
+    from ..api.builder import MultiTaskGrangerBuilder
+    from ..api.config_loader import BuilderConfigLoader, TestGroupConfigIterator
+    from ..utilities.metric_calculator import MetricCalculator 
 except ImportError:  # pragma: no cover - direct script execution fallback
     sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
     from enhanced_granger_analysis.api import MultiTaskGrangerBuilder, TestGroupConfigIterator
