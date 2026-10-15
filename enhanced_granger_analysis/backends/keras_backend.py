@@ -6,7 +6,13 @@ from numpy.typing import NDArray
 from .base_backend import BackendStrategy
 from .object_loaders.keras_object_loader import KerasObjectLoader
 
-
+if importlib.util.find_spec("keras"):
+	import os
+	if importlib.util.find_spec("tensorflow"):
+		os.environ["KERAS_BACKEND"] = "tensorflow"
+	elif importlib.util.find_spec("torch"):
+		os.environ["KERAS_BACKEND"] = "torch"
+		
 class KerasBackendStrategy(BackendStrategy):
 	"""Strategy for Keras backend."""
 
