@@ -21,7 +21,7 @@ class TorchTensorBoardCallback(Callback):
 		flush_secs: int = 30,
 		track_weight_histograms: bool = False,
 		histogram_every_n_epochs: int = 1,
-	) -> None:
+	):
 		if log_every_n_epochs <= 0:
 			raise TrainingConfigurationError("log_every_n_epochs must be a positive integer")
 		if histogram_every_n_epochs <= 0:
@@ -113,15 +113,3 @@ class TorchTensorBoardCallback(Callback):
 			self._writer.flush()
 			self._writer.close()
 			self._writer = None
-
-	def clone_for_run(self, run_name: str) -> "TorchTensorBoardCallback":
-		"""Create a clean callback; do not copy best loss or stored weights."""
-		del run_name  # This callback has no run-specific destination.
-
-		return type(self)(
-			log_dir=self.log_dir,
-			log_every_n_epochs=self.log_every_n_epochs,
-			flush_secs=self.flush_secs,
-			track_weight_histograms=self.track_weight_histograms,
-			histogram_every_n_epochs=self.histogram_every_n_epochs,
-		)

@@ -12,7 +12,7 @@ from enhanced_granger_analysis import BackendFactory
 # Explicit backend
 strategy = BackendFactory.get_strategy("pytorch")
 
-# Preferred available backend (priority: pytorch > tensorflow > sklearn)
+# Preferred available backend (priority: pytorch > keras/tensorflow > sklearn)
 strategy_auto = BackendFactory.get_strategy()
 
 # Enable loading logs
@@ -113,24 +113,18 @@ Current behavior:
 
 This keeps the system stable while still allowing a custom subclass to plug into the same model lifecycle when it inherits from the backend's existing base implementation.
 
-Example:
+### Custom model subclasses
 
-```python
-class MyTensorFlowModel(TensorFlowGrangerModel):
-    def __init__(self, **kwargs):
-        super().__init__(**kwargs)
-        self.hidden_layers = kwargs.get("hidden_layers", 1)
+Some strategy implementations accept a custom subclass of their default
+model implementation.
 
-model = strategy.build_model(
-    n_features=20,
-    n_outputs=3,
-    model=MyTensorFlowModel,
-    model_config={"hidden_layers": 2},
-    epochs=20,
-)
-```
+Use the actual model class exposed by the selected strategy, and preserve
+its initialization, fitting, prediction, weight-management, omission, and
+callback-reset contracts.
 
-This is intentionally not a dynamic plugin system yet. The goal is to keep extension points simple and local to the backend's current model family.
+This extension mechanism is not a general cross-backend model registry (maybe added in future).
+Check the selected strategy's accepted `model` or `model_type` configuration
+before using a custom subclass.
 
 ## 6. Build Constraint from Relation Mapping
 
@@ -146,29 +140,96 @@ constraint = strategy.build_constraint_from_relations(
     base_mask=None,
 )
 ```
+Positional offsets in this strategy-level interface are distinct from the
+public `PreparedData.cause_slices` mapping (were available in older implementation).
+
+When integrating prepared data, derive offsets from named slices in the
+effective input order rather than from the order of tested causes.
 
 ## 7. How to Add New Components
 
-## Callback
+## Adding new components
 
-- Scikit/PyTorch shared callbacks: inherit backend callback base interface and implement hooks.
-- TensorFlow callbacks: inherit `tf.keras.callbacks.Callback`.
-- Register dictionary names in the corresponding object loader (`np_object_loader`, `torch_object_loader`, `tf_object_loader`).
+Use the interfaces accepted by the selected library strategy.
 
-## Constraint
+### Callbacks
 
-- Provide callable behavior compatible with model training.
-- For TensorFlow, implement a `tf.keras.constraints.Constraint`-compatible class.
-- Register names in object loaders so dict specs can instantiate your class.
+For the native PyTorch and scikit/numpy implementations, follow the callback
+interface used by their models.
 
-## Regularizer
+For the Keras-based implementation, use callbacks compatible with the Keras
+API and verify their behavior under the selected runtime.
 
-- Scikit: callable object returning penalty/gradient-compatible output.
-- PyTorch: `torch.nn.Module` or callable accepted by backend model.
-- TensorFlow: `tf.keras.regularizers.Regularizer`.
-- Register names in object loaders.
+A callback must also be compatible with the per-run reset or cloning mechanism.
+Constructor compatibility alone does not establish lifecycle compatibility.
 
-## 8. When You Need a New Backend (not only new components)
+Register dictionary names in the strategy's component loader when the
+component should be available through configuration files.
+
+### Constraints and regularizers
+
+Implement the interface required by the selected model and loader.
+
+For Keras-based components, use the Keras constraint and regularizer APIs.
+Avoid introducing a dependency on `tf.keras` unless that dependency is
+intentional and documented.
+
+Register component names and aliases in the corresponding loader.
+
+### Optimizers
+
+Optimizer constructor arguments are backend-specific.
+
+A generic configuration shape does not imply that parameter names can be
+forwarded unchanged to every optimizer implementation.
+
+Document any translation, accepted aliases, and rejected fields in the
+component configuration reference.
+
+## 8. Model lifecycle requirements
+
+The builder expects the working model to support:
+
+- initialization with prepared inputs and targets;
+- fitting and prediction;
+- reading and assigning weights;
+- setting omitted feature columns;
+- resetting callbacks for a named run.
+
+The builder restores base weights before restricted fitting.
+The backend must define the treatment of optimizer state and other training
+state across these runs.
+
+Weight assignment should not unexpectedly change masks or omission settings.
+Omission updates must not accumulate across independent restricted runs.
+
+When implementing a custom model, verify snapshot independence and consistent
+prediction shapes in addition to constructor compatibility.
+
+## 9. Library strategy versus Keras runtime
+
+The library backend strategy and the runtime used by Keras are separate
+configuration choices.
+
+The strategy determines which model implementation and component loaders
+the library uses.
+
+The Keras runtime determines the execution backend used internally by Keras.
+Selecting the library's `"pytorch"` strategy is not the same as selecting
+the PyTorch runtime for a Keras-based model.
+
+Historical strategy names and aliases may retain TensorFlow-oriented naming.
+Do not infer runtime requirements or component compatibility from an alias
+alone.
+
+Configure the intended Keras runtime before importing Keras or library modules
+that import it.
+
+Compatibility must be checked for the selected runtime, model, optimizer,
+callbacks, constraints, and regularizers. A configurable runtime does not
+by itself establish that every component combination is supported.
+
+## 10. When You Need a New Backend (not only new components)
 
 Create a new backend strategy when at least one of these is true:
 
@@ -183,6 +244,6 @@ In practice, add:
 - New object loader for dict-to-object resolution.
 - Factory registration (with aliases) in `BackendFactory`.
 
-## 9. Practical Recommendation
+## 11. Practical Recommendation
 
 Start with new component classes first. Create a new backend only when component-level extension is no longer enough.

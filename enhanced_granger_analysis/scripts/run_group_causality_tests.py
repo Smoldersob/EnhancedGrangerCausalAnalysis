@@ -6,6 +6,7 @@ This script:
 2. Iterates through group configurations (sweep of parameter variations).
 3. For each configuration, runs Granger analysis via MultitaskGrangerBuilder.
 4. Allows selecting causality decision test via --test: f, wald, or lr.
+5. Allows including sign information in the causality matrix via --sign.
 4. Saves results according to --save mode:
     - minimum: binary causality matrix + summary.csv
     - matrices: binary, p-values (for selected test), F/Wald/LR test values, sign + summary.csv
@@ -29,9 +30,8 @@ Config structure (scripts/run_group_causality_tests.config.json):
 
 Results in output_dir:
     - minimum mode: case_XXX_causality.csv + summary.csv
-    - matrices mode: case_XXX_causality.csv, case_XXX_p_value.csv,
-    case_XXX_f_test.csv, case_XXX_wald_test.csv, case_XXX_lr_test.csv,
-    case_XXX_sign.csv + summary.csv
+    - matrices mode example: case_XXX_causality.csv, case_XXX_p_value.csv,
+    case_XXX_f_test.csv, case_XXX_sign.csv + summary.csv
 """
 
 from __future__ import annotations
@@ -46,9 +46,9 @@ from typing import Any, Dict, List, Tuple
 import pandas as pd
 
 try:
-    from ..api import MultiTaskGrangerBuilder, TestGroupConfigIterator
-    from ..api.config_loader import BuilderConfigLoader
-    from ..utilities.metric_calculator import MetricCalculator
+    from ..api.builder import MultiTaskGrangerBuilder
+    from ..api.config_loader import BuilderConfigLoader, TestGroupConfigIterator
+    from ..utilities.metric_calculator import MetricCalculator 
 except ImportError:  # pragma: no cover - direct script execution fallback
     sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
     from enhanced_granger_analysis.api import MultiTaskGrangerBuilder, TestGroupConfigIterator
@@ -196,6 +196,15 @@ def _load_dataframes(cfg: Dict[str, Any]) -> List[pd.DataFrame]:
     return frames
 
 
+def _format_case_description(param_names: List[str], case_values: List[Any]) -> str:
+    """Return a compact human-readable description of a parameter sweep case."""
+    if not case_values:
+        return "default"
+    return ", ".join(
+        f"{_short_param_name(k)}={v}" for k, v in zip(param_names, case_values)
+    )
+
+
 def _align_dataframe_columns(frames: List[pd.DataFrame]) -> List[pd.DataFrame]:
     """Align all frames to the union of columns and fill missing values with zeros."""
     if not frames:
@@ -203,21 +212,16 @@ def _align_dataframe_columns(frames: List[pd.DataFrame]) -> List[pd.DataFrame]:
 
     all_columns: List[str] = []
     seen: set[str] = set()
-    changed = False
     for frame in frames:
         for column in frame.columns:
             if column not in seen:
                 seen.add(column)
                 all_columns.append(column)
-        if list(frame.columns) != all_columns:
-            changed = True
 
-    aligned: List[pd.DataFrame] = []
-    for frame in frames:
-        aligned_frame = frame.reindex(columns=all_columns, fill_value=0)
-        aligned.append(aligned_frame)
+    if all(list(frame.columns) == all_columns for frame in frames):
+        return frames
 
-    return aligned if changed else frames
+    return [frame.reindex(columns=all_columns, fill_value=0) for frame in frames]
 
 
 def _resolve_path(base_dir: Path, raw_path: str | Path) -> Path:
@@ -237,7 +241,9 @@ def _resolve_path(base_dir: Path, raw_path: str | Path) -> Path:
     return (base_dir / p).resolve()
 
 
-def run_from_config(script_config_path: str | Path, save_mode: str = "minimum", test_type: str = "f") -> Path:
+
+
+def run_from_config(script_config_path: str | Path, save_mode: str = "minimum", test_type: str = "f", with_sign: bool = False) -> Path:
     """
     Run Granger analysis test sweep from configuration file.
 
@@ -247,6 +253,7 @@ def run_from_config(script_config_path: str | Path, save_mode: str = "minimum", 
             - "minimum": save only binary causality matrix (+ summary.csv at the end)
             - "matrices": save all matrices (binary, selected p-value, f/wald/lr tests, sign) (+ summary.csv)
         test_type: test used for thresholded causality matrix: "f", "wald", or "lr"
+        with_sign: if True, include sign information in the causality matrix
 
     Returns:
         Path to generated summary.csv file
@@ -260,6 +267,11 @@ def run_from_config(script_config_path: str | Path, save_mode: str = "minimum", 
     selected_test = str(test_type).strip().lower()
     if selected_test not in {"f", "wald", "lr"}:
         raise ValueError("test_type must be one of: 'f', 'wald', 'lr'")
+    test_metrics = {
+        "f": ("f", "f_test_p_value"),
+        "wald": ("wald", "wald_test_p_value"),
+        "lr": ("lr", "likelihood_ratio_p_value"),
+    }
 
     if not config_path.exists():
         raise FileNotFoundError(f"Script config file not found: {config_path}")
@@ -349,71 +361,64 @@ def run_from_config(script_config_path: str | Path, save_mode: str = "minimum", 
         base_filename = _build_result_filename(case_idx, backend, param_names, case_values)
         causality_path = output_dir / base_filename
         p_value_path = output_dir / _build_result_filename(case_idx, backend, param_names, case_values, "p_value")
-        f_test_path = output_dir / _build_result_filename(case_idx, backend, param_names, case_values, "f_test")
-        wald_test_path = output_dir / _build_result_filename(case_idx, backend, param_names, case_values, "wald_test")
-        lr_test_path = output_dir / _build_result_filename(case_idx, backend, param_names, case_values, "lr_test")
+        test_path = output_dir / _build_result_filename(case_idx, backend, param_names, case_values, selected_test + "_test")
         sign_path = output_dir / _build_result_filename(case_idx, backend, param_names, case_values, "sign")
-        
+
         # Print case header
-        case_desc = ", ".join(
-            f"{_short_param_name(k)}={v}" for k, v in zip(param_names, case_values)
-        ) if case_values else "default"
-        print(f"[Case {case_idx:3d}] {backend:15s} | {case_desc}")
-        
+        case_desc = _format_case_description(param_names, case_values)
+        cache_status = "cache-hit" if cached_prepared_data is not None else "fresh-prep"
+        print(f"[Case {case_idx:3d}] {backend:15s} | {case_desc} | {cache_status}")
+
         # Run Granger analysis
         start = time.perf_counter()
         try:
             builder = MultiTaskGrangerBuilder().from_config(cfg).data(data_frames)
             if cached_prepared_data is not None:
                 builder.prepared_data(cached_prepared_data)
-            out = builder.fit()
-            
+            results = builder.fit()
+
             # Extract and save all result matrices
-            causality_df = out.results.result(threshold=threshold, with_sign=False, test=selected_test)
-            if selected_test == "f":
-                p_value_df = out.results.p_value
-            elif selected_test == "wald":
-                p_value_df = out.results.wald_p_value
-            else:
-                p_value_df = out.results.lr_p_value
-            f_test_df = out.results.F_test
-            wald_test_df = out.results.wald_test
-            lr_test_df = out.results.lr_test
-            sign_df = out.results.sign
+            statistic_name, p_value_name = test_metrics[selected_test]
+            test_df = results.evaluate(statistic_name)
+            p_value_df = results.evaluate(p_value_name)
+
+            sign_df = results.sign
+            causality_df = results.result(
+                threshold=threshold,
+                metric=p_value_name,
+                with_sign=with_sign,
+            )
 
             # Measure per-case execution time excluding file-save operations.
             elapsed_s = time.perf_counter() - start
             if cached_prepared_data is not None:
                 elapsed_s += cached_preparation_time
             total_time += elapsed_s
-            
+
             causality_df.to_csv(causality_path)
             if save_mode == "matrices":
-                p_value_df.to_csv(p_value_path)
-                f_test_df.to_csv(f_test_path)
-                wald_test_df.to_csv(wald_test_path)
-                lr_test_df.to_csv(lr_test_path)
+                p_value_df.data.to_csv(p_value_path)
+                test_df.data.to_csv(test_path)
                 sign_df.to_csv(sign_path)
 
-            if reuse_data and out.prepared_data is not None:
+            if reuse_data and results.preparation_context is not None:
                 prepared_data_cache[prep_signature] = {
-                    "prepared_data": out.prepared_data,
-                    "preparation_time_seconds": out.preparation_time_seconds,
+                    "prepared_data": results.preparation_context.prepared_data,
+                    "preparation_time_seconds": results.preparation_context.metadata.get("preparation_time_seconds", 0.0),
                 }
-            
+
             # Compute metrics against ground truth
             metrics = MetricCalculator(str(ground_truth_path), str(causality_path)).evaluate()
-            
+
             # Build summary row
             row: Dict[str, Any] = {
                 "case_id": case_idx,
                 "backend": backend,
                 "test_type": selected_test,
                 "causality_file": causality_path.name,
+                "signed_result": "True" if with_sign else "False",
                 "p_value_file": p_value_path.name if save_mode == "matrices" else "NOT_SAVED",
-                "f_test_file": f_test_path.name if save_mode == "matrices" else "NOT_SAVED",
-                "wald_test_file": wald_test_path.name if save_mode == "matrices" else "NOT_SAVED",
-                "lr_test_file": lr_test_path.name if save_mode == "matrices" else "NOT_SAVED",
+                "test_file": test_path.name if save_mode == "matrices" else "NOT_SAVED",
                 "sign_file": sign_path.name if save_mode == "matrices" else "NOT_SAVED",
                 "execution_time_seconds": round(elapsed_s, 2),
             }
@@ -421,7 +426,7 @@ def run_from_config(script_config_path: str | Path, save_mode: str = "minimum", 
                 row[p] = v
             row.update(metrics)
             summary_rows.append(row)
-            
+
             # Print timing
             print(f"        ✓ Completed in {elapsed_s:.2f}s | Accuracy: {metrics.get('accuracy', 0):.3f} | F1: {metrics.get('f1', 0):.3f}")
         
@@ -435,9 +440,7 @@ def run_from_config(script_config_path: str | Path, save_mode: str = "minimum", 
                 "test_type": selected_test,
                 "causality_file": "FAILED",
                 "p_value_file": "FAILED",
-                "f_test_file": "FAILED",
-                "wald_test_file": "FAILED",
-                "lr_test_file": "FAILED",
+                "test_file": "FAILED",
                 "sign_file": "FAILED",
                 "execution_time_seconds": round(elapsed_s, 2),
                 "error": str(e),
@@ -498,10 +501,16 @@ def main() -> None:
         choices=["f", "wald", "lr"],
         help="Statistical test used to build binary causality from p-values: f, wald, or lr",
     )
+    parser.add_argument(
+        "--sign",
+        action="store_true",
+        help="Include sign information in the causality matrix",
+    )
+
     args = parser.parse_args()
 
     try:
-        summary_path = run_from_config(args.config, save_mode=args.save, test_type=args.test)
+        summary_path = run_from_config(args.config, save_mode=args.save, test_type=args.test, with_sign=args.sign)
         print(f"\n✓ SUCCESS: Results saved to {summary_path}")
     except Exception as e:
         print(f"\n✗ ERROR: {e}", file=sys.stderr)

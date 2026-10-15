@@ -11,7 +11,7 @@ from ...core.exceptions import RegularizerConfigurationError
 class NumpyL1Regularizer:
 	"""L1 regularizer for numpy/scikit models."""
 
-	def __init__(self, l1: float = 0.0) -> None:
+	def __init__(self, l1: float = 0.0):
 		if l1 < 0:
 			raise RegularizerConfigurationError("l1 must be >= 0")
 		self.l1 = float(l1)
@@ -48,7 +48,7 @@ class NumpyLagDependentL1Regularizer:
 		lag_weights: Optional[Sequence[float]] = None,
 		max_lags_per_pred: Optional[Sequence[int]] = None,
 		col_offsets: Optional[Sequence[int]] = None,
-	) -> None:
+	):
 		if l1 < 0:
 			raise RegularizerConfigurationError("l1 must be >= 0")
 		self.l1 = float(l1)
@@ -89,7 +89,7 @@ class NumpyLagDependentL1Regularizer:
 		self.max_lags_per_pred = [int(v) for v in max_lags_per_pred]
 		self.col_offsets = offsets
 
-	def _feature_weights_np(self, n_features: int) -> NDArray[np.float64]:
+	def _feature_weights_np(self, n_features: int):
 		"""Build per-feature weights using LagSelectionResult block layout."""
 		if self.max_lags_per_pred is not None and self.col_offsets is not None:
 			if len(self.max_lags_per_pred) != len(self.col_offsets):

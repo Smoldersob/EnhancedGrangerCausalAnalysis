@@ -1,16 +1,20 @@
-from __future__ import annotations
-
-import os
+import importlib
 from typing import Any, Dict, List, Optional, Mapping
 
 from numpy.typing import NDArray
 
 from .base_backend import BackendStrategy
-from .object_loaders.tf_object_loader import TensorFlowObjectLoader
+from .object_loaders.keras_object_loader import KerasObjectLoader
 
-
-class TensorFlowBackendStrategy(BackendStrategy):
-	"""Strategy for TensorFlow/Keras backend."""
+if importlib.util.find_spec("keras"):
+	import os
+	if importlib.util.find_spec("tensorflow"):
+		os.environ["KERAS_BACKEND"] = "tensorflow"
+	elif importlib.util.find_spec("torch"):
+		os.environ["KERAS_BACKEND"] = "torch"
+		
+class KerasBackendStrategy(BackendStrategy):
+	"""Strategy for Keras backend."""
 
 	@staticmethod
 	def _resolve_optimizer_spec(config: Dict[str, Any]) -> Any:
@@ -62,19 +66,15 @@ class TensorFlowBackendStrategy(BackendStrategy):
 
 		return optimizer_cfg
 
-	def __init__(self, loading_verbose: bool = False) -> None:
+	def __init__(self, loading_verbose: bool = False):
 		super().__init__(loading_verbose=loading_verbose)
-		self._object_loader: Optional[TensorFlowObjectLoader] = None
+		self._object_loader: Optional[KerasObjectLoader] = None
 		if self.is_available():
-			import tensorflow as tf
-			self._object_loader = TensorFlowObjectLoader(tf, loading_verbose=loading_verbose)
+			import keras
+			self._object_loader = KerasObjectLoader(keras, loading_verbose=loading_verbose)
 
 	def is_available(self) -> bool:
-		try:
-			import tensorflow  # noqa: F401
-			return True
-		except ImportError:
-			return False
+		return importlib.util.find_spec("keras")
 
 	def build_model(
 		self,
@@ -92,14 +92,27 @@ class TensorFlowBackendStrategy(BackendStrategy):
 			random.seed(seed)
 
 			try:
-				import tensorflow as tf
-				tf.random.set_seed(seed)
+				if importlib.util.find_spec("keras") is not None:
+					import keras
+					keras.utils.set_random_seed(seed)
+			except ImportError:
+				pass
+			try:
+				if importlib.util.find_spec("tensorflow") is not None:
+					import tensorflow as tf
+					tf.random.set_seed(seed)
+			except ImportError:
+				pass
+			try:
+				if importlib.util.find_spec("torch") is not None:
+					import torch
+					torch.manual_seed(seed)
+					if torch.cuda.is_available():
+						torch.cuda.manual_seed_all(seed)
 			except ImportError:
 				pass
 
-			# TensorFlow's deterministic ops may require additional environment variables to be set,
-			# but we won't enforce that here. Users can set TF_DETERMINISTIC_OPS=1 if they want.
-		from .models.tensorflow_model import TensorFlowGrangerModel
+		from .models.keras_model import KerasGrangerModel
 		config = self._consume_loading_verbose(config)
 		if self._object_loader is not None:
 			self._object_loader.set_loading_verbose(self._loading_verbose)
@@ -108,7 +121,7 @@ class TensorFlowBackendStrategy(BackendStrategy):
 		if not isinstance(model_cfg, dict):
 			model_cfg = {}
 		model_name = config.get("model_name") or config.get("model") or config.get("model_type")
-		model_cls = self._object_loader.resolve_model(model_name, TensorFlowGrangerModel)
+		model_cls = self._object_loader.resolve_model(model_name, KerasGrangerModel)
 
 		regularizer_resolved = self.build_regularizer(regularizer)
 		constraint_resolved = self.build_constraint(constraint)
@@ -118,7 +131,7 @@ class TensorFlowBackendStrategy(BackendStrategy):
 		optimizer_resolved = self.resolve_optimizer(optimizer_spec)
 
 		kwargs = dict(model_cfg)
-		kwargs.setdefault("backend", "tensorflow")
+		kwargs.setdefault("backend", "keras")
 		kwargs.setdefault("regularizer", regularizer_resolved)
 		kwargs.setdefault("constraint", constraint_resolved)
 		kwargs.setdefault("optimizer", optimizer_resolved)
@@ -131,7 +144,7 @@ class TensorFlowBackendStrategy(BackendStrategy):
 
 		return model_cls(**kwargs)
 
-	def resolve_callbacks(self, callbacks: Optional[List[Any]]) -> Optional[List[Any]]:
+	def resolve_callbacks(self, callbacks: Optional[list]) -> Optional[list]:
 		if self._object_loader is None:
 			return callbacks
 		self._object_loader.set_loading_verbose(self._loading_verbose)
@@ -155,9 +168,9 @@ class TensorFlowBackendStrategy(BackendStrategy):
 		if not relations:
 			return None
 
-		from .constraints import build_tensorflow_constraint_from_relations
+		from .constraints import build_keras_constraint_from_relations
 
-		return build_tensorflow_constraint_from_relations(
+		return build_keras_constraint_from_relations(
 			relations=relations,
 			predictor_names=predictor_names,
 			output_names=output_names,

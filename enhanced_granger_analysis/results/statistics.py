@@ -32,6 +32,7 @@ def residual_sum_of_squares(
 		)
 	return np.sum((true_2d - pred_2d) ** 2, axis=0)
 
+
 def estimate_masked_weight_covariance(
     x_train: NDArray[np.float64],
     y_true: NDArray[np.float64],
@@ -77,25 +78,18 @@ def estimate_masked_weight_covariance(
         )
 
     residuals = y_true_2d - y_pred_2d
-    covariance = np.zeros(
-        (n_outputs, n_features, n_features),
-        dtype=np.float64,
-    )
+    covariance = np.zeros((n_outputs, n_features, n_features), dtype=np.float64)
 
     for out_idx in range(n_outputs):
         active_idx = np.flatnonzero(mask_arr[out_idx])
 
         if active_idx.size == 0:
-            raise ResultsError(
-                f"Output {out_idx} has no active slope coefficients"
-            )
+            raise ResultsError(f"Output {out_idx} has no active slope coefficients")
 
         x_active = x_arr[:, active_idx]
 
         if fit_intercept:
-            design = np.column_stack(
-                [np.ones(n_samples, dtype=np.float64), x_active]
-            )
+            design = np.column_stack([np.ones(n_samples, dtype=np.float64), x_active])
         else:
             design = x_active
 
@@ -115,21 +109,16 @@ def estimate_masked_weight_covariance(
                 f"rank={design_rank}, n_parameters={n_parameters}"
             )
 
-        sigma2 = (
-            np.sum(residuals[:, out_idx] ** 2)
-            / float(residual_df)
-        )
-
+        sigma2 = np.sum(residuals[:, out_idx] ** 2) / float(residual_df)
         covariance_active = sigma2 * np.linalg.inv(design.T @ design)
 
         if fit_intercept:
             covariance_active = covariance_active[1:, 1:]
 
-        covariance[out_idx][
-            np.ix_(active_idx, active_idx)
-        ] = covariance_active
+        covariance[out_idx][np.ix_(active_idx, active_idx)] = covariance_active
 
     return covariance
+
 
 def error_values(
 	y_true: NDArray[np.float64],
@@ -142,11 +131,10 @@ def error_values(
 	rss_ref = residual_sum_of_squares(y_true_2d, y_ref_pred)
 
 	n_samples = y_true_2d.shape[0]
-	n_outputs = y_true_2d.shape[1]
-	scale = float(n_samples) * float(n_outputs)
-	base_error = rss_base / scale
-	ref_error = rss_ref / scale
+	base_error = rss_base / float(n_samples)
+	ref_error = rss_ref / float(n_samples)
 	return base_error, ref_error
+
 
 def wald_test_value(
     weights: NDArray[np.float64],
@@ -164,51 +152,40 @@ def wald_test_value(
 
     if mask_arr.shape != weights_arr.shape:
         raise ResultsError(
-            f"Mask shape {mask_arr.shape} does not match weights shape "
-            f"{weights_arr.shape}"
+            f"Mask shape {mask_arr.shape} does not match weights shape {weights_arr.shape}"
         )
 
     if cov_arr.shape != (n_outputs, n_features, n_features):
         raise ResultsError(
             "Invalid covariance shape: "
-            f"expected {(n_outputs, n_features, n_features)}, "
-            f"got {cov_arr.shape}"
+            f"expected {(n_outputs, n_features, n_features)}, got {cov_arr.shape}"
         )
 
     if not (0 <= start < end <= n_features):
-        raise ResultsError(
-            f"Invalid tested coefficient block [{start}:{end}]"
-        )
+        raise ResultsError(f"Invalid tested coefficient block [{start}:{end}]")
 
     cause_indices = np.arange(start, end)
     statistics = np.full(n_outputs, np.nan, dtype=np.float64)
 
     for out_idx in range(n_outputs):
-        tested_idx = cause_indices[
-            mask_arr[out_idx, cause_indices]
-        ]
+        tested_idx = cause_indices[mask_arr[out_idx, cause_indices]]
 
         if tested_idx.size == 0:
             continue
 
         beta_block = weights_arr[out_idx, tested_idx]
-
-        cov_block = cov_arr[out_idx][
-            np.ix_(tested_idx, tested_idx)
-        ]
+        cov_block = cov_arr[out_idx][np.ix_(tested_idx, tested_idx)]
         cov_block = 0.5 * (cov_block + cov_block.T)
 
         if np.linalg.matrix_rank(cov_block) != tested_idx.size:
             raise ResultsError(
-                f"Singular Wald covariance for output {out_idx}, "
-                f"tested indices={tested_idx.tolist()}"
+                f"Singular Wald covariance for output {out_idx}, tested indices={tested_idx.tolist()}"
             )
 
-        statistics[out_idx] = float(
-            beta_block @ np.linalg.solve(cov_block, beta_block)
-        )
+        statistics[out_idx] = float(beta_block @ np.linalg.solve(cov_block, beta_block))
 
     return statistics
+
 
 def f_test_value(
     error_ref: NDArray[np.float64],
@@ -219,65 +196,44 @@ def f_test_value(
 ) -> NDArray[np.float64]:
     """
     F test for nested restricted and unrestricted OLS models.
-
-    F = ((RSS_restricted - RSS_unrestricted) / q) /
-        (RSS_unrestricted / (n_samples - k_unrestricted))
-
-    Parameters
-    ----------
-    error_ref:
-        Restricted-model error/RSS per output.
-    error_base:
-        Unrestricted-model error/RSS per output.
-    n_restrictions:
-        Number of tested zero-coefficient restrictions, q.
-    n_unrestricted_parameters:
-        Total number of fitted parameters in one unrestricted equation,
-        including intercept if present, k_U.
-    n_samples:
-        Number of effective observations after lag construction.
     """
     if np.any(n_restrictions < 0):
-        raise ResultsError(
-            f"n_restrictions must be >= 0, got {n_restrictions}"
-        )
+        raise ResultsError(f"n_restrictions must be >= 0, got {n_restrictions}")
 
     residual_df = n_samples - n_unrestricted_parameters
-    
+
     if np.any(residual_df <= 0):
         raise ResultsError(
             "Unrestricted residual degrees of freedom must be > 0, got "
-            f"n_samples={n_samples}, "
-            f"n_unrestricted_parameters={n_unrestricted_parameters}"
+            f"n_samples={n_samples}, n_unrestricted_parameters={n_unrestricted_parameters}"
         )
 
     err_ref = np.asarray(error_ref, dtype=np.float64)
     err_base = np.asarray(error_base, dtype=np.float64)
 
     if err_ref.shape != err_base.shape:
-        raise ResultsError(
-            "error_ref and error_base must have the same shape"
-        )
-    
-    numerator = np.max([err_ref - err_base,err_base*0],axis=0) / np.maximum(n_restrictions, np.finfo(np.float64).eps)
+        raise ResultsError("error_ref and error_base must have the same shape")
+
+    numerator = np.max([err_ref - err_base, err_base * 0], axis=0) / np.maximum(n_restrictions, np.finfo(np.float64).eps)
     denominator = err_base / residual_df
     return numerator / np.maximum(denominator, np.finfo(np.float64).eps)
 
-def likelihood_ratio_test_value(
-	error_ref: NDArray[np.float64],
-	error_base: NDArray[np.float64],
-	n_samples: int,
-) -> NDArray[np.float64]:
-	"""Compute likelihood-ratio statistic vector from reference and base errors."""
-	err_ref = np.asarray(error_ref, dtype=np.float64)
-	err_base = np.asarray(error_base, dtype=np.float64)
-	if err_ref.shape != err_base.shape:
-		raise ResultsError("error_ref and error_base must have the same shape")
 
-	ratio = np.maximum(err_ref, np.finfo(np.float64).eps) / np.maximum(
-		err_base, np.finfo(np.float64).eps
-	)
-	return float(n_samples) * np.log(ratio)
+def likelihood_ratio_test_value(
+    error_ref: NDArray[np.float64],
+    error_base: NDArray[np.float64],
+    n_samples: int,
+) -> NDArray[np.float64]:
+    """Compute likelihood-ratio statistic vector from reference and base errors."""
+    err_ref = np.asarray(error_ref, dtype=np.float64)
+    err_base = np.asarray(error_base, dtype=np.float64)
+    if err_ref.shape != err_base.shape:
+        raise ResultsError("error_ref and error_base must have the same shape")
+
+    ratio = np.maximum(err_ref, np.finfo(np.float64).eps) / np.maximum(
+        err_base, np.finfo(np.float64).eps
+    )
+    return float(n_samples) * np.maximum(np.log(ratio), 0.0)
 
 
 def p_value_from_f_test(
@@ -285,12 +241,7 @@ def p_value_from_f_test(
     n_restrictions: NDArray[np.int_],
     residual_df: NDArray[np.int_],
 ) -> NDArray[np.float64]:
-    """
-    Convert per-output F statistics to upper-tail p-values.
-
-    Outputs with n_restrictions == 0 are structurally untestable and
-    receive np.nan.
-    """
+    """Convert per-output F statistics to upper-tail p-values."""
     f_values_arr = np.asarray(f_values, dtype=np.float64)
     n_restrictions_arr = np.asarray(n_restrictions, dtype=np.int_)
     residual_df_arr = np.asarray(residual_df, dtype=np.int_)
@@ -308,34 +259,16 @@ def p_value_from_f_test(
         )
 
     if np.any(n_restrictions_arr < 0):
-        raise ResultsError(
-            "n_restrictions cannot contain negative values"
-        )
+        raise ResultsError("n_restrictions cannot contain negative values")
 
     if np.any(residual_df_arr <= 0):
-        raise ResultsError(
-            "residual_df must be > 0 for every output, got "
-            f"{residual_df_arr}"
-        )
+        raise ResultsError("residual_df must be > 0 for every output, got " f"{residual_df_arr}")
 
-    p_values = np.full(
-        f_values_arr.shape,
-        np.nan,
-        dtype=np.float64,
-    )
-
-    valid = (
-        (n_restrictions_arr > 0)
-        & np.isfinite(f_values_arr)
-    )
-
-    p_values[valid] = f.sf(
-        np.maximum(f_values_arr[valid], 0.0),
-        dfn=n_restrictions_arr[valid],
-        dfd=residual_df_arr[valid],
-    )
-
+    p_values = np.full(f_values_arr.shape, np.nan, dtype=np.float64)
+    valid = (n_restrictions_arr > 0) & np.isfinite(f_values_arr)
+    p_values[valid] = f.sf(np.maximum(f_values_arr[valid], 0.0), dfn=n_restrictions_arr[valid], dfd=residual_df_arr[valid])
     return p_values
+
 
 def p_value_from_chi_square_test(
     test_values: NDArray[np.float64],
@@ -343,9 +276,6 @@ def p_value_from_chi_square_test(
 ) -> NDArray[np.float64]:
     """
     Convert per-output chi-square statistics to upper-tail p-values.
-
-    df == 0 means that the corresponding relation is structurally
-    excluded by the fixed mask, so the result is np.nan.
     """
     values = np.asarray(test_values, dtype=np.float64)
     df_arr = np.asarray(df, dtype=np.int_)
@@ -357,24 +287,25 @@ def p_value_from_chi_square_test(
         )
 
     if np.any(df_arr < 0):
-        raise ResultsError(
-            f"Chi-square df cannot be negative, got {df_arr}"
-        )
+        raise ResultsError(f"Chi-square df cannot be negative, got {df_arr}")
 
-    p_values = np.full(
-        values.shape,
-        np.nan,
-        dtype=np.float64,
-    )
-
-    valid = (
-        (df_arr > 0)
-        & np.isfinite(values)
-    )
-
-    p_values[valid] = chi2.sf(
-        np.maximum(values[valid], 0.0),
-        df=df_arr[valid],
-    )
-
+    p_values = np.full(values.shape, np.nan, dtype=np.float64)
+    valid = (df_arr > 0) & np.isfinite(values)
+    p_values[valid] = chi2.sf(np.maximum(values[valid], 0.0), df=df_arr[valid])
     return p_values
+
+
+def p_value_from_wald_test(
+    test_values: NDArray[np.float64],
+    df: NDArray[np.int_],
+) -> NDArray[np.float64]:
+    """Convert Wald statistics to chi-square p-values."""
+    return p_value_from_chi_square_test(test_values, df)
+
+
+def p_value_from_likelihood_ratio_test(
+    test_values: NDArray[np.float64],
+    df: NDArray[np.int_],
+) -> NDArray[np.float64]:
+    """Convert likelihood-ratio statistics to chi-square p-values."""
+    return p_value_from_chi_square_test(test_values, df)

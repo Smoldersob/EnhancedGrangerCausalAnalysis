@@ -30,7 +30,7 @@ class PyTorchMaskConstraint:
 	Expected mask shape: (n_outputs, n_features).
 	"""
 
-	def __init__(self, mask: NDArray[np.float64]) -> None:
+	def __init__(self, mask: NDArray[np.float64]):
 		_ensure_torch()
 		arr = np.asarray(mask, dtype=np.float64)
 		if arr.ndim != 2:
@@ -64,7 +64,7 @@ class PyTorchMaskConstraint:
 class PyTorchMaskAndMinAbsSumConstraint:
 	"""Mask + min abs-sum constraint for PyTorch coefficient matrices."""
 
-	def __init__(self, spec: ProcessedConstraintSpec, eps: float = 1e-8) -> None:
+	def __init__(self, spec: ProcessedConstraintSpec, eps: float = 1e-8):
 		_ensure_torch()
 		mask = np.asarray(spec.mask, dtype=np.float64)
 		if mask.ndim != 2:
@@ -158,7 +158,7 @@ def build_pytorch_constraint_from_relations(
 	n_features: int,
 	base_mask: Optional[NDArray[np.float64]] = None,
 	eps: float = 1e-8,
-) -> PyTorchMaskAndMinAbsSumConstraint:
+) -> PyTorchMaskAndMinAbsSumConstraint|PyTorchMaskConstraint:
 	"""Build PyTorch combined constraint from user-friendly relation mapping."""
 	spec = process_user_relations(
 		relations=relations,
@@ -168,5 +168,9 @@ def build_pytorch_constraint_from_relations(
 		n_features=n_features,
 		base_mask=base_mask,
 	)
-	return PyTorchMaskAndMinAbsSumConstraint(spec=spec, eps=eps)
+
+	if len(spec.rules) == 0:
+		return PyTorchMaskConstraint(mask=spec.mask)
+	else:
+		return PyTorchMaskAndMinAbsSumConstraint(spec=spec, eps=eps)
 

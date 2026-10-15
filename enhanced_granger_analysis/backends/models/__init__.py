@@ -17,11 +17,11 @@ except Exception:
     ScikitConstrainedGrangerModel = None
 
 try:
-    if importlib.util.find_spec("tensorflow") is not None:
-        from .tensorflow_model import TensorFlowGrangerModel
-        __all__.append("TensorFlowGrangerModel")
+    if importlib.util.find_spec("keras") is not None:
+        from .keras_model import KerasGrangerModel
+        __all__.append("KerasGrangerModel")
 except Exception:
-    TensorFlowGrangerModel = None
+    KerasGrangerModel = None
 
 try:
     if importlib.util.find_spec("torch") is not None:

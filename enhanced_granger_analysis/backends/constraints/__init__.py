@@ -14,21 +14,21 @@ __all__ = [
 ]
 
 try:
-    if importlib.util.find_spec("tensorflow") is not None:
-        from .tensorflow_constraints import (
-            TensorFlowMaskConstraint,
-            TensorFlowMaskAndMinAbsSumConstraint,
-            build_tensorflow_constraint_from_relations,
+    if importlib.util.find_spec("keras") is not None:
+        from .keras_constraints import (
+            KerasMaskConstraint,
+            KerasMaskAndMinAbsSumConstraint,
+            build_keras_constraint_from_relations,
         )
         __all__.extend([
-            "TensorFlowMaskConstraint",
-            "TensorFlowMaskAndMinAbsSumConstraint",
-            "build_tensorflow_constraint_from_relations",
+            "KerasMaskConstraint",
+            "KerasMaskAndMinAbsSumConstraint",
+            "build_keras_constraint_from_relations",
         ])
 except Exception:
-    TensorFlowMaskConstraint = None
-    TensorFlowMaskAndMinAbsSumConstraint = None
-    build_tensorflow_constraint_from_relations = None
+    KerasMaskConstraint = None
+    KerasMaskAndMinAbsSumConstraint = None
+    build_keras_constraint_from_relations = None
 
 try:
     if importlib.util.find_spec("torch") is not None:
@@ -49,12 +49,12 @@ except Exception:
 
 # Provide graceful stubs when optional backends are not installed so tests
 # can import symbols without requiring heavy optional dependencies at import time.
-if importlib.util.find_spec("tensorflow") is None:
-    def build_tensorflow_constraint_from_relations(*args, **kwargs):
+if importlib.util.find_spec("keras") is None:
+    def build_keras_constraint_from_relations(*args, **kwargs):
         raise ImportError(
-            "TensorFlow is not installed. Install 'tensorflow' to use TensorFlow constraints."
+            "Keras is not installed. Install 'keras' to use Keras constraints."
         )
-    __all__.append("build_tensorflow_constraint_from_relations")
+    __all__.append("build_keras_constraint_from_relations")
 
 if importlib.util.find_spec("torch") is None:
     def build_pytorch_constraint_from_relations(*args, **kwargs):

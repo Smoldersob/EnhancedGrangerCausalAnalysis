@@ -1,7 +1,7 @@
 import importlib
 __all__ = []
-if importlib.util.find_spec("tensorflow") is not None:
-    from .tensorflow_regularizers import KerasL1Regularizer, KerasLagDependentL1Regularizer
+if importlib.util.find_spec("keras") is not None:
+    from .keras_regularizers import KerasL1Regularizer, KerasLagDependentL1Regularizer
     __all__.extend(["KerasL1Regularizer", "KerasLagDependentL1Regularizer"])
 if importlib.util.find_spec("numpy") is not None:    
     from .numpy_regularizers import NumpyL1Regularizer, NumpyLagDependentL1Regularizer

@@ -1,13 +1,22 @@
 # Evaluating Granger Analysis Results
 
-Granger analysis results are usually evaluated with a mix of statistical and practical checks.
+Result evaluation and interpretation are documented in
+[Results and Metrics](results_and_metrics.md).
 
-The main indicators are:
+That guide covers:
 
-- **p-value**: the primary decision rule for declaring causality. Smaller p-values indicate stronger evidence against the null hypothesis.
-- **F-statistic**: used together with the p-value to measure how much the reference model improves over the base model.
-- **Prediction error**: compare base and reference errors; a meaningful drop in error supports the causality claim.
-- **Signed result**: the sign matrix can show whether the strongest contribution is positive or negative.
-- **Ground truth comparison**: if a labeled causality matrix exists, evaluate precision, recall, F1-score, and accuracy against it.
+- unrestricted base models and restricted reference models;
+- statistical metrics and their p-value companions;
+- residual-error diagnostics;
+- coefficient-derived signs;
+- restoration of variables removed during preprocessing;
+- thresholded and signed causality matrices;
+- comparison with ground-truth relationship matrices.
 
-In practice, a result is most reliable when low p-values are consistent with improved error metrics and, when available, with known ground truth.
+The base model contains the tested cause's active predictors.
+The restricted reference model disables that cause's feature block.
+
+The comparison evaluates whether the restriction increases residual error
+relative to the base model.
+
+For API usage and execution stages, see [API Usage](api_usage.md).

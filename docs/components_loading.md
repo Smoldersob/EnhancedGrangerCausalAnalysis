@@ -119,8 +119,13 @@ Simple example:
 reg = {"type": "pytorch_l1", "l1": 0.005}
 ```
 
-### Optimizers and training settings
-For both PyTorch and TensorFlow, optimizer settings are normally passed through `model_config` in the builder config. Supported forms include:
+### Optimizer and training settings
+
+Optimizer configuration and training-loop configuration are related but
+distinct.
+
+A typical model configuration contains training settings together with an
+optimizer selection:
 
 ```python
 model_config = {
@@ -131,38 +136,43 @@ model_config = {
 }
 ```
 
-or a more explicit nested optimizer spec:
+For structured optimizer specifications, use:
 
 ```python
 model_config = {
     "optimizer": {
         "type": "adam",
         "params": {
-            "lr": 1e-4,
-            "beta_1": 0.9,
-            "beta_2": 0.999,
+            # Parameters accepted by the selected optimizer loader.
         },
-    }
+    },
 }
 ```
 
-For TensorFlow/Keras, `optimizer.params` is the canonical place for optimizer-specific kwargs. This includes values such as `gradient_accumulation_steps` when they are part of the optimizer configuration contract for that backend:
+Parameter names and accepted aliases depend on the selected backend loader.
+Do not assume that one optimizer parameter dictionary is portable unchanged
+between native PyTorch and Keras.
 
-```python
-model_config = {
-    "optimizer": {
-        "type": "adam",
-        "params": {
-            "lr": 1e-4,
-            "gradient_accumulation_steps": 4,
-        },
-    }
-}
-```
+Training-loop options must not be forwarded to an optimizer constructor
+unless that optimizer explicitly supports them.
 
-For PyTorch, passing `gradient_accumulation_steps` outside `optimizer.params` is accepted only as a legacy compatibility alias. The loader recognizes the top-level/model-level form and then strips it before creating the optimizer, because PyTorch optimizers do not accept this setting as a real optimizer constructor argument. In other words, the canonical PyTorch config is still the top-level model setting, while the TensorFlow/Keras canonical location remains inside `optimizer.params`.
+### Gradient accumulation
 
-This asymmetry is intentional: `gradient_accumulation_steps` is a backend-specific optimizer/training parameter, and the compatibility alias is only meaningful for PyTorch, not the other way around.
+Gradient accumulation has backend-specific configuration semantics.
+
+For the native PyTorch implementation, it is a training-loop setting rather
+than a standard optimizer constructor argument. It must remain outside the
+optimizer's constructor parameters.
+
+For Keras optimizers that support `gradient_accumulation_steps`, it belongs
+to the optimizer configuration.
+
+Compatibility aliases should be documented separately from the canonical
+configuration location. An accepted alias must not be described as evidence
+that the underlying optimizer accepts the same argument.
+
+Check the selected loader before moving accumulation settings between
+model-level and optimizer-level configuration.
 
 ### Constraints
 Supported dictionary types:
@@ -179,8 +189,13 @@ constraint = {
 }
 ```
 
-## TensorFlow Backend
-Backend names: `tensorflow` / `tf` / `keras`
+## Keras-based strategy
+
+This section describes components loaded for the library's Keras-based
+strategy, including historical TensorFlow-oriented aliases.
+
+The library strategy name and the Keras execution runtime are distinct.
+Component aliases do not independently establish runtime compatibility.
 
 ### Callbacks (Keras callbacks)
 Supported dictionary types:
@@ -227,6 +242,32 @@ constraint = {
     "mask": [[1, 1, 0, 0]],
 }
 ```
+## Callback lifecycle
+
+Resolving a callback specification constructs or selects a callback.
+It does not by itself establish that the callback can be safely reused across
+base and restricted runs.
+
+The model's callback-reset mechanism is responsible for run isolation.
+Stateful callbacks and callbacks writing files may require reconstruction,
+resetting, or run-specific output paths.
+
+Custom callback objects should be checked against the reset mechanism used
+by the selected model.
+
+## Feature-block metadata
+
+Some component specifications, including lag-dependent regularizers, may use
+positional offsets.
+
+These offsets belong to the component's internal configuration and should not
+be confused with `PreparedData.cause_slices`.
+
+When constructing a component from prepared data, preserve the effective
+input order and derive positional information from the corresponding named
+feature slices.
+
+The order of `tested_causes` is not a feature-layout specification.
 
 ## Verbose Loading
 All strategies support internal loader logging via `loading_verbose=True`.

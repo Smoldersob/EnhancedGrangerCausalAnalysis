@@ -12,8 +12,8 @@ from typing import Optional, Tuple
 import numpy as np
 from numpy.typing import NDArray
 
+from .registy import register_scaler
 from ...core.exceptions import DataShapeError, InvalidFeatureRangeError, ScalerNotFittedError
-
 
 def _as_2d_float64(data: NDArray[np.float64]) -> NDArray[np.float64]:
 	"""Return a float64 2D array copy suitable for numerical scaling."""
@@ -24,15 +24,24 @@ def _as_2d_float64(data: NDArray[np.float64]) -> NDArray[np.float64]:
 		)
 	return arr.copy()
 
-
 class _BaseScaler:
 	"""Shared fit-state handling for concrete scalers."""
 
 	_fitted: bool = False
 
+	def fit(self, data: NDArray[np.float64]) -> "_BaseScaler":
+		raise NotImplementedError
+
+	def get_params(self) -> dict[str, object]:
+		return {
+			name: value
+			for name, value in self.__dict__.items()
+			if not name.endswith("_") and not name.startswith("_")
+		}
+
 	def _ensure_fitted(self) -> None:
 		if not self._fitted:
-			raise ScalerNotFittedError("Scaler is not fitted. Call fit_transform first.")
+			raise ScalerNotFittedError("Scaler is not fitted. Call fit first.")
 
 
 class StandardScaler(_BaseScaler):
@@ -43,13 +52,16 @@ class StandardScaler(_BaseScaler):
 		self.mean_: Optional[NDArray[np.float64]] = None
 		self.scale_: Optional[NDArray[np.float64]] = None
 
-	def fit_transform(self, data: NDArray[np.float64]) -> NDArray[np.float64]:
+	def fit(self, data: NDArray[np.float64]) -> "StandardScaler":
 		x = _as_2d_float64(data)
 		self.mean_ = x.mean(axis=0)
 		std = x.std(axis=0)
 		self.scale_ = np.where(std > self.eps, std, 1.0)
 		self._fitted = True
-		return (x - self.mean_) / self.scale_
+		return self
+
+	def fit_transform(self, data: NDArray[np.float64]) -> NDArray[np.float64]:
+		return self.fit(data).transform(data)
 
 	def transform(self, data: NDArray[np.float64]) -> NDArray[np.float64]:
 		self._ensure_fitted()
@@ -75,17 +87,17 @@ class MinMaxScaler(_BaseScaler):
 		self.data_max_: Optional[NDArray[np.float64]] = None
 		self.data_range_: Optional[NDArray[np.float64]] = None
 
-	def fit_transform(self, data: NDArray[np.float64]) -> NDArray[np.float64]:
+	def fit(self, data: NDArray[np.float64]) -> "MinMaxScaler":
 		x = _as_2d_float64(data)
 		self.data_min_ = x.min(axis=0)
 		self.data_max_ = x.max(axis=0)
 		rng = self.data_max_ - self.data_min_
 		self.data_range_ = np.where(rng > self.eps, rng, 1.0)
 		self._fitted = True
+		return self
 
-		lo, hi = self.feature_range
-		x_std = (x - self.data_min_) / self.data_range_
-		return x_std * (hi - lo) + lo
+	def fit_transform(self, data: NDArray[np.float64]) -> NDArray[np.float64]:
+		return self.fit(data).transform(data)
 
 	def transform(self, data: NDArray[np.float64]) -> NDArray[np.float64]:
 		self._ensure_fitted()
@@ -110,7 +122,7 @@ class RobustScaler(_BaseScaler):
 		self.center_: Optional[NDArray[np.float64]] = None
 		self.scale_: Optional[NDArray[np.float64]] = None
 
-	def fit_transform(self, data: NDArray[np.float64]) -> NDArray[np.float64]:
+	def fit(self, data: NDArray[np.float64]) -> "RobustScaler":
 		x = _as_2d_float64(data)
 		q25 = np.percentile(x, 25.0, axis=0)
 		q75 = np.percentile(x, 75.0, axis=0)
@@ -119,7 +131,10 @@ class RobustScaler(_BaseScaler):
 		self.center_ = np.median(x, axis=0)
 		self.scale_ = np.where(iqr > self.eps, iqr, 1.0)
 		self._fitted = True
-		return (x - self.center_) / self.scale_
+		return self
+
+	def fit_transform(self, data: NDArray[np.float64]) -> NDArray[np.float64]:
+		return self.fit(data).transform(data)
 
 	def transform(self, data: NDArray[np.float64]) -> NDArray[np.float64]:
 		self._ensure_fitted()
@@ -139,12 +154,15 @@ class MaxAbsScaler(_BaseScaler):
 		self.eps = float(eps)
 		self.max_abs_: Optional[NDArray[np.float64]] = None
 
-	def fit_transform(self, data: NDArray[np.float64]) -> NDArray[np.float64]:
+	def fit(self, data: NDArray[np.float64]) -> "MaxAbsScaler":
 		x = _as_2d_float64(data)
 		max_abs = np.max(np.abs(x), axis=0)
 		self.max_abs_ = np.where(max_abs > self.eps, max_abs, 1.0)
 		self._fitted = True
-		return x / self.max_abs_
+		return self
+
+	def fit_transform(self, data: NDArray[np.float64]) -> NDArray[np.float64]:
+		return self.fit(data).transform(data)
 
 	def transform(self, data: NDArray[np.float64]) -> NDArray[np.float64]:
 		self._ensure_fitted()
@@ -156,14 +174,17 @@ class MaxAbsScaler(_BaseScaler):
 		x = _as_2d_float64(data)
 		return x * self.max_abs_
 
-
+@register_scaler("identity", "none")
 class IdentityScaler(_BaseScaler):
 	"""No-op scaler useful for pipelines that require a scaler interface."""
 
-	def fit_transform(self, data: NDArray[np.float64]) -> NDArray[np.float64]:
-		x = _as_2d_float64(data)
+	def fit(self, data: NDArray[np.float64]) -> "IdentityScaler":
+		_as_2d_float64(data)
 		self._fitted = True
-		return x
+		return self
+
+	def fit_transform(self, data: NDArray[np.float64]) -> NDArray[np.float64]:
+		return self.fit(data).transform(data)
 
 	def transform(self, data: NDArray[np.float64]) -> NDArray[np.float64]:
 		self._ensure_fitted()
@@ -173,5 +194,20 @@ class IdentityScaler(_BaseScaler):
 		self._ensure_fitted()
 		return _as_2d_float64(data)
 
+@register_scaler("standard", "zscore")
+def _standard_scaler_factory() -> "StandardScaler":
+	return StandardScaler()
+
+@register_scaler("minmax")
+def _min_max_scaler_factory() -> "MinMaxScaler":
+    return MinMaxScaler()
 
 
+@register_scaler("robust")
+def _robust_scaler_factory() -> "RobustScaler":
+    return RobustScaler()
+
+
+@register_scaler("maxabs", "max_abs")
+def _max_abs_scaler_factory() -> "MaxAbsScaler":
+    return MaxAbsScaler()

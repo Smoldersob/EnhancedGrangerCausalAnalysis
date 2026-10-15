@@ -1,554 +1,100 @@
 from __future__ import annotations
 
-import copy
-import os
-import re
-from dataclasses import dataclass
-from typing import Any, Dict, List, Mapping, Optional, Sequence, Tuple
+from typing import Any, Dict, Mapping, Optional, Sequence, Tuple
 
-import numpy as np
 import pandas as pd
-import time
 
-from ..backends import BackendFactory
-from ..core.exceptions import DataValidationError
 from ..core.lag_config import LagConfiguration
-from ..core.outputs import MultiTaskGrangerOutput
-from ..preprocessing.lag.lag_engine import LagEngine
+from ..preprocessing.lag import BaseLagSelector
+from ..preprocessing.missing import BaseImputer
+from ..preprocessing.sampling import SamplingStrategy
 from ..preprocessing.stationarity import StationarityTransformer
-from ..preprocessing.scaling import IdentityScaler, MaxAbsScaler, MinMaxScaler, RobustScaler, StandardScaler, _BaseScaler
 from ..results.granger_results import GrangerAnalysisResults
-from ..hiperopt.hyperoptimization import MultiTaskGrangerHyperparameterOptimizer
-
-
-@dataclass(frozen=True)
-class _PreparedData:
-	data_stationary: List[pd.DataFrame]
-	engine: LagEngine
-	X_train: np.ndarray
-	y_train: np.ndarray
-	col_offsets: np.ndarray
-	x_scaler: Any
-	y_scaler: Any
-	X_backend_scaled: np.ndarray
-	y_backend_scaled: np.ndarray
-	X_backend_raw: np.ndarray
-	y_backend_raw: np.ndarray
-	base_mask: Optional[np.ndarray]
-
-
-def _to_dataframe_list(data: pd.DataFrame | Sequence[pd.DataFrame]) -> List[pd.DataFrame]:
-	if isinstance(data, pd.DataFrame):
-		return [data.copy()]
-	if isinstance(data, Sequence) and all(isinstance(df, pd.DataFrame) for df in data):
-		return [df.copy() for df in data]
-	raise DataValidationError("data must be a DataFrame or a sequence of DataFrames")
-
-
-def _reduce_backend_load(
-	X_scaled: np.ndarray,
-	y_scaled: np.ndarray,
-	X_raw: np.ndarray,
-	y_raw: np.ndarray,
-	backend_sample_fraction: float = 1.0,
-	backend_max_samples: Optional[int] = None,
-) -> Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
-	"""Reduce training workload after scaling and before backend call."""
-	if not 0.0 < backend_sample_fraction <= 1.0:
-		raise ValueError("backend_sample_fraction must be in range (0.0, 1.0]")
-
-	n = X_scaled.shape[0]
-	if n == 0:
-		raise DataValidationError("No samples available after lag preparation")
-
-	n_keep = max(1, int(np.floor(backend_sample_fraction * n)))
-	if backend_max_samples is not None:
-		if backend_max_samples <= 0:
-			raise ValueError("backend_max_samples must be > 0")
-		n_keep = min(n_keep, int(backend_max_samples))
-
-	if n_keep >= n:
-		return X_scaled, y_scaled, X_raw, y_raw
-
-	idx = np.arange(n_keep, dtype=int)
-	return X_scaled[idx], y_scaled[idx], X_raw[idx], y_raw[idx]
-
-
-def _create_scaler(name: Optional[Any]) -> Any:
-	if name is None:
-		return IdentityScaler()
-
-	if isinstance(name, str):
-		name_lower = name.lower()
-		if name_lower in {"identity", "none"}:
-			return IdentityScaler()
-		if name_lower in {"standard", "zscore"}:
-			return StandardScaler()
-		if name_lower in {"minmax"}:
-			return MinMaxScaler()
-		if name_lower in {"robust"}:
-			return RobustScaler()
-		if name_lower in {"maxabs"}:
-			return MaxAbsScaler()
-		raise ValueError(f"Unsupported scaler: {name}")
-
-	if isinstance(name, type) and issubclass(name, _BaseScaler):
-		return name()
-
-	if isinstance(name, _BaseScaler):
-		return name
-
-	if all(hasattr(name, attr) and callable(getattr(name, attr)) for attr in ("fit_transform", "transform", "inverse_transform")):
-		return name
-
-	raise ValueError(f"Unsupported scaler: {name}")
-
-
-def _sanitize_run_name(name: str) -> str:
-	"""Convert arbitrary run identifier into a safe path segment."""
-	return re.sub(r"[^a-zA-Z0-9_.-]+", "_", str(name)).strip("_") or "run"
-
-
-def _clone_callback_for_run(callback: Any, run_name: str) -> Any:
-	"""Create run-scoped callback instance and adjust log destination when supported."""
-	if hasattr(callback, "clone_for_run") and callable(getattr(callback, "clone_for_run")):
-		try:
-			return callback.clone_for_run(run_name)
-		except Exception:
-			pass
-
-	cloned: Any = None
-	if hasattr(callback, "get_config") and hasattr(callback.__class__, "from_config"):
-		try:
-			cfg = callback.get_config()
-			cloned = callback.__class__.from_config(cfg)
-		except Exception:
-			cloned = None
-
-	if cloned is None:
-		try:
-			cloned = copy.deepcopy(callback)
-		except Exception:
-			cloned = callback
-
-	if cloned is callback:
-		# Fallback: callback is not safely clonable, keep original unchanged.
-		return callback
-
-	if hasattr(cloned, "set_run_name") and callable(getattr(cloned, "set_run_name")):
-		try:
-			cloned.set_run_name(run_name)
-		except Exception:
-			pass
-	elif isinstance(getattr(cloned, "log_dir", None), str):
-		cloned.log_dir = os.path.join(cloned.log_dir, _sanitize_run_name(run_name))
-
-	return cloned
-
-
-def _build_callbacks_for_run(callbacks: Optional[Sequence[Any]], run_name: str) -> Optional[List[Any]]:
-	"""Return callback list cloned and specialized for a training run."""
-	if callbacks is None:
-		return None
-	return [_clone_callback_for_run(cb, run_name) for cb in callbacks]
-
-
-def _regularizer_spec_from_value(regularizer: Any) -> Optional[Dict[str, Any]]:
-	if regularizer is None:
-		return None
-
-	if isinstance(regularizer, Mapping):
-		return dict(regularizer)
-
-	params: Dict[str, Any]
-	if hasattr(regularizer, "get_config") and callable(getattr(regularizer, "get_config")):
-		config = regularizer.get_config()
-		if isinstance(config, Mapping):
-			params = dict(config)
-		else:
-			params = {}
-	elif hasattr(regularizer, "get_params") and callable(getattr(regularizer, "get_params")):
-		config = regularizer.get_params()
-		params = dict(config) if isinstance(config, Mapping) else {}
-	else:
-		params = {}
-
-	class_name = regularizer.__class__.__name__.lower()
-	if "lagdependent" in class_name or "lag_dependent" in class_name:
-		type_name = "lag_dependent_l1"
-	elif class_name.endswith("l1regularizer") or class_name.endswith("l1"):
-		type_name = "l1"
-	else:
-		return None
-
-	params.setdefault("type", type_name)
-	return params
+from .builder import MultiTaskGrangerBuilder
 
 
 class MultiTaskGrangerAPI:
-	"""
-	Multitask orchestrator for backend-based Granger analysis.
+    """Thin orchestration layer over the fluent builder API.
 
-	Pipeline:
-	1) stationarity transform
-	2) lag preparation (effects selection influences LagEngine target rows)
-	3) scaling (X and y)
-	4) post-scaling load reduction (only to reduce training cost)
-	5) optional hyperoptimization (short base-model training)
-	6) full base model fit
-	7) reference models with hot-start + omit_variables for each tested cause
-	8) inverse-scale predictions and aggregation in GrangerAnalysisResults
-	"""
+    This class is a convenience wrapper that configures a
+    :class:`MultiTaskGrangerBuilder` and delegates the actual analysis work to it.
+    It keeps the selected backend and reuse policy, then executes the full
+    preparation, model-building, and restricted-model fitting workflow in one call.
 
-	def __init__(
-		self,
-		backend: Optional[str] = None,
-		stationarity_transformer: Optional[Any] = None,
-		reuse_data: bool = False,
-	) -> None:
-		self.backend = backend
-		self._stationarity_transformer = stationarity_transformer or StationarityTransformer()
-		self._reuse_data = bool(reuse_data)
-		self._prepared_data: Optional[_PreparedData] = None
+    Example:
+        api = MultiTaskGrangerAPI(backend="keras", reuse_data=True)
+        results = api.fit(
+            data=my_data,
+            causes=["cause1", "cause2"],
+            effects=["effect1"],
+            lag_config=LagConfiguration(max_lag=12),
+        )
+        print(results)
+    """
 
-	def _prepare_data(
-		self,
-		data: pd.DataFrame | Sequence[pd.DataFrame],
-		effects: Optional[Sequence[str]] = None,
-		lag_config: Optional[LagConfiguration] = None,
-		lag_selector: Optional[Any] = None,
-		stationarity_transformer: Optional[Any] = None,
-		backend_sample_fraction: float = 1.0,
-		backend_max_samples: Optional[int] = None,
-		x_scaler: Optional[Any] = "standard",
-		y_scaler: Optional[Any] = "standard",
-	) -> _PreparedData:
-		data_list = _to_dataframe_list(data)
-		all_columns = list(data_list[0].columns)
-		effects_list = list(effects) if effects is not None else all_columns
-		
-		stationarity = stationarity_transformer or self._stationarity_transformer
-		data_stationary = stationarity.fit_transform(data_list)
+    def __init__(self, backend: Optional[str] = None, reuse_data: bool = False) -> None:
+        """Create an API wrapper around the builder pipeline.
 
-		engine = LagEngine(config=lag_config or LagConfiguration(), selector=lag_selector)
-		X_train, y_train, col_offsets = engine.prepare(data_stationary, effects=effects_list)
+        Args:
+            backend: Backend name used when the underlying builder prepares the
+                execution strategy.
+            reuse_data: Reuse policy passed to the underlying builder.
+        """
+        self.backend = backend
+        self._reuse_data = bool(reuse_data)
 
-		x_scaler_obj = _create_scaler(x_scaler)
-		y_scaler_obj = _create_scaler(y_scaler)
+    def fit(
+        self,
+        data: pd.DataFrame | Sequence[pd.DataFrame],
+        causes: Optional[Sequence[str]] = None,
+        effects: Optional[Sequence[str]] = None,
+        tested_causes: Optional[Sequence[str]] = None,
+        relations: Optional[Mapping[Tuple[str, str], Any]] = None,
+        lag_config: Optional[LagConfiguration] = None,
+        lag_selector: Optional[BaseLagSelector] = None,
+        stationarity_transformer: Optional[StationarityTransformer] = StationarityTransformer(),
+        missing_value_imputer: Optional[BaseImputer] = None,
+        schema_policy: str = "union",
+        prepared_data: Any = None,
+        backend_sample_fraction: float = 1.0,
+        backend_max_samples: Optional[int] = None,
+        random_state: Optional[int] = None,
+        sampling_strategy: Optional[SamplingStrategy] = None,
+        x_scaler: Optional[Any] = "standard",
+        y_scaler: Optional[Any] = "standard",
+        regularizer: Optional[Any] = None,
+        regularizer_spec: Optional[Dict[str, Any]] = None,
+        callbacks: Optional[Sequence[Any]] = None,
+        hiperoptimalization_state: Optional[str] = None,
+        hiperoptimalization_conf: Optional[Dict[str, Any]] = None,
+        initializer: Optional[Any] = None,
+        model_config: Optional[Dict[str, Any]] = None,
+    ) -> GrangerAnalysisResults:
+        """Execute the full Granger analysis pipeline for the provided data.
 
-		X_train_scaled = x_scaler_obj.fit_transform(X_train)
-		y_train_scaled = y_scaler_obj.fit_transform(y_train)
-
-		X_backend_scaled, y_backend_scaled, X_backend_raw, y_backend_raw = _reduce_backend_load(
-			X_scaled=X_train_scaled,
-			y_scaled=y_train_scaled,
-			X_raw=X_train,
-			y_raw=y_train,
-			backend_sample_fraction=backend_sample_fraction,
-			backend_max_samples=backend_max_samples,
-		)
-
-		base_mask = None
-		if engine.mask_ is not None:
-			mask_arr = np.asarray(engine.mask_, dtype=np.float64)
-			if mask_arr.shape[0] == len(effects_list):
-				base_mask = mask_arr
-			else:
-				effect_indices = [all_columns.index(effect_name) for effect_name in effects_list]
-				base_mask = mask_arr[effect_indices, :]
-
-		prepared = _PreparedData(
-			data_stationary=data_stationary,
-			engine=engine,
-			X_train=X_train,
-			y_train=y_train,
-			col_offsets=col_offsets,
-			x_scaler=x_scaler_obj,
-			y_scaler=y_scaler_obj,
-			X_backend_scaled=X_backend_scaled,
-			y_backend_scaled=y_backend_scaled,
-			X_backend_raw=X_backend_raw,
-			y_backend_raw=y_backend_raw,
-			base_mask=base_mask,
-		)
-
-		self._prepared_data = prepared
-
-		return prepared
-
-	def fit(
-		self,
-		data: pd.DataFrame | Sequence[pd.DataFrame],
-		causes: Optional[Sequence[str]] = None,
-		effects: Optional[Sequence[str]] = None,
-		tested_causes: Optional[Sequence[str]] = None,
-		relations: Optional[Mapping[Tuple[str, str], Any]] = None,
-		lag_config: Optional[LagConfiguration] = None,
-		lag_selector: Optional[Any] = None,
-		stationarity_transformer: Optional[Any] = None,
-		prepared_data: Optional[_PreparedData] = None,
-		backend_sample_fraction: float = 1.0,
-		backend_max_samples: Optional[int] = None,
-		x_scaler: Optional[Any] = "standard",
-		y_scaler: Optional[Any] = "standard",
-		regularizer: Optional[Any] = None,
-		regularizer_spec: Optional[Dict[str, Any]] = None,
-		callbacks: Optional[Sequence[Any]] = None,
-		hiperoptimalization_state: Optional[str] = None,
-		hiperoptimalization_conf: Optional[Dict[str, Any]] = None,
-		initializer: Optional[Any] = None,
-		model_config: Optional[Dict[str, Any]] = None,
-	) -> MultiTaskGrangerOutput:
-		data_list = _to_dataframe_list(data)
-		all_columns = list(data_list[0].columns)
-
-		causes_list = list(causes) if causes is not None else all_columns
-		effects_list = list(effects) if effects is not None else all_columns
-		tested_causes_list = list(tested_causes) if tested_causes is not None else causes_list
-
-		unknown_causes = [c for c in causes_list if c not in all_columns]
-		unknown_effects = [e for e in effects_list if e not in all_columns]
-		unknown_tested = [c for c in tested_causes_list if c not in all_columns]
-		if unknown_causes or unknown_effects or unknown_tested:
-			raise DataValidationError(
-				f"Unknown variables detected. causes={unknown_causes}, effects={unknown_effects}, tested_causes={unknown_tested}"
-			)
-
-		relations_map = dict(relations or {})
-
-		preparation_time_seconds = 0.0
-		if prepared_data is not None:
-			prepared = prepared_data
-		else:
-			prep_start = time.perf_counter()
-			prepared = self._prepare_data(
-				data=data,
-				effects=effects_list,
-				lag_config=lag_config,
-				lag_selector=lag_selector,
-				stationarity_transformer=stationarity_transformer,
-				backend_sample_fraction=backend_sample_fraction,
-				backend_max_samples=backend_max_samples,
-				x_scaler=x_scaler,
-				y_scaler=y_scaler,
-			)
-			preparation_time_seconds = time.perf_counter() - prep_start
-
-		strategy = BackendFactory.get_strategy(self.backend)
-
-		reg_spec_base = dict(regularizer_spec or {})
-		if not reg_spec_base and regularizer is not None:
-			derived_regularizer_spec = _regularizer_spec_from_value(regularizer)
-			if derived_regularizer_spec is not None:
-				reg_spec_base = derived_regularizer_spec
-		if str(reg_spec_base.get("type", "")).lower() == "lag_dependent_l1":
-			lag_block_sizes = list((prepared.col_offsets[1:] - prepared.col_offsets[:-1]).astype(int))
-			reg_spec_base.setdefault("max_lags_per_pred", lag_block_sizes)
-			reg_spec_base.setdefault("col_offsets", list(prepared.col_offsets[:-1].astype(int)))
-
-
-		constraint_obj = strategy.build_constraint_from_relations(
-			relations=relations_map,
-			predictor_names=all_columns,
-			output_names=effects_list,
-			col_offsets=prepared.col_offsets[:-1],
-			n_features=prepared.X_train.shape[1],
-			base_mask=prepared.base_mask,
-		)
-
-		model_cfg = dict(model_config or {})
-		callbacks_cfg = model_cfg.pop("callbacks", None)
-		callbacks_template: Optional[List[Any]] = None
-		if callbacks is not None:
-			callbacks_template = list(callbacks)
-		elif callbacks_cfg is not None:
-			callbacks_template = list(callbacks_cfg)
-
-		def _run_cfg(run_name: str, *, base_cfg: Optional[Mapping[str, Any]] = None) -> Dict[str, Any]:
-			run_cfg = dict(base_cfg or model_cfg)
-			run_callbacks = _build_callbacks_for_run(callbacks_template, run_name)
-			if run_callbacks is not None:
-				run_cfg["callbacks"] = run_callbacks
-			return run_cfg
-
-		initializer_weights: Optional[List[np.ndarray]] = None
-		if initializer is not None:
-			initializer_weights = self._build_initializer_weights(
-				initializer=initializer,
-				X_train=prepared.X_backend_scaled,
-				y_train=prepared.y_backend_scaled,
-				mask=prepared.base_mask,
-			)
-
-		# Optional hyperoptimization before full base training.
-		if hiperoptimalization_conf is not None or hiperoptimalization_state is not None:
-			hopt_conf_effective = dict(hiperoptimalization_conf or {})
-			if hiperoptimalization_state is not None and "type" not in hopt_conf_effective and "mode" not in hopt_conf_effective:
-				hopt_conf_effective["type"] = hiperoptimalization_state
-
-			hyper_optimizer = MultiTaskGrangerHyperparameterOptimizer(strategy=strategy)
-			hopt_result = hyper_optimizer.optimize(
-				config=hopt_conf_effective,
-				regularizer_spec=reg_spec_base,
-				model_config=model_cfg,
-				prepared=prepared,
-				constraint_obj=constraint_obj,
-				initializer_weights=initializer_weights,
-				run_cfg_factory=_run_cfg,
-				assign_initializer_weights=self._assign_initializer_weights,
-			)
-			hopt_applied = hopt_result.apply_to(
-				model_config=model_cfg,
-				regularizer_spec=reg_spec_base,
-			)
-			reg_spec_base = hopt_applied["regularizer_spec"]
-			model_cfg = hopt_applied["model_config"]
-
-		if str(reg_spec_base.get("type", "")).lower() == "lag_dependent_l1":
-			lag_block_sizes = list((prepared.col_offsets[1:] - prepared.col_offsets[:-1]).astype(int))
-			reg_spec_base.setdefault("max_lags_per_pred", lag_block_sizes)
-			reg_spec_base.setdefault("col_offsets", list(prepared.col_offsets[:-1].astype(int)))
-
-		reg_obj = regularizer
-		if reg_spec_base:
-			reg_obj = strategy.build_regularizer(reg_spec_base)
-
-		base_cfg = _run_cfg("base_model")
-		base_model = strategy.build_model(
-			n_features=prepared.X_train.shape[1],
-			n_outputs=prepared.y_train.shape[1],
-			regularizer=reg_obj,
-			constraint=constraint_obj,
-			**base_cfg,
-		)
-		base_model.initialize(prepared.X_backend_scaled, targets=prepared.y_backend_scaled)
-
-		if initializer_weights is not None:
-			self._assign_initializer_weights(
-				model=base_model,
-				weights=initializer_weights,
-			)
-
-		base_model.fit()
-		base_weights = base_model.get_weights()
-
-		base_pred_scaled = np.asarray(base_model.predict(prepared.X_backend_scaled), dtype=np.float64)
-		base_pred_real = prepared.y_scaler.inverse_transform(base_pred_scaled)
-		y_backend_real = prepared.y_scaler.inverse_transform(prepared.y_backend_scaled)
-		base_weight_matrix = np.asarray(base_weights[0], dtype=np.float64)
-
-		results = GrangerAnalysisResults(
-			effects=effects_list, 
-			causes=tested_causes_list,
-			mask=constraint_obj.mask if hasattr(constraint_obj, "mask") else prepared.base_mask,
-		)
-		results.set_base_snapshot(
-			base_predictions=base_pred_scaled,
-			base_weights=base_weight_matrix
-		)
-		results.set_base_covariance(
-			x_train=prepared.X_backend_scaled,
-			y_true=prepared.y_backend_scaled,
-			y_pred=base_pred_scaled,
-		)
-		reference_models: Dict[str, Any] = {}
-
-		# Reuse a single reference model object; reinitialize state for each cause.
-		reference_cfg = _run_cfg("reference_model_template")
-		reference_model = strategy.build_model(
-			n_features=prepared.X_train.shape[1],
-			n_outputs=prepared.y_train.shape[1],
-			regularizer=reg_obj,
-			constraint=constraint_obj,
-			**reference_cfg,
-		)
-		reference_needs_reinit = bool(getattr(reference_model, "needs_reinit", True))
-		if not reference_needs_reinit:
-			reference_model.initialize(prepared.X_backend_scaled, targets=prepared.y_backend_scaled)
-
-		for cause_name in tested_causes_list:
-			cause_idx = all_columns.index(cause_name)
-
-			reference_model.reset_callbacks(run_name=f"reference_cause_{cause_name}")
-
-			if reference_needs_reinit:
-				reference_model.initialize(prepared.X_backend_scaled, targets=prepared.y_backend_scaled)
-			else:
-				reference_model.set_weights(base_weights)
-
-			start = int(prepared.col_offsets[cause_idx])
-			end = int(prepared.col_offsets[cause_idx + 1])
-			reference_model.omit_variables(list(range(start, end)))
-			reference_model.fit()
-
-			ref_pred_scaled = reference_model.predict(prepared.X_backend_scaled)
-			ref_pred_real = prepared.y_scaler.inverse_transform(ref_pred_scaled)
-			ref_weight_matrix = reference_model.get_weights()[0]
-
-			results.update_cause(
-				cause=cause_name,
-				cause_index=cause_idx,
-				y_true=y_backend_real,
-				col_offsets=prepared.col_offsets,
-				base_predictions=base_pred_real,
-				reference_predictions=ref_pred_real,
-				base_weights=base_weight_matrix,
-				reference_weights=ref_weight_matrix,
-			)
-			reference_models[cause_name] = {
-				"predictions": ref_pred_real,
-				"weights": ref_weight_matrix,
-			}
-
-		prepared_data_output = prepared if (self._reuse_data or prepared_data is not None) else None
-		self._prepared_data = prepared
-
-		return MultiTaskGrangerOutput(
-			results=results,
-			base_model=base_model,
-			reference_models=reference_models,
-			stationarity_transformer=self._stationarity_transformer,
-			lag_engine=prepared.engine,
-			X_scaler=prepared.x_scaler,
-			y_scaler=prepared.y_scaler,
-			preparation_time_seconds=preparation_time_seconds,
-			prepared_data=prepared_data_output,
-		)
-
-	@staticmethod
-	def _build_initializer_weights(
-		initializer: Any,
-		X_train: np.ndarray,
-		y_train: np.ndarray,
-		mask: Optional[np.ndarray],
-	) -> List[np.ndarray]:
-		"""Compute initializer weights once and return [kernel, bias]."""
-		if isinstance(initializer, type):
-			init_obj = initializer(
-				n_targets=y_train.shape[1],
-				n_features_eff=X_train.shape[1],
-			)
-		else:
-			init_obj = initializer
-
-		if not callable(init_obj):
-			raise TypeError("initializer must be callable or an initializer class")
-
-		try:
-			A, B = init_obj(Y=y_train, X_lagged=X_train, mask=mask)
-		except TypeError:
-			A, B = init_obj()
-
-		A_arr = np.asarray(A, dtype=np.float64)
-		B_arr = np.asarray(B, dtype=np.float64)
-
-		# Initializers produce A as (n_outputs, n_features); models accept kernel as (n_features, n_outputs).
-		kernel = A_arr.T
-		return [kernel, B_arr]
-
-	@staticmethod
-	def _assign_initializer_weights(model: Any, weights: List[np.ndarray]) -> None:
-		"""Assign precomputed initializer weights to a model."""
-		kernel = np.asarray(weights[0], dtype=np.float64).copy()
-		bias = np.asarray(weights[1], dtype=np.float64).copy()
-		model.set_weights([kernel, bias])
+        The method builds a ``MultiTaskGrangerBuilder`` configured with the API
+        settings, prepares the data, instantiates the strategy and model,
+        estimates the unrestricted model, and then fits the restricted models for
+        each tested cause before returning the aggregated results.
+        """
+        builder = MultiTaskGrangerBuilder(
+            backend=self.backend, reuse_data=self._reuse_data
+        ).data(data).variables(causes, effects, tested_causes).relations(relations)
+        builder.lag(lag_config, lag_selector).stationarity(stationarity_transformer)
+        builder._fit_kwargs.update({
+            "missing_value_imputer": missing_value_imputer,
+            "schema_policy": schema_policy,
+            "prepared_data": prepared_data,
+            "backend_sample_fraction": backend_sample_fraction,
+            "backend_max_samples": backend_max_samples,
+            "random_state": random_state,
+            "sampling_strategy": sampling_strategy,
+            "x_scaler": x_scaler, "y_scaler": y_scaler,
+            "regularizer": regularizer,
+            "regularizer_spec": regularizer_spec,
+            "callbacks": list(callbacks) if callbacks is not None else None,
+            "hiperoptimalization_state": hiperoptimalization_state,
+            "hiperoptimalization_conf": hiperoptimalization_conf,
+            "initializer": initializer, "model_config": model_config,
+        })
+        return builder.fit()

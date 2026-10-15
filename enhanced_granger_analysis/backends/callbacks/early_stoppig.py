@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Mapping
 
 import numpy as np
 
@@ -17,7 +17,7 @@ class EarlyStopping(Callback):
 		min_delta: float = 0.0,
 		restore_best_weights: bool = True,
 		monitor: str = "epoch_loss",
-	) -> None:
+	):
 		if patience <= 0:
 			raise TrainingConfigurationError("patience must be a positive integer")
 		if min_delta < 0:
@@ -30,7 +30,7 @@ class EarlyStopping(Callback):
 
 		self._best_loss: float = float("inf")
 		self._num_bad_epochs: int = 0
-		self._best_weights: Optional[List[np.ndarray]] = None
+		self._best_weights: List[np.ndarray] = None
 
 	def on_train_beginning(self, state: Dict[str, Any]) -> None:
 		self._best_loss = float("inf")
@@ -65,13 +65,27 @@ class EarlyStopping(Callback):
 		if self.restore_best_weights and self._best_weights is not None and model is not None:
 			model.set_weights(self._best_weights)
 
-	def clone_for_run(self, run_name: str) -> "EarlyStopping":
-		"""Create a clean callback; do not copy best loss or stored weights."""
+	def clone_for_run(
+		self,
+		run_name: str,
+		callback_updates: Optional[Mapping[str, Any]] = None,
+	) -> "EarlyStopping":
+		"""Create a clean callback; do not copy the best loss or stored weights."""
 		del run_name  # This callback has no run-specific destination.
+		if callback_updates:
+			patience = callback_updates.get("patience", self.patience)
+			min_delta = callback_updates.get("min_delta", self.min_delta)
+			restore_best_weights = callback_updates.get("restore_best_weights", self.restore_best_weights)
+			monitor = callback_updates.get("monitor", self.monitor)
+		else:
+			patience = self.patience
+			min_delta = self.min_delta
+			restore_best_weights = self.restore_best_weights
+			monitor = self.monitor
 
 		return type(self)(
-			patience=self.patience,
-			min_delta=self.min_delta,
-			restore_best_weights=self.restore_best_weights,
-			monitor=self.monitor,
+			patience=patience,
+			min_delta=min_delta,
+			restore_best_weights=restore_best_weights,
+			monitor=monitor,
 		)
