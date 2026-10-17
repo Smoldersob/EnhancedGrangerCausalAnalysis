@@ -3,7 +3,7 @@ from importlib.util import find_spec
 
 import numpy as np
 
-from ..backends import BackendFactory
+from enhanced_granger_analysis.backends import BackendFactory
 from unittest import SkipTest
 
 

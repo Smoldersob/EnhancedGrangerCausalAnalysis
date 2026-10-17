@@ -4,9 +4,9 @@ from importlib.util import find_spec
 import numpy as np
 import pandas as pd
 
-from ..api.orchestrator import MultiTaskGrangerAPI
-from ..core.lag_config import LagConfiguration
-from ..preprocessing.stationarity import StationarityTransformer
+from enhanced_granger_analysis.api.orchestrator import MultiTaskGrangerAPI
+from enhanced_granger_analysis.core.lag_config import LagConfiguration
+from enhanced_granger_analysis.preprocessing.stationarity import StationarityTransformer
 
 
 from unittest import SkipTest

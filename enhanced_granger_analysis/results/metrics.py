@@ -3,6 +3,7 @@ from typing import Any
 
 import numpy as np
 
+from ..core.registry import Registry, RegistryError
 from ..core.exceptions import ResultsError
 from .causality_matrix import CausalityMatrix
 from .statistics import (
@@ -17,32 +18,40 @@ from .statistics import (
 
 Metric = Callable[..., CausalityMatrix]
 
-_METRICS: dict[str, Metric] = {}
+_METRICS: Registry[Metric] = Registry(label="metric")
 
-def register_metric(*names: str):
-    """Register aliases used by ``GrangerAnalysisResults.evaluate``."""
+
+def register_metric(*names: str) -> Callable[[Metric], Metric]:
+    """Register a metric under a canonical name and optional aliases."""
     def decorator(func: Metric) -> Metric:
-        for name in names:
-            if name in _METRICS:
-                raise ResultsError(f"Metric '{name}' is already registered.")
-            _METRICS[name] = func
-        return func
+        if not callable(func):
+            raise ResultsError("A registered metric must be callable.")
+
+        try:
+            return _METRICS.decorator(*names)(func)
+        except RegistryError as exc:
+            raise ResultsError(str(exc)) from exc
 
     return decorator
 
 
 def resolve_metric(metric: str | Metric) -> Metric:
-    """Resolve a registered metric name or accept a custom metric callable."""
+    """Resolve a metric name or accept a custom callable."""
     if callable(metric):
         return metric
 
-    normalized = str(metric).strip().lower()
     try:
-        return _METRICS[normalized]
-    except KeyError as exc:
-        available = ", ".join(sorted(_METRICS))
-        raise ResultsError(f"Unknown metric '{metric}'. Available metrics: {available}.") from exc
+        return _METRICS.resolve(metric)
+    except RegistryError as exc:
+        raise ResultsError(str(exc)) from exc
 
+
+def available_metrics(
+    *,
+    include_aliases: bool = False,
+) -> tuple[str, ...]:
+    """List registered metrics without evaluating them."""
+    return _METRICS.available(include_aliases=include_aliases)
 
 def _statistic_matrix(results: Any, name: str) -> CausalityMatrix:
     """Reuse a cached statistic or evaluate it once without restoration."""

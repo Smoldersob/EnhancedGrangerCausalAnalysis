@@ -4,7 +4,7 @@ from importlib.util import find_spec
 import numpy as np
 
 if find_spec("pandas") is not None:
-    from ..results.granger_results import GrangerAnalysisResults
+    from enhanced_granger_analysis.results.granger_results import GrangerAnalysisResults
 else:
     GrangerAnalysisResults = None
 

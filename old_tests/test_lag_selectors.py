@@ -2,9 +2,9 @@ import traceback
 
 import numpy as np
 import pandas as pd
-from ..core.lag_config import LagConfiguration
-from ..preprocessing.lag.lag_selectors import ICLagSelector, CVLagSelector
-from ..preprocessing.lag.lag_engine import LagEngine
+from enhanced_granger_analysis.core.lag_config import LagConfiguration
+from enhanced_granger_analysis.preprocessing.lag.lag_selectors import ICLagSelector, CVLagSelector
+from enhanced_granger_analysis.preprocessing.lag.lag_engine import LagEngine
 
 # ===========================================================================
 # Tests for the delta_min and backward pruning mechanism

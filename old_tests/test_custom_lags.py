@@ -12,9 +12,9 @@ import numpy as np
 import pandas as pd
 import sys
 
-from ..core.lag_config import LagConfiguration
-from ..preprocessing.lag.lag_engine import LagEngine
-from ..preprocessing.lag.lag_selectors import ICLagSelector
+from enhanced_granger_analysis.core.lag_config import LagConfiguration
+from enhanced_granger_analysis.preprocessing.lag.lag_engine import LagEngine
+from enhanced_granger_analysis.preprocessing.lag.lag_selectors import ICLagSelector
 
 
 def _col_offsets_from_lag_order(engine: LagEngine) -> np.ndarray:

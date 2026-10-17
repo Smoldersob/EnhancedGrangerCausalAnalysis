@@ -1,7 +1,11 @@
 import numpy as np
 import pandas as pd
 import pytest
+import sys
 
+from pathlib import Path
+sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
+   
 from enhanced_granger_analysis.core.exceptions import DataValidationError
 from enhanced_granger_analysis.preprocessing.missing import (
     ConstantImputer,
@@ -40,10 +44,10 @@ def test_prepare_data_maps_cause_names_to_lagged_feature_blocks() -> None:
         stationarity_transformer=None,
     )
 
-    assert prepared.causes == ["y", "x"]
-    assert prepared.tested_causes == ["x"]
-    assert prepared.predictor_slices["x"] == slice(0, 12)
-    assert prepared.predictor_slices["y"] == slice(12, 24)
+    assert prepared.causes == ("y", "x")
+    assert prepared.tested_causes == ("x",)
+    assert prepared.predictor_slices["y"] == slice(0, 12)
+    assert prepared.predictor_slices["x"] == slice(12, 24)
 
 
 def test_prepare_data_rejects_mismatched_segment_schema_by_default() -> None:
@@ -64,7 +68,7 @@ def test_union_schema_is_opt_in() -> None:
         schema_policy="union",
     )
 
-    assert prepared.causes == ["x", "y", "target"]
+    assert prepared.causes == ("x", "y", "target")
 
 
 def test_imputers_preserve_segment_boundaries() -> None:
@@ -194,10 +198,10 @@ def test_data_preparer_supports_staged_pipeline_builder() -> None:
         .imput()
         .remove_redundant()
         .force_stationarity()
+        .lag()
         .scale()
         .reduce_workload()
-        .lag()
     )
 
     assert prepared.effective_roles.causes == ("x",)
-    assert prepared.effects == ["y"]
+    assert prepared.effective_roles.effects == ("y",)

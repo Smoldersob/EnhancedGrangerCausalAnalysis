@@ -3,13 +3,13 @@ import traceback
 import numpy as np
 import pandas as pd
 
-from ..core.exceptions import (
+from enhanced_granger_analysis.core.exceptions import (
     ColumnMismatchError,
     DataShapeError,
     EmptyDataError,
     LagConfigurationError,
 )
-from ..utilities.validation import (
+from enhanced_granger_analysis.utilities.validation import (
     validate_columns_present,
     validate_dataframe_list,
     validate_lag_bounds,

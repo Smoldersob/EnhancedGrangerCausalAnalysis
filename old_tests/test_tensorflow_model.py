@@ -9,13 +9,13 @@ import numpy as np
 # Keras backend selection should happen before TensorFlow/Keras imports.
 os.environ["KERAS_BACKEND"] = "tensorflow"
 
-from ..core.exceptions import TrainingError
-from ..backends.models.keras_model import KerasGrangerModel
-from ..backends.regularizers.keras_regularizers import (
+from enhanced_granger_analysis.core.exceptions import TrainingError
+from enhanced_granger_analysis.backends.models.keras_model import KerasGrangerModel
+from enhanced_granger_analysis.backends.regularizers.keras_regularizers import (
     KerasL1Regularizer,
     KerasLagDependentL1Regularizer,
 )
-from ..backends.constraints import (
+from enhanced_granger_analysis.backends.constraints import (
     build_keras_constraint_from_relations,
     process_user_relations,
 )

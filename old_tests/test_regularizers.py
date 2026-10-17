@@ -3,7 +3,7 @@ from importlib.util import find_spec
 
 import numpy as np
 
-from ..backends.regularizers.numpy_regularizers import (
+from enhanced_granger_analysis.backends.regularizers.numpy_regularizers import (
     NumpyL1Regularizer,
     NumpyLagDependentL1Regularizer,
 )

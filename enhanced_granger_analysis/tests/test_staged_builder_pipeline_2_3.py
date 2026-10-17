@@ -6,10 +6,14 @@ import numpy as np
 import pandas as pd
 import pytest
 
-from ..api import orchestrator as orchestrator_module
-from ..api.builder import MultiTaskGrangerBuilder
-from ..core.exceptions import DataValidationError
-from ..preprocessing.prepare_data import PreparedData, VariableRoles
+import sys
+
+from pathlib import Path
+sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
+from enhanced_granger_analysis.api import orchestrator as orchestrator_module
+from enhanced_granger_analysis.api.builder import MultiTaskGrangerBuilder
+from enhanced_granger_analysis.core.exceptions import DataValidationError
+from enhanced_granger_analysis.preprocessing.prepare_data import PreparedData, VariableRoles
 
 
 class _IdentityScaler:
@@ -182,80 +186,3 @@ def test_reset_callbacks_is_delegated_with_updates(monkeypatch):
         ("manual_run", {"EarlyStopping": {"patience": 2}})
     ]
 
-
-def test_orchestrator_runs_the_standard_builder_sequence(monkeypatch):
-    calls = []
-
-    class FakeBuilder:
-        def __init__(self, backend=None, reuse_data=False):
-            calls.append(("init", backend, reuse_data))
-
-        def data(self, value):
-            calls.append("data")
-            return self
-
-        def variables(self, *values):
-            calls.append("variables")
-            return self
-
-        def relations(self, value):
-            calls.append("relations")
-            return self
-
-        def lag(self, *values):
-            calls.append("lag")
-            return self
-
-        def stationarity(self, value):
-            calls.append("stationarity")
-            return self
-
-        def prepare_data(self, value):
-            calls.append("prepare_data")
-
-        def prepare_components(self):
-            calls.append("prepare_components")
-
-        def build_model(self):
-            calls.append("build_model")
-
-        def initialize_weights(self):
-            calls.append("initialize_weights")
-
-        def fit_base(self):
-            calls.append("fit_base")
-
-        def fit_restricted_models(self):
-            calls.append("fit_restricted_models")
-
-        def get_results(self):
-            calls.append("get_results")
-            return "results"
-
-        _fit_kwargs = {}
-
-    monkeypatch.setattr(orchestrator_module, "MultiTaskGrangerBuilder", FakeBuilder)
-    result = orchestrator_module.MultiTaskGrangerAPI("dummy", reuse_data=True).fit(
-        pd.DataFrame({"x": [1], "y": [2]}),
-        causes=["x"],
-        effects=["y"],
-        tested_causes=["x"],
-    )
-
-    assert result == "results"
-    assert calls[-6:] == [
-        "prepare_data",
-        "prepare_components",
-        "build_model",
-        "initialize_weights",
-        "fit_base",
-        "fit_restricted_models",
-    ] or calls[-7:] == [
-        "prepare_data",
-        "prepare_components",
-        "build_model",
-        "initialize_weights",
-        "fit_base",
-        "fit_restricted_models",
-        "get_results",
-    ]

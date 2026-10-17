@@ -2,9 +2,9 @@ import traceback
 
 import pandas as pd
 
-from ..api.builder import MultitaskGrangerBuilder
-from ..core.exceptions import DataValidationError
-from ..api import builder as builder_module
+from enhanced_granger_analysis.api.builder import MultitaskGrangerBuilder
+from enhanced_granger_analysis.core.exceptions import DataValidationError
+from enhanced_granger_analysis.api import builder as builder_module
 
 
 class SkipTest(Exception):

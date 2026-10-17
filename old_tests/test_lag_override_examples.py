@@ -1,9 +1,9 @@
 import numpy as np
 import pandas as pd
 
-from ..core.lag_config import LagConfiguration
-from ..preprocessing.lag.lag_engine import LagEngine
-from ..preprocessing.lag.lag_selectors import BaseLagSelector
+from enhanced_granger_analysis.core.lag_config import LagConfiguration
+from enhanced_granger_analysis.preprocessing.lag.lag_engine import LagEngine
+from enhanced_granger_analysis.preprocessing.lag.lag_selectors import BaseLagSelector
 
 
 class FixedMatrixSelector(BaseLagSelector):

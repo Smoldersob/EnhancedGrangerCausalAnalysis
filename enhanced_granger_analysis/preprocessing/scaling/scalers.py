@@ -12,7 +12,7 @@ from typing import Optional, Tuple
 import numpy as np
 from numpy.typing import NDArray
 
-from .registy import register_scaler
+from .registry import register_scaler
 from ...core.exceptions import DataShapeError, InvalidFeatureRangeError, ScalerNotFittedError
 
 def _as_2d_float64(data: NDArray[np.float64]) -> NDArray[np.float64]:
@@ -32,6 +32,15 @@ class _BaseScaler:
 	def fit(self, data: NDArray[np.float64]) -> "_BaseScaler":
 		raise NotImplementedError
 
+	def fit_transform(self, data: NDArray[np.float64])  -> "_BaseScaler":
+		raise NotImplementedError
+
+	def fit_transform(self, data: NDArray[np.float64])  -> "_BaseScaler":
+		raise NotImplementedError
+
+	def fit_transform(self, data: NDArray[np.float64])  -> "_BaseScaler":
+		raise NotImplementedError
+
 	def get_params(self) -> dict[str, object]:
 		return {
 			name: value
@@ -43,7 +52,7 @@ class _BaseScaler:
 		if not self._fitted:
 			raise ScalerNotFittedError("Scaler is not fitted. Call fit first.")
 
-
+@register_scaler("standard", "zscore")
 class StandardScaler(_BaseScaler):
 	"""Column-wise z-score scaling: ``(x - mean) / std``."""
 
@@ -73,7 +82,7 @@ class StandardScaler(_BaseScaler):
 		x = _as_2d_float64(data)
 		return x * self.scale_ + self.mean_
 
-
+@register_scaler("minmax")
 class MinMaxScaler(_BaseScaler):
 	"""Column-wise min-max scaling to a given range, default ``[0, 1]``."""
 
@@ -113,7 +122,7 @@ class MinMaxScaler(_BaseScaler):
 		x_std = (x - lo) / (hi - lo)
 		return x_std * self.data_range_ + self.data_min_
 
-
+@register_scaler("robust")
 class RobustScaler(_BaseScaler):
 	"""Column-wise robust scaling using median and IQR."""
 
@@ -146,7 +155,7 @@ class RobustScaler(_BaseScaler):
 		x = _as_2d_float64(data)
 		return x * self.scale_ + self.center_
 
-
+@register_scaler("maxabs", "max_abs")
 class MaxAbsScaler(_BaseScaler):
 	"""Column-wise scaling by maximum absolute value."""
 
@@ -194,20 +203,3 @@ class IdentityScaler(_BaseScaler):
 		self._ensure_fitted()
 		return _as_2d_float64(data)
 
-@register_scaler("standard", "zscore")
-def _standard_scaler_factory() -> "StandardScaler":
-	return StandardScaler()
-
-@register_scaler("minmax")
-def _min_max_scaler_factory() -> "MinMaxScaler":
-    return MinMaxScaler()
-
-
-@register_scaler("robust")
-def _robust_scaler_factory() -> "RobustScaler":
-    return RobustScaler()
-
-
-@register_scaler("maxabs", "max_abs")
-def _max_abs_scaler_factory() -> "MaxAbsScaler":
-    return MaxAbsScaler()

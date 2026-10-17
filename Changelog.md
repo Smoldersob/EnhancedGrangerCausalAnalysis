@@ -241,3 +241,10 @@ Calling `.stationarity()`, which is the default for the stage, will disable the 
   indicators by signs.
 - Updating the base snapshot invalidates cached sign evaluations through
   the existing metric-cache invalidation mechanism.
+
+### Version Changes 2.3.1
+
+Old test files have been move to new directory, and new test naming startegy has been introduced were test have digist of version and 
+subversion of packege - to know for which verision they were made. 
+
+Additonaly registry mechanizm have been generalized and slightly updated. New core class of `Registry` is now the base class for all registries, and it provides a more flexible and robust way to manage components. Already existing registries have been updated to use the new registry mechanism.

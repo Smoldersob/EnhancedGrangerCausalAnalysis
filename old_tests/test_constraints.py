@@ -3,19 +3,19 @@ from importlib.util import find_spec
 
 import numpy as np
 
-from ..backends.constraints import (
+from enhanced_granger_analysis.backends.constraints import (
     build_numpy_constraint_from_relations,
 )
 
 if find_spec("torch") is not None:
-    from ..backends.constraints import (
+    from enhanced_granger_analysis.backends.constraints import (
         build_pytorch_constraint_from_relations,
     )
 else:
     build_pytorch_constraint_from_relations = None
 
 if find_spec("sklearn") is not None:
-    from ..backends.models.scikit_model import ScikitConstrainedGrangerModel
+    from enhanced_granger_analysis.backends.models.scikit_model import ScikitConstrainedGrangerModel
 else:
     ScikitConstrainedGrangerModel = None
 

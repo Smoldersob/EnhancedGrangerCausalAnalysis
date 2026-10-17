@@ -6,11 +6,11 @@ import numpy as np
 import pandas as pd
 
 # Allow running this file directly from its nested location
-from ..api import BuilderConfigLoader, TestGroupConfigIterator
-from ..api.builder import MultiTaskGrangerBuilder
-from ..api import orchestrator as orchestrator_module
-from ..core.lag_config import LagConfiguration
-from ..preprocessing.lag.lag_selectors import ICLagSelector
+from enhanced_granger_analysis.api import BuilderConfigLoader, TestGroupConfigIterator
+from enhanced_granger_analysis.api.builder import MultiTaskGrangerBuilder
+from enhanced_granger_analysis.api import orchestrator as orchestrator_module
+from enhanced_granger_analysis.core.lag_config import LagConfiguration
+from enhanced_granger_analysis.preprocessing.lag.lag_selectors import ICLagSelector
 
 
 def test_builder_config_loader_json_and_lag_config_conversion():

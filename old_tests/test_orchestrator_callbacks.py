@@ -3,11 +3,11 @@ import traceback
 import numpy as np
 import pandas as pd
 
-from ..api import orchestrator as orchestrator_module
-from ..api.orchestrator import MultiTaskGrangerAPI
-from ..core.lag_config import LagConfiguration
-from ..preprocessing.scaling import _BaseScaler
-from ..preprocessing.stationarity import StationarityTransformer
+from enhanced_granger_analysis.api import orchestrator as orchestrator_module
+from enhanced_granger_analysis.api.orchestrator import MultiTaskGrangerAPI
+from enhanced_granger_analysis.core.lag_config import LagConfiguration
+from enhanced_granger_analysis.preprocessing.scaling import _BaseScaler
+from enhanced_granger_analysis.preprocessing.stationarity import StationarityTransformer
 
 
 from unittest import SkipTest

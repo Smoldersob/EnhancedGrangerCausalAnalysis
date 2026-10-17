@@ -5,14 +5,14 @@ from importlib.util import find_spec
 
 import numpy as np
 
-from ..core.exceptions import TrainingError
-from ..backends.callbacks import (
+from enhanced_granger_analysis.core.exceptions import TrainingError
+from enhanced_granger_analysis.backends.callbacks import (
     ConvergenceCheck,
     EarlyStopping,
     ReduceLearningRate,
     TorchTensorBoardCallback,
 )
-from ..backends.models.pytorch_model import PyTorchGrangerModel
+from enhanced_granger_analysis.backends.models.pytorch_model import PyTorchGrangerModel
 
 
 from unittest import SkipTest

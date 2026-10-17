@@ -3,12 +3,12 @@ import traceback
 import numpy as np
 import pandas as pd
 
-from ..preprocessing.stationarity.tests import (
+from enhanced_granger_analysis.preprocessing.stationarity.tests import (
     apply_differencing,
     static_adfuller_order,
     static_kpss_order,
 )
-from ..preprocessing.stationarity.transformer import (
+from enhanced_granger_analysis.preprocessing.stationarity.transformer import (
     StationarityTransformer,
 )
 

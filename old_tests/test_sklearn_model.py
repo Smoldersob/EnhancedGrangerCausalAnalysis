@@ -4,8 +4,8 @@ import numpy as np
 
 # Allow running this file directly from its nested location, e.g.:
 # python complex_granger_analysis/tests/test_sklearn_model.py
-from ..core.exceptions import TrainingError
-from ..backends.models.scikit_model import ScikitConstrainedGrangerModel
+from enhanced_granger_analysis.core.exceptions import TrainingError
+from enhanced_granger_analysis.backends.models.scikit_model import ScikitConstrainedGrangerModel
 
 
 def _assert_raises(exc_type, fn, *args, **kwargs):

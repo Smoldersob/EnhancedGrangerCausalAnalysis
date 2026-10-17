@@ -11,7 +11,19 @@ from numpy.typing import NDArray
 
 class Scaler(Protocol):
     """Interface for data scaling methods (ETS in/out-of-sample)."""
-    
+
+    @abstractmethod
+    def fit(self, data: NDArray[np.float64]) -> "Scaler":
+        """
+        Fit parameter of scaler.
+
+        Args:
+            data: Input time series data array of shape (n_samples, n_features)
+
+        Returns:
+            Scaler object with fitted parameters
+        """
+
     @abstractmethod
     def fit_transform(self, data: NDArray[np.float64]) -> NDArray[np.float64]:
         """
