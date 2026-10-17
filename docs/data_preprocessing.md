@@ -36,6 +36,14 @@ to fit those scalers.
 The base model and all restricted runs use the same prepared observations and
 effect ordering.
 
+When the input is a sequence of DataFrames, each DataFrame is treated as an
+independent time segment during lag preparation. Lagged features and target
+values are aligned within that segment, the first rows lacking the maximum
+required history are removed, and only then are rows concatenated in input
+order. History is never carried from one segment into the next, and segment
+sizes are not equalized. Missing values occurring inside a segment are handled
+by the separate missing-value preprocessing stage.
+
 This workflow does not automatically create training, validation, and test
 partitions. Applications requiring held-out evaluation must define the split
 and transformation-fitting policy explicitly.

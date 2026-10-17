@@ -47,10 +47,6 @@ def _to_dataframe_list(data: pd.DataFrame | Sequence[pd.DataFrame]) -> list[pd.D
     raise DataValidationError("data must be a DataFrame or a sequence of DataFrames")
 
 
-def _create_scaler(name: Optional[Any]) -> Any:
-    return resolve_scaler(name)
-
-
 class DataPreparer:
     """Stage-by-stage preparation builder for :class:`PreparedData`."""
 

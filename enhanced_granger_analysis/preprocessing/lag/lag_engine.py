@@ -107,6 +107,29 @@ def _drop_unusable_targets(
     return data[effects].iloc[n_drop:].values
 
 
+def _prepare_single_segment(
+    data: pd.DataFrame,
+    predictors: List[str],
+    effects: List[str],
+    min_lags: np.ndarray,
+    max_lags: np.ndarray,
+) -> Tuple[np.ndarray, np.ndarray]:
+    """Build and align the lagged data for one independent segment."""
+    n_drop = int(max_lags.max())
+    X = _create_lagged_data(
+        data.loc[:, predictors],
+        min_lags,
+        max_lags,
+    )
+    y = _drop_unusable_targets(data, effects, n_drop)
+
+    if X.shape[0] != y.shape[0]:
+        raise LagPreparationError(
+            "Lagged predictors and targets are not aligned within a segment."
+        )
+    return X, y
+
+
 def _fit_selector_on_single(
     selector: BaseLagSelector,
     data: pd.DataFrame,
@@ -335,36 +358,43 @@ class LagEngine:
         }
         self.lag_order_ = {"min": min_lags.copy(), "max": max_lags.copy()}
 
-        # Build lagged features in parallel
-        X = self._build_features(data_list, min_lags, max_lags)
-
-
         self.predictor_names_ = tuple(predictors)
         self.output_names_ = tuple(targets)
 
-        predictor_data = [
-            dataframe.loc[:, predictors]
-            for dataframe in data_list
-        ]
-
-        X = self._build_features(
-            predictor_data,
-            predictor_min_lags,
-            predictor_max_lags,
-        )
-        
-        # Align targets
-        n_drop = int(predictor_max_lags.max())
-        y = self._align_targets(data_list, targets, n_drop)
-        
-        if X.shape[0] != y.shape[0]:
-            raise LagPreparationError(
-                "Lagged predictors and targets are not aligned."
+        # Keep each segment independent while building both sides of the
+        # supervised sample.  Only after dropping the unavailable history
+        # from each segment are the resulting rows concatenated.
+        segment_results = Parallel(n_jobs=self.n_jobs)(
+            delayed(_prepare_single_segment)(
+                dataframe,
+                predictors,
+                targets,
+                predictor_min_lags,
+                predictor_max_lags,
             )
+            for dataframe in data_list
+        )
+        non_empty_segments = [
+            (segment_X, segment_y)
+            for segment_X, segment_y in segment_results
+            if segment_X.shape[0] > 0
+        ]
+        if non_empty_segments:
+            X = np.concatenate(
+                [segment_X for segment_X, _ in non_empty_segments],
+                axis=0,
+            )
+            y = np.concatenate(
+                [segment_y for _, segment_y in non_empty_segments],
+                axis=0,
+            )
+        else:
+            X = np.empty((0, int((predictor_max_lags - predictor_min_lags + 1).sum())))
+            y = np.empty((0, len(targets)))
 
         # Predictor block boundaries for downstream usage.
         block_boundaries = np.concatenate(
-            [[0], (max_lags - min_lags + 1).cumsum(dtype=int)]
+            [[0], (predictor_max_lags - predictor_min_lags + 1).cumsum(dtype=int)]
         )
 
         return X, y, block_boundaries
