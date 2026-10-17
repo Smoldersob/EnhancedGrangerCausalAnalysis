@@ -9,8 +9,7 @@ from typing import Any, Dict, List, Mapping, Optional, Sequence
 from time import perf_counter
 
 from ..backends import BackendFactory
-from ..core.exceptions import DataValidationError
-from ..core.registry import RegistryError
+from ..core.exceptions import DataValidationError, RegistryError
 from ..core.initialization import InitializationContext
 from ..initializers.registry import resolve_initializer_spec
 from ..preprocessing.prepare_data import PreparedData, prepare_data as run_prepare_data

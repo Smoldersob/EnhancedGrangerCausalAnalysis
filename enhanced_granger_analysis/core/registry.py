@@ -5,24 +5,9 @@ from __future__ import annotations
 from collections.abc import Callable, Iterable
 from typing import Generic, TypeVar
 
+from .exceptions import DuplicateRegistrationError, InvalidRegistryNameError, UnknownComponentError
 
 T = TypeVar("T")
-
-
-class RegistryError(ValueError):
-    """Base error raised by component registries."""
-
-
-class InvalidRegistryNameError(RegistryError):
-    """A component name is invalid."""
-
-
-class DuplicateRegistrationError(RegistryError):
-    """A name or alias is already registered or repeated."""
-
-
-class UnknownComponentError(RegistryError):
-    """A requested component is not registered."""
 
 
 def normalize_registry_name(name: str) -> str:

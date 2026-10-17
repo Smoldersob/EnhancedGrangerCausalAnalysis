@@ -3,8 +3,8 @@ from typing import Any
 
 import numpy as np
 
-from ..core.registry import Registry, RegistryError
-from ..core.exceptions import ResultsError
+from ..core.registry import Registry
+from ..core.exceptions import ResultsError, RegistryError
 from .causality_matrix import CausalityMatrix
 from .statistics import (
     estimate_masked_weight_covariance,

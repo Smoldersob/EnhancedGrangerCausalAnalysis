@@ -2,18 +2,12 @@ from __future__ import annotations
 
 import copy
 import json
-import os
 from pathlib import Path
 from typing import Any, Dict, List, Mapping, Optional, Sequence, Tuple
 
 from ..core.exceptions import DataValidationError
 from ..core.lag_config import LagConfiguration
 from ..preprocessing.lag.lag_selectors import CVLagSelector, ICLagSelector, VARLagSelector
-
-try:
-	from .. import initializers as init_module  # type: ignore
-except Exception:  # pragma: no cover - optional dependency
-	init_module = None  # type: ignore[assignment]
 
 
 _RELATION_KEY_SEPARATORS = ("->", "|", ",", ":")
@@ -196,45 +190,6 @@ def _normalize_backend(raw_backend: Any) -> Tuple[Optional[str], Dict[str, Any]]
 	return canonical, dict(backend_params)
 
 
-def _normalize_initializer_spec(raw_initializer: Any) -> Any:
-	"""Resolve initializer spec (string or object) into initializer class or instance.
-	
-	Supported string formats (case-insensitive):
-	- "ols", "olsinitializer": OLSInitializer
-	- "zeros", "zero", "zerosinitializer": ZerosInitializer
-	- "random_normal", "randomnormal", "random", "randomnormalinitializer": RandomNormalInitializer
-	
-	Returns:
-	- String or object specs are resolved to actual initializer classes
-	- None/null returns None
-	"""
-	if raw_initializer is None:
-		return None
-	
-	# Already an object (class or instance) - return as-is
-	if not isinstance(raw_initializer, str):
-		return raw_initializer
-	
-	if init_module is None:
-		raise DataValidationError(
-			"Initializer specs require the initializers module. "
-			"Check that enhanced_granger_analysis is properly installed."
-		)
-	
-	name = raw_initializer.strip().lower()
-	
-	if name in {"ols", "olsinitializer"}:
-		return init_module.OLSInitializer
-	if name in {"zeros", "zero", "zerosinitializer"}:
-		return init_module.ZerosInitializer
-	if name in {"random_normal", "randomnormal", "random", "randomnormalinitializer"}:
-		return init_module.RandomNormalInitializer
-	
-	raise DataValidationError(
-		f"Unsupported initializer type '{raw_initializer}'. "
-		"Supported: ols, zeros, random_normal (or class instances)"
-	)
-
 def _normalize_compute_device(raw_device: Any, backend_name: Optional[str]) -> Dict[str, Any]:
 	"""Normalize compute device spec into backend-specific environment setup.
 	
@@ -385,10 +340,6 @@ class BuilderConfigLoader:
 				out.get("callbacks"),
 				backend_name=backend_name,
 			)
-
-		# Normalize initializer spec (string or object → initializer class)
-		if "initializer" in out and out.get("initializer") is not None:
-			out["initializer"] = _normalize_initializer_spec(out.get("initializer"))
 
 		# Normalize compute device spec and merge into model_config
 		if "compute_device" in out or "device" in out:
