@@ -242,9 +242,30 @@ Calling `.stationarity()`, which is the default for the stage, will disable the 
 - Updating the base snapshot invalidates cached sign evaluations through
   the existing metric-cache invalidation mechanism.
 
-### Version Changes 2.3.1
+### 2.3.2
 
 Old test files have been move to new directory, and new test naming startegy has been introduced were test have digist of version and 
 subversion of packege - to know for which verision they were made. 
 
 Additonaly registry mechanizm have been generalized and slightly updated. New core class of `Registry` is now the base class for all registries, and it provides a more flexible and robust way to manage components. Already existing registries have been updated to use the new registry mechanism.
+
+## Version Changes 2.4
+
+### Added
+- Added the optional `fit_restricted` parameter to the builder and
+  orchestrator `fit()` methods, allowing the analysis to run without
+  fitting restricted models.
+
+### Changed
+- Updated `run_group_causality_tests.py` to automatically skip restricted-model
+  training when `--test wald` is selected, reducing computation time by
+  fitting only the base model.
+- Preserved the full fitting workflow for F and LR tests and for default
+  `fit()` calls (`fit_restricted=True`).
+
+### Notes
+- This optimization does not change the calculation of the Wald statistic,
+  its p-values, or the thresholding procedure.
+- The change applies to the current Wald test implementation. Variants
+  intended for regularized and multilayer models are outside the scope
+  of this release and may be introduced as separate metrics in the future.

@@ -69,6 +69,7 @@ class MultiTaskGrangerAPI:
         hiperoptimalization_conf: Optional[Dict[str, Any]] = None,
         initializer: Optional[Any] = None,
         model_config: Optional[Dict[str, Any]] = None,
+        fit_restricted: bool = True,
     ) -> GrangerAnalysisResults:
         """Execute the full Granger analysis pipeline for the provided data.
 
@@ -97,4 +98,4 @@ class MultiTaskGrangerAPI:
             "hiperoptimalization_conf": hiperoptimalization_conf,
             "initializer": initializer, "model_config": model_config,
         })
-        return builder.fit()
+        return builder.fit(fit_restricted=fit_restricted)

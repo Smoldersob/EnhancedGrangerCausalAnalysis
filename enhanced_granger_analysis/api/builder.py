@@ -614,17 +614,20 @@ class MultiTaskGrangerBuilder:
             raise DataValidationError("No results are available; prepare_data() has not run")
         return self._results
 
-    def fit(self):
-        """Execute the Granger causality analysis pipeline.
-        
-        Performs all configuration steps and computes causality relationships.
+    def fit(self, *, fit_restricted: bool = True):
+        """
+        Execute the pipeline, optionally skipping restricted-model fits.
+        Args:
+            fit_restricted: If True, fit restricted models for all tested causes after fitting the base
         """
         self.prepare_data()
         self.prepare_components()
         self.build_model()
         self.initialize_weights()
         self.fit_base()
-        self.fit_restricted_models()
+        if fit_restricted:
+            self.fit_restricted_models()
+
         return self.get_results()
 
     run = fit

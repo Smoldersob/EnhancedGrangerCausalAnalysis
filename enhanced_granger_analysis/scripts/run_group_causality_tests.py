@@ -375,7 +375,9 @@ def run_from_config(script_config_path: str | Path, save_mode: str = "minimum", 
             builder = MultiTaskGrangerBuilder().from_config(cfg).data(data_frames)
             if cached_prepared_data is not None:
                 builder.prepared_data(cached_prepared_data)
-            results = builder.fit()
+            results = builder.fit(
+                fit_restricted=(selected_test != "wald"),
+            )
 
             # Extract and save all result matrices
             statistic_name, p_value_name = test_metrics[selected_test]
@@ -421,6 +423,7 @@ def run_from_config(script_config_path: str | Path, save_mode: str = "minimum", 
                 "test_file": test_path.name if save_mode == "matrices" else "NOT_SAVED",
                 "sign_file": sign_path.name if save_mode == "matrices" else "NOT_SAVED",
                 "execution_time_seconds": round(elapsed_s, 2),
+                "restricted_models_fitted": selected_test != "wald",
             }
             for p, v in zip(param_names, case_values):
                 row[p] = v
