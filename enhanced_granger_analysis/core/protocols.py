@@ -9,6 +9,8 @@ from typing import Any, Dict, Protocol
 import numpy as np
 from numpy.typing import NDArray
 
+from .initialization import InitializationContext, WeightArray
+
 class Scaler(Protocol):
     """Interface for data scaling methods (ETS in/out-of-sample)."""
 
@@ -64,6 +66,18 @@ class Scaler(Protocol):
         ... 
 
 
+class Initializer(Protocol):
+    """Interface for linear model weight initialization."""
+
+    def __call__(
+        self,
+        *,
+        context: InitializationContext,
+    ) -> list[WeightArray]:
+        """Return weight arrays for each target."""
+        ...
+        
+        
 class Regularizer(Protocol):
     """Interface for regularization methods."""
     

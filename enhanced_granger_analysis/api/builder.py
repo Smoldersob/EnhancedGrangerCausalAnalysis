@@ -10,6 +10,9 @@ from time import perf_counter
 
 from ..backends import BackendFactory
 from ..core.exceptions import DataValidationError
+from ..core.registry import RegistryError
+from ..core.initialization import InitializationContext
+from ..initializers.registry import resolve_initializer_spec
 from ..preprocessing.prepare_data import PreparedData, prepare_data as run_prepare_data
 from ..preprocessing.stationarity import StationarityTransformer
 from ..results.granger_results import GrangerAnalysisResults, PreparationContext
@@ -267,13 +270,19 @@ class MultiTaskGrangerBuilder:
 
     def initializer(self, initializer):
         """
-        Configure the initializer for model weights.
+        Store an initializer name, specification, class, or instance.
+        
         Args:
-            initializer: The initializer to use for model weights
+           initializer: The initializer name, specification, class
+                or instance to use for weight initialization.        
         Returns:
             Self for method chaining
         """
-        self._fit_kwargs["initializer"] = initializer
+        self._fit_kwargs["initializer"] = (
+            copy.deepcopy(dict(initializer))
+            if isinstance(initializer, Mapping)
+            else initializer
+        )
         self._invalidate_from("model")
         return self
 
@@ -322,12 +331,19 @@ class MultiTaskGrangerBuilder:
             if key not in config:
                 continue
             value = config[key]
-            if key in {"regularizer_spec", "hiperoptimalization_conf", "model_config"} and value is not None:
+            if key == "initializer" and isinstance(value, Mapping):
+                value = copy.deepcopy(dict(value))
+            elif key in {
+                "regularizer_spec",
+                "hiperoptimalization_conf",
+                "model_config",
+            } and value is not None:
                 value = dict(value)
             elif key in {"causes", "effects", "tested_causes"}:
                 value = _normalize_optional_name_list(value)
             elif key == "relations" and value is not None:
                 value = dict(value)
+
             self._fit_kwargs[key] = value
         self._invalidate_from("data")
         return self
@@ -481,38 +497,71 @@ class MultiTaskGrangerBuilder:
             self._results.reference_snapshots.clear()
         return self._model
 
-    
     def initialize_weights(self, initializer=None):
-        """
-        Initialize the weights of the model.
-        Args:
-            initializer: Optional initializer object or class. If None, uses the one from fit_kwargs.
-        Returns:
-            The initialized weights.
+        """Resolve, construct, and execute an initializer.
+
+        If initializer is None, use the stored specification.
+
+        An initializer instance must accept the keyword arguments:
+            Y, X_lagged, mask
+
+        It must return:
+            A: shape (n_targets, n_features)
+            B: shape (n_targets,)
         """
         self._require_model()
-        initializer = initializer if initializer is not None else self._fit_kwargs.get("initializer")
-        if initializer is None:
-            return None
-        init_obj = initializer(n_targets=self._prepared_data.y_scaled.shape[1],
-                               n_features_eff=self._prepared_data.X_scaled.shape[1]) if isinstance(initializer, type) else initializer
+
+        spec = (
+            initializer
+            if initializer is not None
+            else self._fit_kwargs.get("initializer")
+        )
+
         try:
-            A, B = init_obj(Y=self._prepared_data.y_scaled, X_lagged=self._prepared_data.X_scaled,
-                            mask=self._prepared_data.base_mask)
-        except TypeError:
-            A, B = init_obj()
-        self._initial_weights = [np.asarray(A, dtype=float).T.copy(), np.asarray(B, dtype=float).copy()]
-        self.set_weights(self._initial_weights)
+            initializer_class, params = resolve_initializer_spec(spec)
+        except (RegistryError, TypeError, ValueError) as exc:
+            raise DataValidationError(
+                f"Invalid initializer specification: {exc}"
+            ) from exc
+
+        if initializer_class is None:
+            return None
+
+        init_obj = initializer_class(**params)
+
+        context = InitializationContext(
+            X=self._prepared_data.X_scaled,
+            y=self._prepared_data.y_scaled,
+            weights=tuple(
+                np.asarray(weight).copy()
+                for weight in self._model.get_weights()
+            ),
+            mask=self._prepared_data.base_mask,
+        )
+
+        weights = init_obj(context)
+
+        self.set_weights(weights)
+
+        # Store the representation accepted and exposed by the model.
+        self._initial_weights = [
+            np.asarray(weight).copy()
+            for weight in self._model.get_weights()
+        ]
+
         return self._initial_weights
 
     def set_weights(self, weights):
         """
-        Set the weights of the model.
+        Delegate weight validation and assignment to the model.
         Args:
             weights: The weights to set.
         """
         self._require_model()
-        self._model.set_weights([np.asarray(w, dtype=float).copy() for w in weights])
+        self._model.set_weights([
+            np.asarray(weight).copy()
+            for weight in weights
+        ])
 
     def reset_callbacks(self, run_name: str, callback_updates=None):
         """
@@ -532,12 +581,24 @@ class MultiTaskGrangerBuilder:
         """
         self._require_model()
         self._model.omit_variables([])
+        timings = {}
+        t0 = perf_counter()
         if self._initial_weights is not None:
             self.set_weights(self._initial_weights)
+        timings["restore_weights"] = perf_counter() - t0
+        
+        t0 = perf_counter()
         self.reset_callbacks("base_model")
+        timings["reset_callbacks"] = perf_counter() - t0
+
+        t0 = perf_counter()
         self._model.fit()
-        self._base_weights = [np.asarray(w, dtype=float).copy() for w in self._model.get_weights()]
-        self._save_snapshot(None)
+        timings["fit_model"] = perf_counter() - t0
+        self._save_snapshot(None, additional_metadata={"timings": timings})
+        self._base_weights = [
+                np.asarray(weight).copy()
+                for weight in self._model.get_weights()
+        ]
         return self._base_weights
 
     def fit_restricted(self, cause: str, start_with_base: bool = True, start_with_initial: bool = False):

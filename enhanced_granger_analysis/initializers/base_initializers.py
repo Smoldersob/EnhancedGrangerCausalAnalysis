@@ -1,218 +1,209 @@
+from __future__ import annotations
+
+import warnings
+
 import numpy as np
-from numpy.linalg import lstsq
-from typing import Tuple
 
-from ..core.exceptions import DataShapeError
+from ..core.initialization import (
+    InitializationContext,
+    WeightArray,
+)
+from .registry import register_initializer
 
 
-class LinearARXInitializer:
-    """
-    Initializer for linear ARX models of the form:
-
-        Y = A @ X_lagged.T + B[:, None]
-
-    where:
-        - Y has shape (n_targets, T_eff)
-        - X_lagged has shape (T_eff, n_features_eff)
-        - A has shape (n_targets, n_features_eff)
-        - B has shape (n_targets,)
-
-    The initializer uses:
-        - zeros
-        - random normal (Keras-style std based on fan_in)
-        - OLS based on provided (Y, X_lagged) and an optional mask.
-
-    Parameters
-    ----------
-    n_targets : int
-        Number of target variables (rows of A).
-    n_features_eff : int
-        Number of effective input features (columns of X_lagged, columns of A).
-    use_lag_zero : bool, default False
-        If True, the first block column for each predictor corresponds to lag=0.
-        This class does not build X_lagged itself, but when using OLS init we
-        will explicitly zero-out weights for lag=0 columns after fitting.
-    lag0_indices : array-like of int, optional
-        Indices of columns in X_lagged (and A) that correspond to lag=0
-        (current values) and should be forced to zero in OLS init.
-        If None and use_lag_zero=True, you should provide them externally.
-    """
-
-    def __init__(self,
-                 n_targets: int,
-                 n_features_eff: int,
-                 use_lag_zero: bool = False,
-                 lag0_indices=None):
-        self.n_targets = n_targets
-        self.n_features_eff = n_features_eff
-        self.use_lag_zero = use_lag_zero
-        if lag0_indices is None:
-            self.lag0_indices = None
-        else:
-            self.lag0_indices = np.asarray(lag0_indices, dtype=int)
-
-    def __call__(self, *args, **kwargs) -> Tuple[np.ndarray, np.ndarray]:
-        pass
 # ------------------------------------------------------------------
 # ZEROS INITIALIZER
 # ------------------------------------------------------------------
-class ZerosInitializer(LinearARXInitializer):
-    def __call__(self, *args, **kwargs) -> Tuple[np.ndarray, np.ndarray]:
-        """
-        Initialize A and B with zeros.
+@register_initializer(
+    "zeros",
+    "zero",
+    "zerosinitializer",
+)
+class ZerosInitializer():
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
 
-        Returns
-        -------
-        A : ndarray of shape (n_targets, n_features_eff)
-        B : ndarray of shape (n_targets,)
+    def __call__(self, context):
         """
-        A = np.zeros((self.n_targets, self.n_features_eff), dtype=float)
-        B = np.zeros(self.n_targets, dtype=float)
-        return A, B
+        Initialize weigh matices with zeros.
+        """
+        return [
+            np.zeros_like(weight)
+            for weight in context.weights
+        ]
 
 # ------------------------------------------------------------------
 # RANDOM NORMAL INITIALIZER (KERAS-STYLE)
 # ------------------------------------------------------------------
-class RandomNormalInitializer(LinearARXInitializer):
-    def __init__(self,*args, mean: float = 0.0, **kwargs):
-        super().__init__(**kwargs)
-        self.mean = mean
+@register_initializer(
+    "random_normal",
+    "randomnormal",
+    "random",
+    "randomnormalinitializer",
+)
+class RandomNormalInitializer:
+    def __init__(
+        self,
+        *,
+        mean: float = 0.0,
+        std: float = 0.05,
+        seed: int | None = None,
+    ) -> None:
+        self.mean = float(mean)
+        self.std = float(std)
 
-    def __call__(self,
-                 mask: np.ndarray | None = None,
-                 *args, **kwargs) -> Tuple[np.ndarray, np.ndarray]:
-        """
-        Initialize A with random normal weights, Keras-style:
+        if not np.isfinite(self.mean):
+            raise ValueError("mean must be finite.")
 
-            std = sqrt(1 / fan_in)
+        if not np.isfinite(self.std) or self.std < 0:
+            raise ValueError("std must be finite and non-negative.")
 
-        where fan_in = n_features_eff. B is initialized to zeros.
+        self._rng = np.random.default_rng(seed)
 
-        Parameters
-        ----------
-        mean : float, default 0.0
-            Mean of the normal distribution.
+    def __call__(
+        self,
+        context: InitializationContext,
+    ) -> list[WeightArray]:
+        weights = []
 
-        Returns
-        -------
-        A : ndarray of shape (n_targets, n_features_eff)
-        B : ndarray of shape (n_targets,)
-        """
-        fan_in = self.n_features_eff
-        if fan_in <= 0:
-            std = 1.0
-        else:
-            std = np.sqrt(1.0 / fan_in)
+        for template in context.weights:
+            template = np.asarray(template)
 
-        A = np.random.normal(loc=self.mean, scale=std,
-                             size=(self.n_targets, self.n_features_eff))
-        if mask is not None:
-            A = A * mask  # Apply mask to zero out disallowed weights
-        B = np.zeros(self.n_targets, dtype=float)
-        return A, B
+            if not np.issubdtype(template.dtype, np.floating):
+                raise TypeError(
+                    "RandomNormalInitializer supports only "
+                    f"floating-point weights, got {template.dtype}."
+                )
+
+            weight = self._rng.normal(
+                loc=self.mean,
+                scale=self.std,
+                size=template.shape,
+            )
+
+            weights.append(
+                weight.astype(template.dtype, copy=False)
+            )
+
+        return weights
 
 # ------------------------------------------------------------------
 # OLS-BASED INITIALIZER
 # ------------------------------------------------------------------
-class OLSInitializer(LinearARXInitializer):
-    def __call__(self,
-                 Y: np.ndarray,
-                 X_lagged: np.ndarray,
-                 mask: np.ndarray | None = None,
-                 *args, **kwargs) -> Tuple[np.ndarray, np.ndarray]:
-        """
-        Initialize A and B using ordinary least squares (OLS) for each target
-        independently, optionally respecting a binary mask on weights, and
-        then force lag=0 weights to zero if requested.
+@register_initializer(
+    "ols",
+    "ols_initializer",
+    "olsinitializer",
+    "ordinary_least_squares",
+)
+class OLSInitializer:
+    def __init__(
+        self,
+        *,
+        rcond: float | None = None,
+    ) -> None:
+        self.rcond = rcond
 
-        The regression model per target i is:
-
-            y_i = X_lagged @ a_i + b_i + noise
-
-        with a_i being the i-th row of A and b_i the i-th element of B.
-
-        Parameters
-        ----------
-        Y : ndarray of shape (T_eff, n_targets)
-            Target matrix in time-major form (rows = time, columns = targets).
-        X_lagged : ndarray of shape (T_eff, n_features_eff)
-            Design matrix of lagged inputs (rows = time, columns = features).
-        mask : ndarray of shape (n_targets, n_features_eff), optional
-            Binary mask indicating which weights are allowed to be non-zero.
-            - mask[i, j] = 1 -> weight A[i, j] can be estimated.
-            - mask[i, j] = 0 -> weight A[i, j] is forced to zero.
-
-            If None, all weights are allowed.
-
-        Returns
-        -------
-        A : ndarray of shape (n_targets, n_features_eff)
-        B : ndarray of shape (n_targets,)
-        """
-        Y = np.asarray(Y, dtype=float)
-        X_lagged = np.asarray(X_lagged, dtype=float)
-        T_eff, n_features = X_lagged.shape
-        if n_features != self.n_features_eff:
-            raise DataShapeError(
-                f"X_lagged has {n_features} features, expected {self.n_features_eff}"
-            )
-        if Y.shape[0] != T_eff:
-            raise DataShapeError("Y and X_lagged must have the same number of rows (time).")
-        if Y.shape[1] != self.n_targets:
-            raise DataShapeError(
-                f"Y has {Y.shape[1]} targets, expected {self.n_targets}"
+    def __call__(
+        self,
+        context: InitializationContext,
+    ) -> list[WeightArray]:
+        if len(context.weights) > 2:
+            warnings.warn(
+                "OLSInitializer returns exactly two weight arrays "
+                "[W, b], but the model exposes "
+                f"{len(context.weights)} arrays. "
+                "The returned weights may be incompatible with "
+                "the model; validation is delegated to set_weights().",
+                UserWarning,
+                stacklevel=2,
             )
 
-        if mask is not None:
-            mask = np.asarray(mask, dtype=int)
-            if mask.shape != (self.n_targets, self.n_features_eff):
-                raise DataShapeError(
-                    f"mask shape {mask.shape} does not match "
-                    f"(n_targets, n_features_eff)=({self.n_targets}, {self.n_features_eff})"
+        X = np.asarray(context.X, dtype=float)
+        y = np.asarray(context.y, dtype=float)
+
+        if X.ndim != 2:
+            raise ValueError(
+                f"X must be two-dimensional, got shape {X.shape}."
+            )
+
+        # Accept a one-dimensional target as a single-output problem.
+        if y.ndim == 1:
+            y = y[:, None]
+        elif y.ndim != 2:
+            raise ValueError(
+                f"y must be one- or two-dimensional, got shape {y.shape}."
+            )
+
+        n_samples, n_features = X.shape
+        n_targets = y.shape[1]
+
+        if n_samples == 0:
+            raise ValueError("OLS initialization requires samples.")
+
+        if n_targets == 0:
+            raise ValueError(
+                "OLS initialization requires at least one target."
+            )
+
+        if y.shape[0] != n_samples:
+            raise ValueError(
+                "X and y must have the same number of samples."
+            )
+
+        if not np.all(np.isfinite(X)):
+            raise ValueError("X must contain only finite values.")
+
+        if not np.all(np.isfinite(y)):
+            raise ValueError("y must contain only finite values.")
+
+        mask = None
+
+        if context.mask is not None:
+            raw_mask = np.asarray(context.mask)
+            expected_mask_shape = (n_targets, n_features)
+
+            if raw_mask.shape != expected_mask_shape:
+                raise ValueError(
+                    f"mask has shape {raw_mask.shape}; "
+                    f"expected {expected_mask_shape}."
                 )
 
-        A = np.zeros((self.n_targets, self.n_features_eff), dtype=float)
-        B = np.zeros(self.n_targets, dtype=float)
+            if not np.all((raw_mask == 0) | (raw_mask == 1)):
+                raise ValueError(
+                    "mask must contain only boolean or binary values."
+                )
 
-        # Perform OLS independently for each target i
-        for i in range(self.n_targets):
-            y_i = Y[:, i]
+            mask = raw_mask.astype(bool, copy=False)
 
-            if mask is None:
-                # All features allowed
-                X_i = X_lagged
-                active_idx = None
-            else:
-                active = mask[i] == 1
-                if not np.any(active):
-                    # No active features: intercept-only model
-                    B[i] = float(y_i.mean())
-                    A[i, :] = 0.0
-                    continue
-                X_i = X_lagged[:, active]
-                active_idx = np.where(active)[0]
+        W = np.zeros((n_features, n_targets), dtype=float)
+        b = np.zeros(n_targets, dtype=float)
 
-            # Fit linear model with intercept: y_i = [1, X_i] @ beta
-            n = X_i.shape[0]
-            X_aug = np.column_stack([np.ones(n), X_i])
-            beta, _, _, _ = lstsq(X_aug, y_i, rcond=None)
+        for target_index in range(n_targets):
+            active = (
+                np.ones(n_features, dtype=bool)
+                if mask is None
+                else mask[target_index]
+            )
 
-            b_i = beta[0]
-            w_i = beta[1:]
+            if not np.any(active):
+                b[target_index] = y[:, target_index].mean()
+                continue
 
-            B[i] = float(b_i)
+            X_active = X[:, active]
 
-            if mask is None:
-                # All features correspond to w_i in order
-                A[i, :] = w_i
-            else:
-                # Only active features were fitted; map them back
-                A_i = np.zeros(self.n_features_eff, dtype=float)
-                A_i[active_idx] = w_i
-                A[i, :] = A_i
+            design = np.column_stack((
+                np.ones(n_samples, dtype=float),
+                X_active,
+            ))
 
-        # Enforce zero weights for lag=0 columns if requested
-        if self.use_lag_zero and self.lag0_indices is not None:
-            A[:, self.lag0_indices] = 0.0
+            coefficients, _, _, _ = np.linalg.lstsq(
+                design,
+                y[:, target_index],
+                rcond=self.rcond,
+            )
 
-        return A, B
+            b[target_index] = coefficients[0]
+            W[active, target_index] = coefficients[1:]
+
+        return [W, b]

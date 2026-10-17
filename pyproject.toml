@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "enhanced_granger_analysis"
-version = "2.4"
+version = "2.5"
 description = "Granger-causality workflows for multivariate time series"
 readme = "README.md"
 requires-python = ">=3.10"
@@ -28,6 +28,7 @@ torch = [
   "torchvision==0.24.1",
   "torch_tb_profiler==0.4.3",
   "triton==3.5.1",
+  "keras==3.13.0",
 ]
 tensorflow = [
   "tensorflow==2.20.0",

@@ -242,7 +242,7 @@ Calling `.stationarity()`, which is the default for the stage, will disable the 
 - Updating the base snapshot invalidates cached sign evaluations through
   the existing metric-cache invalidation mechanism.
 
-### 2.3.2
+### 2.3.1
 
 Old test files have been move to new directory, and new test naming startegy has been introduced were test have digist of version and 
 subversion of packege - to know for which verision they were made. 
@@ -269,3 +269,30 @@ Additonaly registry mechanizm have been generalized and slightly updated. New co
 - The change applies to the current Wald test implementation. Variants
   intended for regularized and multilayer models are outside the scope
   of this release and may be introduced as separate metrics in the future.
+
+## Version Changes 2.5
+### Added
+- Added an `Initializer` protocol and a class registry with decorator-based
+  registration and alias support.
+- Added YAML/JSON initializer configuration using `type` and `params`.
+- Added `InitializationContext` to provide data, the optional mask, and
+  current model weights to initializers.
+
+### Changed
+- Moved initializer resolution from the configuration loader to the builder.
+- Replaced the fixed `(A, B)` return contract with a list of weight arrays,
+  allowing custom initializers to support multilayer models.
+- Removed `LinearARXInitializer`; constructors now receive strategy parameters,
+  while execution context is passed to `__call__()`.
+- Delegated weight validation and assignment to models, removing
+  initializer-specific transposition and shape checks from the builder.
+- Updated zeros and random-normal initializers to use model weight templates.
+- Updated OLS to infer dimensions from data, fit only mask-enabled
+  coefficients, and return `[kernel, bias]`. Added a warning when the model
+  exposes more than two weight arrays.
+- Restricted initializer specifications to names, configuration mappings,
+  classes, or `None`; instances and factory functions are not supported.
+
+### Fixed
+- Unified initializer name handling across file-based and programmatic configuration.
+- Removed the `TypeError` fallback that could mask initializer execution errors.
