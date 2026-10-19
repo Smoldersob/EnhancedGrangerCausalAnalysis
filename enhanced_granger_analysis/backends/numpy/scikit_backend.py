@@ -1,12 +1,12 @@
 from __future__ import annotations
 
-from typing import Any, Dict, List, Optional
+from typing import Any, Optional
 
-from numpy.typing import NDArray
-
-from .base_backend import BackendStrategy
-from .object_loaders.np_object_loader import NumpyObjectLoader
-
+from ..base_backend import BackendStrategy
+from ..object_loaders.np_object_loader import NumpyObjectLoader
+from ...core.components.constraint_spec import PreparedConstraintData
+from ...core.exceptions import ConstraintConfigurationError
+from ...core.components.regularizer_spec import PreparedRegularizerData
 
 class ScikitBackendStrategy(BackendStrategy):
 	"""Strategy for scikit-learn backend."""
@@ -41,7 +41,7 @@ class ScikitBackendStrategy(BackendStrategy):
 			np.random.seed(seed)
 			random.seed(seed)
 
-		from .models.scikit_model import ScikitConstrainedGrangerModel
+		from ..models.scikit_model import ScikitConstrainedGrangerModel
 		config = self._consume_loading_verbose(config)
 		self._object_loader.set_loading_verbose(self._loading_verbose)
 
@@ -51,15 +51,20 @@ class ScikitBackendStrategy(BackendStrategy):
 		model_name = config.get("model_name") or config.get("model") or config.get("model_type")
 		model_cls = self._object_loader.resolve_model(model_name, ScikitConstrainedGrangerModel)
 
-		regularizer_resolved = self.build_regularizer(regularizer)
-		constraint_resolved = self.build_constraint(constraint)
 		callbacks_resolved = self.resolve_callbacks(config.get("callbacks", None))
-		optimizer_resolved = self.resolve_optimizer(config.get("optimizer", None))
 
 		kwargs = dict(model_cfg)
+		if "constraint" in kwargs or "constraint_spec" in kwargs:
+			raise ConstraintConfigurationError(
+				"Do not configure constraints inside model_config. "
+				"Use the builder's constraint_spec setting."
+			)
+
+		kwargs["constraint"] = constraint
+		kwargs["regularizer"] = regularizer
+				
 		kwargs.setdefault("backend", "sklearn")
 		kwargs.setdefault("regularizer", regularizer_resolved)
-		kwargs.setdefault("constraint", constraint_resolved)
 		kwargs.setdefault("callbacks", callbacks_resolved)
 		kwargs.setdefault("fit_intercept", config.get("fit_intercept", True))
 		kwargs.setdefault("learning_rate", config.get("learning_rate", 1.0))
@@ -78,53 +83,39 @@ class ScikitBackendStrategy(BackendStrategy):
 		self._object_loader.set_loading_verbose(self._loading_verbose)
 		return self._object_loader.resolve_optimizer(optimizer)
 
-	def build_constraint_from_relations(
+	def build_regularizer(
 		self,
-		relations: Dict[tuple, Any],
-		predictor_names: List[str],
-		output_names: List[str],
-		col_offsets: NDArray,
-		n_features: int,
-		base_mask=None,
-	):
-		if not relations:
+		regularizer_type: str | type | None,
+		*,
+		data: Optional[PreparedRegularizerData] = None,
+	) -> Any:
+		if regularizer_type is None:
 			return None
 
-		from .constraints import build_numpy_constraint_from_relations
+		from .regularizers import resolve_regularizer_spec
 
-		return build_numpy_constraint_from_relations(
-			relations=relations,
-			predictor_names=predictor_names,
-			output_names=output_names,
-			col_offsets=col_offsets,
-			n_features=n_features,
-			base_mask=base_mask,
+		regularizer_class, _ = resolve_regularizer_spec(
+			regularizer_type
 		)
 
-	def build_regularizer(self, regularizer_spec: Any):
-		self._object_loader.set_loading_verbose(self._loading_verbose)
-		return self._object_loader.resolve_regularizer(regularizer_spec)
+		return regularizer_class(data=data)
 
-	def build_constraint(self, constraint_spec: Any) -> Any:
-		self._object_loader.set_loading_verbose(self._loading_verbose)
-		return self._object_loader.resolve_constraint(constraint_spec)
-
-	def validate_components(
+	def build_constraint(
 		self,
-		regularizer: Optional[Any],
-		constraint: Optional[Any],
-		callbacks: Optional[list] = None,
-		optimizer: Any = None,
-	) -> None:
-		self._object_loader.set_loading_verbose(True)
-		if callbacks is not None:
-			self._object_loader.resolve_callbacks(callbacks)
-		if optimizer is not None:
-			_ = self._object_loader.resolve_optimizer(optimizer)
-		if regularizer is not None:
-			_ = self._object_loader.resolve_regularizer(regularizer)
-		if constraint is not None:
-			_ = self._object_loader.resolve_constraint(constraint)
-		self._object_loader.set_loading_verbose(self._loading_verbose)
+		constraint_spec: Any,
+		*,
+		data: PreparedConstraintData,
+	) -> Any:
+		from .constraints import resolve_constraint_spec
 
+		constraint_class, params = resolve_constraint_spec(
+			constraint_spec
+		)
 
+		constraint = constraint_class(
+			data=data,
+			**params,
+		)
+
+		self._log_loaded_component("constraint", constraint)
+		return constraint

@@ -2,14 +2,19 @@ import importlib.util
 
 __all__ = []
 
-from .config_loader import BuilderConfigLoader, TestGroupConfigIterator
 
-__all__.extend([
-	"BuilderConfigLoader",
-	"TestGroupConfigIterator",
-])
 
 if importlib.util.find_spec("pandas") is not None:
+	try:
+		from .config_loader import BuilderConfigLoader, TestGroupConfigIterator
+		__all__.extend([
+			"BuilderConfigLoader",
+			"TestGroupConfigIterator",
+		])
+	except ImportError as e:
+		print(f"Warning: Config loader dependencies could not be imported. "
+			  f"Error details: {e}")
+		
 	try:
 		from .builder import MultiTaskGrangerBuilder, MultitaskGrangerBuilder
 		from .orchestrator import MultiTaskGrangerAPI

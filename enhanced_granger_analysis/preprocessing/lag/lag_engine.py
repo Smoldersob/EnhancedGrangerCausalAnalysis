@@ -233,7 +233,7 @@ class LagEngine:
         data_list: List[pd.DataFrame],
         effects: List[str],
         causes: Optional[List[str]] = None,
-    ) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
+    ) -> Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
         """
         Determine lags, build lagged features, and align targets.
 
@@ -257,7 +257,10 @@ class LagEngine:
             Predictor k occupies columns
             X[:, block_boundaries[k]:block_boundaries[k + 1]].
             The final boundary equals X.shape[1].
-
+        feature_lags : ndarray of shape (n_lagged_features,)
+            Actual lag of each feature column, in the same order as X.
+            Predictor blocks contain consecutive lags from their
+            minimum to maximum lag, inclusive.
         Raises
         ------
         ValueError
@@ -392,12 +395,43 @@ class LagEngine:
             X = np.empty((0, int((predictor_max_lags - predictor_min_lags + 1).sum())))
             y = np.empty((0, len(targets)))
 
-        # Predictor block boundaries for downstream usage.
+        
+        # Metadata follows the exact predictor and lag order used
+        # by _create_lagged_data().
+        block_widths = (
+            predictor_max_lags - predictor_min_lags + 1
+        ).astype(np.int64)
+
         block_boundaries = np.concatenate(
-            [[0], (predictor_max_lags - predictor_min_lags + 1).cumsum(dtype=int)]
+            [
+                np.zeros(1, dtype=np.int64),
+                np.cumsum(block_widths, dtype=np.int64),
+            ]
         )
 
-        return X, y, block_boundaries
+        feature_lags = np.concatenate(
+            [
+                np.arange(
+                    int(min_lag),
+                    int(max_lag) + 1,
+                    dtype=np.int64,
+                )
+                for min_lag, max_lag in zip(
+                    predictor_min_lags,
+                    predictor_max_lags,
+                )
+            ]
+        )
+
+        if (
+            int(block_boundaries[-1]) != X.shape[1]
+            or feature_lags.shape != (X.shape[1],)
+        ):
+            raise LagPreparationError(
+                "Lag metadata does not match the prepared feature matrix."
+            )
+
+        return X, y, block_boundaries, feature_lags
 
     def _determine_lags(
         self,

@@ -8,14 +8,35 @@ from pathlib import Path
 from typing import Any, Dict, List, Mapping, Optional, Sequence
 from time import perf_counter
 
-from ..backends import BackendFactory
-from ..core.exceptions import DataValidationError, RegistryError
+from ..core.exceptions import DataValidationError, RegistryError, ConstraintConfigurationError
 from ..core.initialization import InitializationContext
+from ..core.components.constraint_parsing import (
+    RelationsInput,
+    parse_relations_spec,
+)
+from ..core.components.constraint_preparation import (
+    prepare_constraint_data as compile_constraint_data,
+)
+from ..core.components.constraint_spec import (
+    PreparedConstraintData,
+    RelationConstraintsSpec,
+)
+from ..core.components.regularizer_parsing import (
+    parse_regularizer_spec,
+)
+from ..core.components.regularizer_preparation import (
+    prepare_regularization_layout,
+)
+from ..core.components.regularizer_spec import (
+    PreparedRegularizerData,
+)
+
+from ..backends import BackendFactory
+from ..backends.base_backend import BackendStrategy
 from ..initializers.registry import resolve_initializer_spec
 from ..preprocessing.prepare_data import PreparedData, prepare_data as run_prepare_data
 from ..preprocessing.stationarity import StationarityTransformer
 from ..results.granger_results import GrangerAnalysisResults, PreparationContext
-from .config_loader import BuilderConfigLoader
 
 
 def _normalize_optional_name_list(
@@ -66,20 +87,31 @@ class MultiTaskGrangerBuilder:
         self._reuse_data = bool(reuse_data)
         self._fit_kwargs: Dict[str, Any] = {
             "causes": None, "effects": None, "tested_causes": None,
-            "relations": None, "lag_config": None, "lag_selector": None,
+            "schema_policy": "union",
+            "constraint_spec": {
+                            "type": "mask_and_min_abs_sum",
+                            "params": {},
+                        },
+            "relations": RelationConstraintsSpec(),
+            "lag_config": None, "lag_selector": None,
             "stationarity_transformer": StationarityTransformer(),
-            "missing_value_imputer": None, "schema_policy": "union",
-            "backend_sample_fraction": 1.0, "backend_max_samples": None,
-            "random_state": None, "sampling_strategy": None,
+            "missing_value_imputer": None, 
+            "sampling_strategy": None, "backend_sample_fraction": 1.0, "backend_max_samples": None,
+            "random_state": None, 
             "x_scaler": "standard", "y_scaler": "standard",
-            "regularizer": None, "regularizer_spec": None, "callbacks": None,
+            "regularizer_spec": None,
+            "callbacks": None,
             "hiperoptimalization_state": None, "hiperoptimalization_conf": None,
-            "initializer": None, "model_config": None,
+            "initializer": None, 
+            "model_config": None,
+            "prepared_data": None,
         }
         self._prepared_data: Optional[PreparedData] = None
-        self._strategy: Any = None
+        self._strategy: BackendStrategy | None = None
         self._constraint: Any = None
+        self._constraint_data: Optional[PreparedConstraintData] = None
         self._regularizer: Any = None
+        self._regularizer_data: Optional[PreparedRegularizerData] = None
         self._callbacks: Optional[List[Any]] = None
         self._model_config: Dict[str, Any] = {}
         self._model: Any = None
@@ -100,6 +132,12 @@ class MultiTaskGrangerBuilder:
             Self for method chaining
         """
         self._backend = backend_name
+        self._strategy = None
+
+        self._invalidate_from(
+            "components",
+            preserve_results=True,
+        )
         return self
 
     def data(self, data: pd.DataFrame | Sequence[pd.DataFrame]) -> "MultiTaskGrangerBuilder":
@@ -135,18 +173,50 @@ class MultiTaskGrangerBuilder:
         })
         self._invalidate_from("data")
         return self
+    
+    def relations(
+        self,
+        relations: RelationsInput,
+    ) -> "MultiTaskGrangerBuilder":
+        """Store a RelationConstraintsSpec or a list of canonical declarations.
 
-    def relations(self, relations):
+        Accepts only:
+            - RelationConstraintsSpec instance;
+            - list of relation rules [...].
+
+        File references are resolved only by the configuration loader.
         """
-        Configure explicit causal relations for the analysis.
+        spec = parse_relations_spec(relations)
 
-        Args:
-            relations: A dictionary mapping cause variables to lists of effect variables
+        self._fit_kwargs["relations"] = spec
+        self._invalidate_from("components")
+        return self
 
-        Returns:
-            Self for method chaining
+    def constraint(
+        self,
+        constraint_spec: Any,
+    ) -> "MultiTaskGrangerBuilder":
+        """Configure constraint selection.
+
+        Accepted by the backend resolver:
+            - registered name;
+            - {"type": name, "params": {...}};
+            - concrete backend constraint class.
+
+        Instances and None are not supported.
         """
-        self._fit_kwargs["relations"] = dict(relations) if relations is not None else None
+        if constraint_spec is None:
+            raise ConstraintConfigurationError(
+                "constraint_spec cannot be None. "
+                "Use the default constraint to preserve the base mask."
+            )
+
+        self._fit_kwargs["constraint_spec"] = (
+            copy.deepcopy(dict(constraint_spec))
+            if isinstance(constraint_spec, Mapping)
+            else constraint_spec
+        )
+
         self._invalidate_from("components")
         return self
 
@@ -223,22 +293,28 @@ class MultiTaskGrangerBuilder:
         self._invalidate_from("data")
         return self
         
-    def regularization(self, regularizer=None, regularizer_spec=None):
+    def regularization(
+            self,
+            regularizer_spec: Any = None,
+    ) -> "MultiTaskGrangerBuilder":
         """
-        Configure the regularization for the analysis.
-
+        Store a parsed specification; None disables regularization.
         Args:
-            regularizer: The regularizer to use
-            regularizer_spec: The specification for the regularizer
+            regularizer_spec: Specification for the regularizer, which can be a registered name, a dictionary with type and parameters, or a concrete backend regularizer class.
 
         Returns:
             Self for method chaining
         """
-        self._fit_kwargs["regularizer"] = regularizer
-        self._fit_kwargs["regularizer_spec"] = copy.deepcopy(regularizer_spec)
-        self._invalidate_from("components")
-        return self
+        spec = parse_regularizer_spec(regularizer_spec)
 
+        self._fit_kwargs["regularizer_spec"] = spec
+
+        self._invalidate_from(
+            "components",
+            preserve_results=True,
+        )
+
+        return self
     def callbacks(self, callbacks=None):
         """
         Configure the callbacks for the analysis.
@@ -326,38 +402,117 @@ class MultiTaskGrangerBuilder:
             self._reuse_data = bool(config["reuse_data"])
         if "data" in config:
             self._data = config["data"]
+        if "regularizer" in config:
+            raise DataValidationError(
+                "The 'regularizer' configuration field is not supported. "
+                "Use 'regularizer_spec'."
+            )
         for key in self._fit_kwargs:
             if key not in config:
                 continue
             value = config[key]
             if key == "initializer" and isinstance(value, Mapping):
                 value = copy.deepcopy(dict(value))
+            elif key == "regularizer_spec":
+                value = parse_regularizer_spec(value)
             elif key in {
-                "regularizer_spec",
                 "hiperoptimalization_conf",
                 "model_config",
             } and value is not None:
                 value = dict(value)
             elif key in {"causes", "effects", "tested_causes"}:
                 value = _normalize_optional_name_list(value)
-            elif key == "relations" and value is not None:
-                value = dict(value)
+            elif key == "relations":
+                value = parse_relations_spec(value)
+            elif key == "constraint_spec":
+                if value is None:
+                    raise ConstraintConfigurationError(
+                        "constraint_spec cannot be None."
+                    )
+
+                if isinstance(value, Mapping):
+                    value = copy.deepcopy(dict(value))
 
             self._fit_kwargs[key] = value
         self._invalidate_from("data")
         return self
 
-    def from_file(self, path: str | Path) -> "MultiTaskGrangerBuilder":
-        """
-        Configure the builder from a configuration file.
-        Args:
-           path (str | Path): Path to the configuration file (JSON, YAML, etc.)
-        Returns:
-            Self for method chaining
-        """
-        return self.from_config(BuilderConfigLoader.load_file(path))
+    def from_file(
+        self,
+        path: str | Path,
+    ) -> "MultiTaskGrangerBuilder":
+        from .config_loader import BuilderConfigLoader
+
+        config = BuilderConfigLoader.load_file(path)
+        return self.from_config(config)
 
     # Executable stages.
+    def prepare_constraint_data(self) -> PreparedConstraintData:
+        """Compile named rules against the final prepared feature layout."""
+        self._require_prepared()
+
+        prepared = self._prepared_data
+
+        compiled = compile_constraint_data(
+            self._fit_kwargs["relations"],
+            cause_slices=prepared.cause_slices,
+            output_names=prepared.effects,
+            n_features=prepared.X_scaled.shape[1],
+            base_mask=prepared.base_mask,
+        )
+
+        self._constraint_data = compiled
+        return compiled
+
+    def prepare_regularizer_data(
+        self,
+    ) -> Optional[PreparedRegularizerData]:
+        """Prepare backend-independent input for optional regularization."""
+        self._require_prepared()
+
+        spec = parse_regularizer_spec(
+            self._fit_kwargs.get("regularizer_spec")
+        )
+
+        # Refreshing component input invalidates the existing model.
+        self._invalidate_from(
+            "model",
+            preserve_results=True,
+        )
+        self._regularizer = None
+        self._regularizer_data = None
+
+        if spec is None:
+            return None
+
+        prepared = self._prepared_data
+
+        layout = prepare_regularization_layout(
+            cause_slices=prepared.cause_slices,
+            output_names=prepared.effects,
+            feature_lags=prepared.feature_lags,
+            base_mask=prepared.base_mask,
+        )
+
+        if layout.n_features != prepared.X_scaled.shape[1]:
+            raise DataValidationError(
+                "Regularizer layout does not match "
+                "the number of columns in X_scaled."
+            )
+
+        if layout.n_outputs != prepared.y_scaled.shape[1]:
+            raise DataValidationError(
+                "Regularizer layout does not match "
+                "the number of columns in y_scaled."
+            )
+
+        self._regularizer_data = PreparedRegularizerData(
+            layout=layout,
+            params=spec.params,
+        )
+
+        return self._regularizer_data
+    
     def prepare_data(self, prepared_data: Optional[PreparedData] = None) -> PreparedData:
         """
         Prepare the data for the analysis.
@@ -367,11 +522,13 @@ class MultiTaskGrangerBuilder:
         Returns:
             The prepared data.
         """
+        
         if prepared_data is None:
             prepared_data = self._fit_kwargs.get("prepared_data")
         if prepared_data is None:
             if self._data is None:
                 raise DataValidationError("Builder requires data(...) before prepare_data()")
+            
             prepared_data = run_prepare_data(data=self._data, **{
                 k: v for k, v in self._fit_kwargs.items()
                 if k in {"causes", "effects", "tested_causes", "lag_config", "lag_selector",
@@ -379,6 +536,7 @@ class MultiTaskGrangerBuilder:
                          "backend_sample_fraction", "backend_max_samples", "random_state",
                          "sampling_strategy", "x_scaler", "y_scaler"}
             })
+        self._invalidate_from("components")
         self._prepared_data = prepared_data
         self._results = GrangerAnalysisResults(
             effects=prepared_data.effects,
@@ -407,27 +565,50 @@ class MultiTaskGrangerBuilder:
         return self._strategy
 
     def prepare_constraint(self):
-        """
-        Prepare the constraint for the analysis.
-        Returns:
-            The prepared constraint.
-        """
+        """Prepare constraint data and construct a backend implementation."""
         self._require_components_data()
-        prepared = self._prepared_data
-        self._constraint = self._strategy.build_constraint_from_relations(
-            relations=dict(self._fit_kwargs["relations"] or {}),
-            predictor_names=list(prepared.causes),
-            output_names=list(prepared.effects),
-            col_offsets=np.asarray(
-                [prepared.cause_slices[name].start for name in prepared.causes],
-                dtype=int,
-            ),
-            n_features=prepared.X_scaled.shape[1],
-            base_mask=prepared.base_mask,
+
+        data = self.prepare_constraint_data()
+
+        constraint = self._strategy.build_constraint(
+            self._fit_kwargs["constraint_spec"],
+            data=data,
         )
-        if self._results is not None and hasattr(self._constraint, "mask"):
-            self._results.mask = np.asarray(self._constraint.mask, dtype=bool).copy()
-        return self._constraint
+
+        self._constraint = constraint
+
+        if self._results is not None:
+            self._results.mask = data.mask.copy()
+
+        return constraint
+
+    def prepare_regularizer(self) -> Any:
+        """Construct an optional regularizer using the selected backend."""
+        self._require_components_data()
+
+        spec = parse_regularizer_spec(
+            self._fit_kwargs.get("regularizer_spec")
+        )
+
+        self._invalidate_from(
+            "model",
+            preserve_results=True,
+        )
+        self._regularizer = None
+
+        if spec is None:
+            self._regularizer_data = None
+            return None
+
+        if self._regularizer_data is None:
+            self.prepare_regularizer_data()
+
+        self._regularizer = self._strategy.build_regularizer(
+            spec.selector,
+            data=self._regularizer_data,
+        )
+
+        return self._regularizer
 
     def prepare_regularizer(self):
         """
@@ -461,9 +642,15 @@ class MultiTaskGrangerBuilder:
     def prepare_components(self):
         """Prepare all components for the analysis."""
         self.prepare_backend()
+
+        self.prepare_constraint_data()
         self.prepare_constraint()
+
+        self.prepare_regularizer_data()
         self.prepare_regularizer()
+
         self.prepare_callbacks()
+
         return self
 
     def build_model(self, model_config: Optional[Mapping[str, Any]] = None):
@@ -475,12 +662,36 @@ class MultiTaskGrangerBuilder:
             The built model.
         """
         self._require_components_data()
-        config = dict(self._fit_kwargs.get("model_config") or {})
+        if (
+            self._fit_kwargs.get("regularizer_spec") is not None
+            and self._regularizer is None
+        ):
+            self.prepare_regularizer()
+
+        config = dict(
+            self._fit_kwargs.get("model_config") or {}
+        )
         if model_config is not None:
             config.update(model_config)
+        
         if self._callbacks is not None:
             config["callbacks"] = list(self._callbacks)
+
+        # Validation of one configuration source for regularization and constraint.
+        if "regularizer" in config or "regularizer_spec" in config:
+            raise DataValidationError(
+                "Configure regularization through regularizer_spec "
+                "or regularization(), not model_config."
+            )
+        for reserved in ("constraint", "constraint_spec"):
+            if reserved in config:
+                raise ConstraintConfigurationError(
+                    f"{reserved!r} must not be placed in model_config. "
+                    "Use builder.constraint(...) or top-level constraint_spec."
+                )
+
         self._model_config = config
+                    
         self._model = self._strategy.build_model(
             n_features=self._prepared_data.X_scaled.shape[1],
             n_outputs=self._prepared_data.y_scaled.shape[1],
@@ -488,12 +699,18 @@ class MultiTaskGrangerBuilder:
             constraint=self._constraint,
             **config,
         )
-        self._model.initialize(self._prepared_data.X_scaled, targets=self._prepared_data.y_scaled)
+        self._model.initialize(
+            self._prepared_data.X_scaled, 
+            targets=self._prepared_data.y_scaled
+        )
+        
         self._initial_weights = None
         self._base_weights = None
+        
         if self._results is not None:
             self._results.base_snapshot = None
             self._results.reference_snapshots.clear()
+        
         return self._model
 
     def initialize_weights(self, initializer=None):
@@ -729,17 +946,33 @@ class MultiTaskGrangerBuilder:
             preserve_results: If True, preserve the results.
         """
         if stage == "data":
+            self._regularizer_data = None
             self._prepared_data = None
-            self._strategy = self._constraint = self._regularizer = None
+            self._constraint_data = None
+            self._strategy = None
+            self._constraint = None
+            self._regularizer = None
             self._model = None
+
         elif stage == "components":
-            self._constraint = self._regularizer = None
+            self._regularizer_data = None
+            self._constraint_data = None
+            self._constraint = None
+            self._regularizer = None
             self._model = None
+
         elif stage == "model":
             self._model = None
-        self._initial_weights = self._base_weights = None
+
+        self._initial_weights = None
+        self._base_weights = None
+
         if not preserve_results:
             self._results = None
+        elif self._results is not None:
+            # Keep preparation context, but discard results of the old model.
+            self._results.base_snapshot = None
+            self._results.reference_snapshots.clear()
 
 
 MultitaskGrangerBuilder = MultiTaskGrangerBuilder

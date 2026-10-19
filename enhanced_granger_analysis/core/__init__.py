@@ -5,8 +5,10 @@ from . import (
 	exceptions, 
 	lag_config, 
 	protocols,
-	training_config
+	training_config,
+	components,
 )
+
 
 __all__ = [
 	"constraints_config",
@@ -14,6 +16,7 @@ __all__ = [
     "lag_config",
     "protocols",
     "training_config",
+    "components",
 ]
 
 

@@ -1,30 +1,29 @@
 from __future__ import annotations
 
-from typing import Any, Dict, Optional, Sequence
-
 import numpy as np
 from numpy.typing import NDArray
 
-from .base_constaint import process_user_relations
-from ...core.constraints_config import ProcessedConstraintSpec, RelationMap
-from ...core.exceptions import ConstraintConfigurationError
+from .base import BaseNumpyConstraint
+from .registry import register_constraint 
+from ....core.components.constraint_spec import PreparedConstraintData
+from ....core.exceptions import ConstraintConfigurationError
 
 
-class NumpyMaskConstraint:
+@register_constraint("MaskConstraint", "mask_constraint", "mask")
+class MaskConstraint(BaseNumpyConstraint):
 	"""Hard mask constraint for numpy/scikit coefficient matrices.
 
 	Expected coefficient shape: (n_outputs, n_features).
 	Expected mask shape: (n_outputs, n_features).
 	"""
+	def __init__(self, data: PreparedConstraintData):
+		super().__init__(data)
 
-	def __init__(self, mask: NDArray[np.float64]):
-		arr = np.asarray(mask, dtype=np.float64)
-		if arr.ndim != 2:
-			raise ConstraintConfigurationError("mask must be 2D with shape (n_outputs, n_features)")
-		self.mask = arr
-
-	def __call__(self, params: NDArray[np.float64]) -> NDArray[np.float64]:
-		return self.enforce(params)
+		if self.rules:
+			raise ConstraintConfigurationError(
+				"MaskConstraint cannot enforce min_abs_sum rules. "
+				"Use mask_and_min_abs_sum."
+			)
 
 	def enforce(self, params: NDArray[np.float64]) -> NDArray[np.float64]:
 		w = np.asarray(params, dtype=np.float64)
@@ -40,26 +39,28 @@ class NumpyMaskConstraint:
 			return False
 		return bool(np.allclose(w * (1.0 - self.mask), 0.0))
 
-	def get_config(self) -> Dict[str, Any]:
-		return {"mask": self.mask.tolist()}
-
-
-class NumpyMaskAndMinAbsSumConstraint:
+@register_constraint("MaskAndMinAbsSumConstraint","mask_and_min_abs_sum_constraint","mask_and_min_abs_sum")
+class MaskAndMinAbsSumConstraint(BaseNumpyConstraint):
 	"""Mask + min abs-sum constraint for numpy/scikit coefficient matrices."""
+	def __init__(
+		self,
+		data: PreparedConstraintData,
+		eps: float = 1e-8,
+	):
+		super().__init__(data)
 
-	def __init__(self, spec: ProcessedConstraintSpec, eps: float = 1e-8):
-		mask = np.asarray(spec.mask, dtype=np.float64)
-		if mask.ndim != 2:
-			raise ConstraintConfigurationError("spec.mask must be 2D with shape (n_outputs, n_features)")
-		if eps <= 0:
-			raise ConstraintConfigurationError("eps must be > 0")
+		if not np.isfinite(eps) or eps <= 0:
+			raise ConstraintConfigurationError(
+				"eps must be finite and > 0"
+			)
 
-		self.mask = mask
-		self.rules = tuple(spec.rules)
 		self.eps = float(eps)
 
-	def __call__(self, params: NDArray[np.float64]) -> NDArray[np.float64]:
-		return self.enforce(params)
+	def get_config(self):
+			return {
+				**super().get_config(),
+				"eps": self.eps,
+			}
 
 	def enforce(self, params: NDArray[np.float64]) -> NDArray[np.float64]:
 		w = np.asarray(params, dtype=np.float64)
@@ -108,42 +109,3 @@ class NumpyMaskAndMinAbsSumConstraint:
 			if sum_abs + self.eps < float(rule.min_abs_sum):
 				return False
 		return True
-
-	def get_config(self) -> Dict[str, Any]:
-		return {
-			"mask": self.mask.tolist(),
-			"rules": [
-				{
-					"output_index": int(rule.output_index),
-					"feature_indices": list(rule.feature_indices),
-					"min_abs_sum": float(rule.min_abs_sum),
-				}
-				for rule in self.rules
-			],
-			"eps": self.eps,
-		}
-
-
-def build_numpy_constraint_from_relations(
-	relations: RelationMap,
-	predictor_names: Sequence[str],
-	output_names: Sequence[str],
-	col_offsets: Sequence[int],
-	n_features: int,
-	base_mask: Optional[NDArray[np.float64]] = None,
-	eps: float = 1e-8,
-) -> NumpyMaskAndMinAbsSumConstraint|NumpyMaskConstraint:
-	"""Build numpy/scikit combined constraint from user-friendly relation mapping."""
-	spec = process_user_relations(
-		relations=relations,
-		predictor_names=predictor_names,
-		output_names=output_names,
-		col_offsets=col_offsets,
-		n_features=n_features,
-		base_mask=base_mask,
-	)
-	if len(spec.rules) == 0:
-		return NumpyMaskConstraint(spec.mask)
-	else:
-		return NumpyMaskAndMinAbsSumConstraint(spec=spec, eps=eps)
-

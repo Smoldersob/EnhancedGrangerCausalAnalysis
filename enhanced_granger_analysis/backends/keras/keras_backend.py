@@ -6,11 +6,13 @@ if importlib.util.find_spec("keras"):
 	elif importlib.util.find_spec("torch"):
 		os.environ["KERAS_BACKEND"] = "torch"
 
-from typing import Any, Dict, List, Optional, Mapping
-from numpy.typing import NDArray
+from typing import Any, Dict, Optional, Mapping
 
-from .base_backend import BackendStrategy
-from .object_loaders.keras_object_loader import KerasObjectLoader
+from ..base_backend import BackendStrategy
+from ..object_loaders.keras_object_loader import KerasObjectLoader
+from ...core.components.constraint_spec import PreparedConstraintData
+from ...core.exceptions import ConstraintConfigurationError
+from ...core.components.regularizer_spec import PreparedRegularizerData
 
 
 class KerasBackendStrategy(BackendStrategy):
@@ -112,7 +114,7 @@ class KerasBackendStrategy(BackendStrategy):
 			except ImportError:
 				pass
 
-		from .models.keras_model import KerasGrangerModel
+		from ..models.keras_model import KerasGrangerModel
 		config = self._consume_loading_verbose(config)
 		if self._object_loader is not None:
 			self._object_loader.set_loading_verbose(self._loading_verbose)
@@ -123,17 +125,22 @@ class KerasBackendStrategy(BackendStrategy):
 		model_name = config.get("model_name") or config.get("model") or config.get("model_type")
 		model_cls = self._object_loader.resolve_model(model_name, KerasGrangerModel)
 
-		regularizer_resolved = self.build_regularizer(regularizer)
-		constraint_resolved = self.build_constraint(constraint)
 		callbacks_cfg = config.get("callbacks", None)
 		callbacks_resolved = self.resolve_callbacks(callbacks_cfg)
 		optimizer_spec = self._resolve_optimizer_spec(config)
 		optimizer_resolved = self.resolve_optimizer(optimizer_spec)
 
 		kwargs = dict(model_cfg)
+		if "constraint" in kwargs or "constraint_spec" in kwargs:
+			raise ConstraintConfigurationError(
+				"Do not configure constraints inside model_config. "
+				"Use the builder's constraint_spec setting."
+			)
+
+		kwargs["constraint"] = constraint
+		kwargs["regularizer"] = regularizer
+		
 		kwargs.setdefault("backend", "keras")
-		kwargs.setdefault("regularizer", regularizer_resolved)
-		kwargs.setdefault("constraint", constraint_resolved)
 		kwargs.setdefault("optimizer", optimizer_resolved)
 		kwargs.setdefault("loss", config.get("loss", "mse"))
 		kwargs.setdefault("callbacks", callbacks_resolved)
@@ -156,39 +163,41 @@ class KerasBackendStrategy(BackendStrategy):
 		self._object_loader.set_loading_verbose(self._loading_verbose)
 		return self._object_loader.resolve_optimizer(optimizer)
 
-	def build_constraint_from_relations(
+	def build_regularizer(
 		self,
-		relations: Dict[tuple, Any],
-		predictor_names: List[str],
-		output_names: List[str],
-		col_offsets: NDArray,
-		n_features: int,
-		base_mask=None,
-	):
-		if not relations:
+		regularizer_type: str | type | None,
+		*,
+		data: Optional[PreparedRegularizerData] = None,
+	) -> Any:
+		if regularizer_type is None:
 			return None
 
-		from .constraints import build_keras_constraint_from_relations
+		from .regularizers import resolve_regularizer_spec
 
-		return build_keras_constraint_from_relations(
-			relations=relations,
-			predictor_names=predictor_names,
-			output_names=output_names,
-			col_offsets=col_offsets,
-			n_features=n_features,
-			base_mask=base_mask,
+		regularizer_class, _ = resolve_regularizer_spec(
+			regularizer_type
 		)
 
-	def build_regularizer(self, regularizer_spec: Any):
-		if self._object_loader is None:
-			return regularizer_spec
-		self._object_loader.set_loading_verbose(self._loading_verbose)
-		return self._object_loader.resolve_regularizer(regularizer_spec)
+		return regularizer_class(data=data)
 
-	def build_constraint(self, constraint_spec: Any) -> Any:
-		if self._object_loader is None:
-			return constraint_spec
-		self._object_loader.set_loading_verbose(self._loading_verbose)
-		return self._object_loader.resolve_constraint(constraint_spec)
+	def build_constraint(
+		self,
+		constraint_spec: Any,
+		*,
+		data: PreparedConstraintData,
+	) -> Any:
+		from .constraints import resolve_constraint_spec
+
+		constraint_class, params = resolve_constraint_spec(
+			constraint_spec
+		)
+
+		constraint = constraint_class(
+			data=data,
+			**params,
+		)
+
+		self._log_loaded_component("constraint", constraint)
+		return constraint
 
 

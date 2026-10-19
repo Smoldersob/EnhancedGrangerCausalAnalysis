@@ -1,44 +1,29 @@
 from __future__ import annotations
-
-import importlib
-from importlib.util import find_spec
-from typing import Any, Dict, Optional, Sequence
+from typing import Any, Dict
 
 import numpy as np
-from numpy.typing import NDArray
+import torch
 
-from .base_constaint import process_user_relations
-from ...core.constraints_config import ProcessedConstraintSpec, RelationMap
-from ...core.exceptions import BackendNotAvailableError, ConstraintConfigurationError
+from .base import BasePyTorchConstraint
+from .registry import register_constraint
+from ....core.components.constraint_spec import PreparedConstraintData
+from ....core.exceptions import ConstraintConfigurationError
 
-
-if find_spec("torch") is not None:
-	torch = importlib.import_module("torch")
-else:  # pragma: no cover - runtime dependency check
-	torch = None
-
-
-def _ensure_torch() -> None:
-	if torch is None:
-		raise BackendNotAvailableError("PyTorch is required to use pytorch constraints.")
-
-
-class PyTorchMaskConstraint:
+@register_constraint("MaskConstraint", "mask_constraint", "mask")
+class MaskConstraint(BasePyTorchConstraint):
 	"""Hard mask constraint for PyTorch coefficient matrices.
 
 	Expected weight shape: (n_outputs, n_features) for nn.Linear(in, out).weight.
 	Expected mask shape: (n_outputs, n_features).
 	"""
+	def __init__(self, data: PreparedConstraintData):
+		super().__init__(data)
 
-	def __init__(self, mask: NDArray[np.float64]):
-		_ensure_torch()
-		arr = np.asarray(mask, dtype=np.float64)
-		if arr.ndim != 2:
-			raise ConstraintConfigurationError("mask must be 2D with shape (n_outputs, n_features)")
-		self.mask = arr
-
-	def __call__(self, params: Any) -> Any:
-		return self.enforce(params)
+		if self.rules:
+			raise ConstraintConfigurationError(
+				"MaskConstraint cannot enforce min_abs_sum rules. "
+				"Use mask_and_min_abs_sum."
+			)
 
 	def enforce(self, params: Any) -> Any:
 		if not torch.is_tensor(params):
@@ -57,27 +42,30 @@ class PyTorchMaskConstraint:
 		viol = torch.abs(params * (1.0 - mask_t))
 		return bool(torch.all(viol <= 1e-12).item())
 
-	def get_config(self) -> Dict[str, Any]:
-		return {"mask": self.mask.tolist()}
 
-
-class PyTorchMaskAndMinAbsSumConstraint:
+@register_constraint("MaskAndMinAbsSumConstraint", "mask_and_min_abs_sum_constraint", "mask_and_min_abs_sum")
+class MaskAndMinAbsSumConstraint(BasePyTorchConstraint):
 	"""Mask + min abs-sum constraint for PyTorch coefficient matrices."""
 
-	def __init__(self, spec: ProcessedConstraintSpec, eps: float = 1e-8):
-		_ensure_torch()
-		mask = np.asarray(spec.mask, dtype=np.float64)
-		if mask.ndim != 2:
-			raise ConstraintConfigurationError("spec.mask must be 2D with shape (n_outputs, n_features)")
-		if eps <= 0:
-			raise ConstraintConfigurationError("eps must be > 0")
+	def __init__(
+		self,
+		data: PreparedConstraintData,
+		eps: float = 1e-8,
+	):
+		super().__init__(data)
 
-		self.mask = mask
-		self.rules = tuple(spec.rules)
+		if not np.isfinite(eps) or eps <= 0:
+			raise ConstraintConfigurationError(
+				"eps must be finite and > 0"
+			)
+
 		self.eps = float(eps)
-
-	def __call__(self, params: Any) -> Any:
-		return self.enforce(params)
+		
+	def get_config(self):
+			return {
+				**super().get_config(),
+				"eps": self.eps,
+			}
 
 	def enforce(self, params: Any) -> Any:
 		if not torch.is_tensor(params):
@@ -148,29 +136,4 @@ class PyTorchMaskAndMinAbsSumConstraint:
 			],
 			"eps": self.eps,
 		}
-
-
-def build_pytorch_constraint_from_relations(
-	relations: RelationMap,
-	predictor_names: Sequence[str],
-	output_names: Sequence[str],
-	col_offsets: Sequence[int],
-	n_features: int,
-	base_mask: Optional[NDArray[np.float64]] = None,
-	eps: float = 1e-8,
-) -> PyTorchMaskAndMinAbsSumConstraint|PyTorchMaskConstraint:
-	"""Build PyTorch combined constraint from user-friendly relation mapping."""
-	spec = process_user_relations(
-		relations=relations,
-		predictor_names=predictor_names,
-		output_names=output_names,
-		col_offsets=col_offsets,
-		n_features=n_features,
-		base_mask=base_mask,
-	)
-
-	if len(spec.rules) == 0:
-		return PyTorchMaskConstraint(mask=spec.mask)
-	else:
-		return PyTorchMaskAndMinAbsSumConstraint(spec=spec, eps=eps)
 

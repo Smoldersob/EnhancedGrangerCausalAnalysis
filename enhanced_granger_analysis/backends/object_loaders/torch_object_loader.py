@@ -4,9 +4,6 @@ from typing import Any, Dict, List, Mapping, Optional, Sequence, Tuple
 
 from ..callbacks import ConvergenceCheck, EarlyStopping, ReduceLearningRate
 from ..callbacks.base_callback import Callback
-from ..constraints.pytorch_constraints import PyTorchMaskAndMinAbsSumConstraint, PyTorchMaskConstraint
-from ..regularizers.pytorch_regularizers import PyTorchL1Regularizer, PyTorchLagDependentL1Regularizer
-from ...core.constraints_config import MinAbsSumRule, ProcessedConstraintSpec
 from ...core.exceptions import ConstraintConfigurationError
 
 try:  # pragma: no cover - optional dependency
@@ -187,89 +184,4 @@ class TorchObjectLoader:
 
 		raise ConstraintConfigurationError(
 			"optimizer must be string, optimizer config object, optimizer class, or callable"
-		)
-
-	def resolve_regularizer(self, raw_regularizer: Any) -> Any:
-		if raw_regularizer is None:
-			return None
-
-		if isinstance(raw_regularizer, (PyTorchL1Regularizer, PyTorchLagDependentL1Regularizer)):
-			self._log("regularizer(instance)", raw_regularizer)
-			return raw_regularizer
-
-		if not isinstance(raw_regularizer, Mapping):
-			return raw_regularizer
-
-		type_name, params = self._extract_typed_spec(raw_regularizer, context="regularizer")
-		if type_name in {"l1", "torch_l1", "pytorch_l1"}:
-			resolved = PyTorchL1Regularizer(l1=float(params.get("l1", 0.01)))
-			self._log("regularizer", resolved)
-			return resolved
-		if type_name in {"lag_dependent_l1", "lagdependentl1", "torch_lag_dependent_l1", "pytorch_lag_dependent_l1"}:
-			resolved = PyTorchLagDependentL1Regularizer(
-				l1=float(params.get("l1", 0.01)),
-				lag_weights=params.get("lag_weights", None),
-				max_lags_per_pred=params.get("max_lags_per_pred", None),
-				col_offsets=params.get("col_offsets", None),
-			)
-			self._log("regularizer", resolved)
-			return resolved
-
-		raise ConstraintConfigurationError(
-			"Unsupported regularizer type for pytorch backend. Supported: l1, lag_dependent_l1"
-		)
-
-	@staticmethod
-	def _build_processed_constraint_spec(spec_map: Mapping[str, Any]) -> ProcessedConstraintSpec:
-		mask = spec_map.get("mask")
-		if mask is None:
-			raise ConstraintConfigurationError("constraint spec requires 'mask'")
-
-		raw_rules = spec_map.get("rules", [])
-		if raw_rules is None:
-			raw_rules = []
-		if not isinstance(raw_rules, Sequence) or isinstance(raw_rules, (str, bytes)):
-			raise ConstraintConfigurationError("constraint spec 'rules' must be an array")
-
-		rules: List[MinAbsSumRule] = []
-		for rule in raw_rules:
-			if not isinstance(rule, Mapping):
-				raise ConstraintConfigurationError("each constraint rule must be an object")
-			rules.append(
-				MinAbsSumRule(
-					output_index=int(rule.get("output_index")),
-					feature_indices=tuple(int(v) for v in rule.get("feature_indices", [])),
-					min_abs_sum=float(rule.get("min_abs_sum", 0.0)),
-				)
-			)
-
-		return ProcessedConstraintSpec(mask=mask, rules=tuple(rules))
-
-	def resolve_constraint(self, raw_constraint: Any) -> Any:
-		if raw_constraint is None:
-			return None
-
-		if isinstance(raw_constraint, (PyTorchMaskConstraint, PyTorchMaskAndMinAbsSumConstraint)):
-			self._log("constraint(instance)", raw_constraint)
-			return raw_constraint
-
-		if not isinstance(raw_constraint, Mapping):
-			return raw_constraint
-
-		type_name, params = self._extract_typed_spec(raw_constraint, context="constraint")
-		if type_name in {"mask", "mask_constraint", "torch_mask", "pytorch_mask"}:
-			if "mask" not in params:
-				raise ConstraintConfigurationError("mask constraint requires 'mask'")
-			resolved = PyTorchMaskConstraint(mask=params["mask"])
-			self._log("constraint", resolved)
-			return resolved
-
-		if type_name in {"mask_and_min_abs_sum", "mask_min_abs_sum", "torch_mask_and_min_abs_sum", "pytorch_mask_and_min_abs_sum"}:
-			spec = self._build_processed_constraint_spec(params)
-			resolved = PyTorchMaskAndMinAbsSumConstraint(spec=spec, eps=float(params.get("eps", 1e-8)))
-			self._log("constraint", resolved)
-			return resolved
-
-		raise ConstraintConfigurationError(
-			"Unsupported constraint type for pytorch backend. Supported: mask, mask_and_min_abs_sum"
 		)

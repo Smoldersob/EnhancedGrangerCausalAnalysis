@@ -1,11 +1,5 @@
 from typing import Any, Dict, List, Mapping, Optional, Sequence, Tuple
 
-from ..constraints.keras_constraints import (
-	KerasMaskAndMinAbsSumConstraint,
-	KerasMaskConstraint,
-)
-from ..regularizers.keras_regularizers import KerasL1Regularizer, KerasLagDependentL1Regularizer
-from ...core.constraints_config import MinAbsSumRule, ProcessedConstraintSpec
 from ...core.exceptions import ConstraintConfigurationError
 
 
@@ -189,91 +183,4 @@ class KerasObjectLoader:
 
 		raise ConstraintConfigurationError(
 			"Unsupported Keras optimizer spec. Use string/object spec, optimizer instance, class, or callable."
-		)
-
-	def resolve_regularizer(self, raw_regularizer: Any) -> Any:
-		if raw_regularizer is None:
-			return None
-
-		keras_regularizer = self._keras.regularizers.Regularizer
-		if isinstance(raw_regularizer, keras_regularizer):
-			self._log("regularizer(instance)", raw_regularizer)
-			return raw_regularizer
-
-		if not isinstance(raw_regularizer, Mapping):
-			return raw_regularizer
-
-		type_name, params = self._extract_typed_spec(raw_regularizer, context="regularizer")
-		if type_name in {"l1", "keras_l1", "tensorflow_l1"}:
-			resolved = KerasL1Regularizer(l1=float(params.get("l1", 0.01)))
-			self._log("regularizer", resolved)
-			return resolved
-		if type_name in {"lag_dependent_l1", "lagdependentl1", "keras_lag_dependent_l1", "tensorflow_lag_dependent_l1"}:
-			resolved = KerasLagDependentL1Regularizer(
-				l1=float(params.get("l1", 0.01)),
-				lag_weights=params.get("lag_weights", None),
-				max_lags_per_pred=params.get("max_lags_per_pred", None),
-				col_offsets=params.get("col_offsets", None),
-			)
-			self._log("regularizer", resolved)
-			return resolved
-
-		raise ConstraintConfigurationError(
-			"Unsupported Keras regularizer type. Supported: l1, lag_dependent_l1"
-		)
-
-	@staticmethod
-	def _build_processed_constraint_spec(spec_map: Mapping[str, Any]) -> ProcessedConstraintSpec:
-		mask = spec_map.get("mask")
-		if mask is None:
-			raise ConstraintConfigurationError("constraint spec requires 'mask'")
-
-		raw_rules = spec_map.get("rules", [])
-		if raw_rules is None:
-			raw_rules = []
-		if not isinstance(raw_rules, Sequence) or isinstance(raw_rules, (str, bytes)):
-			raise ConstraintConfigurationError("constraint spec 'rules' must be an array")
-
-		rules: List[MinAbsSumRule] = []
-		for rule in raw_rules:
-			if not isinstance(rule, Mapping):
-				raise ConstraintConfigurationError("each constraint rule must be an object")
-			rules.append(
-				MinAbsSumRule(
-					output_index=int(rule.get("output_index")),
-					feature_indices=tuple(int(v) for v in rule.get("feature_indices", [])),
-					min_abs_sum=float(rule.get("min_abs_sum", 0.0)),
-				)
-			)
-
-		return ProcessedConstraintSpec(mask=mask, rules=tuple(rules))
-
-	def resolve_constraint(self, raw_constraint: Any) -> Any:
-		if raw_constraint is None:
-			return None
-
-		keras_constraint = self._keras.constraints.Constraint
-		if isinstance(raw_constraint, keras_constraint):
-			self._log("constraint(instance)", raw_constraint)
-			return raw_constraint
-
-		if not isinstance(raw_constraint, Mapping):
-			return raw_constraint
-
-		type_name, params = self._extract_typed_spec(raw_constraint, context="constraint")
-		if type_name in {"mask", "mask_constraint", "keras_mask", "tensorflow_mask"}:
-			if "mask" not in params:
-				raise ConstraintConfigurationError("mask constraint requires 'mask'")
-			resolved = KerasMaskConstraint(mask=params["mask"])
-			self._log("constraint", resolved)
-			return resolved
-
-		if type_name in {"mask_and_min_abs_sum", "mask_min_abs_sum", "keras_mask_and_min_abs_sum", "tensorflow_mask_and_min_abs_sum"}:
-			spec = self._build_processed_constraint_spec(params)
-			resolved = KerasMaskAndMinAbsSumConstraint(spec=spec, eps=float(params.get("eps", 1e-8)))
-			self._log("constraint", resolved)
-			return resolved
-
-		raise ConstraintConfigurationError(
-			"Unsupported Keras constraint type. Supported: mask, mask_and_min_abs_sum"
 		)

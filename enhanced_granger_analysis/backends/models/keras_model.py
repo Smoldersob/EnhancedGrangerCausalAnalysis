@@ -255,20 +255,22 @@ class KerasGrangerModel(BaseGrangerModel):
 
     def _validate_keras_components(self) -> None:
         """Validate optional regularizer/constraint against Keras base classes."""
-        keras_regularizer = keras.regularizers.Regularizer
-        keras_constraint = keras.constraints.Constraint
+        if self.regularizer is not None:
+            from ..keras.regularizers.base import BaseKerasRegularizer
 
-        if self.regularizer is not None and not isinstance(self.regularizer, keras_regularizer):
-            raise RegularizerConfigurationError(
-                "Regularizer must inherit from keras.regularizers.Regularizer "
-                "for KerasGrangerModel"
-            )
+            if not isinstance(self.regularizer, BaseKerasRegularizer):
+                raise RegularizerConfigurationError(
+                    "regularizer must be None or an instance of "
+                    "BaseKerasRegularizer."
+                )
 
-        if self.constraint is not None and not isinstance(self.constraint, keras_constraint):
-            raise ConstraintConfigurationError(
-                "Constraint must inherit from keras.constraints.Constraint "
-                "for KerasGrangerModel"
-            )
+        if self.constraint is not None:
+            from ..keras.constraints import BaseKerasConstraint
+            if not isinstance(self.constraint, BaseKerasConstraint):
+                raise ConstraintConfigurationError(
+                    "Constraint must inherit from keras.constraints.Constraint "
+                    "for BaseKerasConstraint."
+                )
 
         keras_callback = keras.callbacks.Callback
         if not isinstance(self.callbacks, list):

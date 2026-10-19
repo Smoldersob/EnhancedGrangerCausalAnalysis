@@ -3,9 +3,6 @@ from abc import ABC, abstractmethod
 from numpy.typing import NDArray
 from typing import Any, Dict, List, Mapping, Optional, Union
 
-from ...core.protocols import Regularizer, Constraint
-
-
 class BaseGrangerModel(ABC):
     """
     Abstract base class for Granger causality models with pluggable components.
@@ -20,8 +17,8 @@ class BaseGrangerModel(ABC):
     def __init__(
         self,
         backend: str = 'default',
-        regularizer: Optional[Regularizer] = None,
-        constraint: Optional[Constraint] = None,
+        regularizer: Any = None,
+        constraint: Any = None,
         callbacks: Optional[List[Any]] = None,
         needs_reinit: bool = True,
     ):
@@ -30,13 +27,13 @@ class BaseGrangerModel(ABC):
         
         Args:
             backend: Backend identifier ('sklearn', 'keras', 'custom', etc.)
-            regularizer: Regularizer instance implementing Regularizer protocol  
+            regularizer: A ready backend regularizer instance or None. 
             constraint: Constraint instance implementing Constraint protocol
             callbacks: List of callbacks implementing callback protocol
         """
         self.backend: str = backend
-        self.regularizer: Optional[Regularizer] = regularizer
-        self.constraint: Optional[Constraint] = constraint
+        self.regularizer: Any = regularizer
+        self.constraint: Any = constraint
         self.callbacks = list(callbacks) if callbacks is not None else []
         # If True, caller should run initialize(...) before each training cycle.
         self.needs_reinit: bool = bool(needs_reinit)
@@ -164,18 +161,6 @@ class BaseGrangerModel(ABC):
             Backend name string
         """
         return self.backend
-
-    def _set_regularizer(self, regularizer: Regularizer) -> None:
-        """Dynamically set regularizer component."""
-        self.regularizer = regularizer
-
-    def _set_constraint(self, constraint: Constraint) -> None:
-        """Dynamically set constraint component."""
-        self.constraint = constraint
-
-    def _add_callback(self, callback: Any) -> None:
-        """Add a callback to the model's training process."""
-        self.callbacks.append(callback)
 
     @abstractmethod
     def reset_callbacks(

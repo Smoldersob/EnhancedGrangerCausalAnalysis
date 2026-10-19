@@ -7,10 +7,14 @@ from typing import Any, Dict, List, Mapping, Optional, Sequence, Tuple
 
 from ..core.exceptions import DataValidationError
 from ..core.lag_config import LagConfiguration
+from ..core.components.constraint_parsing import (
+    RelationsInput,
+    parse_relations_spec,
+)
+from ..core.components.constraint_spec import RelationConstraintsSpec
 from ..preprocessing.lag.lag_selectors import CVLagSelector, ICLagSelector, VARLagSelector
 
 
-_RELATION_KEY_SEPARATORS = ("->", "|", ",", ":")
 _BACKEND_ALIASES = {
 	"tensorflow": "tensorflow",
 	"tf": "tensorflow",
@@ -22,73 +26,6 @@ _BACKEND_ALIASES = {
 	"scikit-learn": "sklearn",
 }
 
-
-def _parse_relation_key(key: Any) -> Tuple[str, str]:
-	"""Parse relation key into (output_name, predictor_name)."""
-	if isinstance(key, (list, tuple)) and len(key) == 2:
-		out_name, in_name = key
-		if not isinstance(out_name, str) or not isinstance(in_name, str):
-			raise DataValidationError("Relation tuple/list key must contain strings")
-		return out_name, in_name
-
-	if isinstance(key, str):
-		for sep in _RELATION_KEY_SEPARATORS:
-			if sep in key:
-				parts = [p.strip() for p in key.split(sep)]
-				if len(parts) == 2 and all(parts):
-					return parts[0], parts[1]
-		raise DataValidationError(
-			"String relation key must be in format 'effect->cause', 'effect|cause', 'effect,cause', or 'effect:cause'"
-		)
-
-	raise DataValidationError(
-		"Relation key must be a 2-item list/tuple or a string key with a supported separator"
-	)
-
-
-def _normalize_relations_config(raw_relations: Any) -> Dict[Tuple[str, str], Any]:
-	"""Normalize JSON-friendly relation constraints into tuple-key mapping."""
-	if raw_relations is None:
-		return {}
-
-	if isinstance(raw_relations, Mapping):
-		out: Dict[Tuple[str, str], Any] = {}
-		for key, value in raw_relations.items():
-			out[_parse_relation_key(key)] = value
-		return out
-
-	if isinstance(raw_relations, Sequence) and not isinstance(raw_relations, (str, bytes)):
-		out: Dict[Tuple[str, str], Any] = {}
-		for idx, item in enumerate(raw_relations):
-			if not isinstance(item, Mapping):
-				raise DataValidationError(f"relations[{idx}] must be an object")
-
-			out_name = item.get("effect", item.get("output", item.get("target")))
-			in_name = item.get("cause", item.get("predictor", item.get("input")))
-			if not isinstance(out_name, str) or not isinstance(in_name, str):
-				raise DataValidationError(
-					f"relations[{idx}] must define string effect/output/target and cause/predictor/input"
-				)
-
-			if "rule" in item:
-				raw_value = item["rule"]
-			elif "value" in item:
-				raw_value = item["value"]
-			elif any(k in item for k in ("zero", "min_abs_sum", "force_abs_sum")):
-				raw_value = {
-					k: item[k]
-					for k in ("zero", "min_abs_sum", "force_abs_sum")
-					if k in item
-				}
-			else:
-				raise DataValidationError(
-					f"relations[{idx}] must contain one of: rule, value, zero, min_abs_sum, force_abs_sum"
-				)
-
-			out[(out_name, in_name)] = raw_value
-		return out
-
-	raise DataValidationError("relations must be a mapping or a list of relation objects")
 
 
 def _extract_typed_spec(raw_spec: Any, *, context: str) -> Tuple[str, Dict[str, Any]]:
@@ -249,29 +186,51 @@ class BuilderConfigLoader:
 			)
 		return resolved
 
+
 	@staticmethod
-	def _resolve_relations_reference(raw_relations: Any, base_dir: Path) -> Any:
-		"""Load relation rules from an external file when the config stores a path."""
-		if raw_relations is None:
-			return None
+	def normalize_relations(
+		raw_relations: RelationsInput,
+	) -> RelationConstraintsSpec:
+		"""Parse an inline relation specification without file I/O."""
+		return parse_relations_spec(raw_relations)
+	
 
-		if isinstance(raw_relations, str):
-			relations_path = Path(raw_relations)
-			if not relations_path.is_absolute():
-				relations_path = (base_dir / relations_path).resolve()
-			if not relations_path.exists():
-				raise DataValidationError(f"Relations file does not exist: {relations_path}")
-			return BuilderConfigLoader._read_any_file(relations_path)
+	@staticmethod
+	def _resolve_relations_reference(
+		raw_relations: Any,
+		base_dir: Path,
+	) -> Any:
+		"""Load relation declarations when relations is a file-path string."""
+		if not isinstance(raw_relations, str):
+			return raw_relations
 
-		if isinstance(raw_relations, Mapping) and set(raw_relations.keys()) <= {"path"}:
-			relations_path = Path(raw_relations["path"])
-			if not relations_path.is_absolute():
-				relations_path = (base_dir / relations_path).resolve()
-			if not relations_path.exists():
-				raise DataValidationError(f"Relations file does not exist: {relations_path}")
-			return BuilderConfigLoader._read_any_file(relations_path)
+		if not raw_relations.strip():
+			raise DataValidationError(
+				"relations file path must be a non-empty string"
+			)
 
-		return raw_relations
+		relations_path = Path(raw_relations).expanduser()
+
+		if not relations_path.is_absolute():
+			relations_path = base_dir / relations_path
+
+		relations_path = relations_path.resolve()
+
+		if not relations_path.is_file():
+			raise DataValidationError(
+				"Relations file does not exist or is not a file: "
+				f"{relations_path}"
+			)
+
+		return BuilderConfigLoader._read_any_file(relations_path)	
+	
+	@staticmethod
+	def load_relations_file(
+		path: str | Path,
+	) -> RelationConstraintsSpec:
+		"""Load a standalone relation-specification document."""
+		raw = BuilderConfigLoader._read_any_file(path)
+		return parse_relations_spec(raw)
 
 	@staticmethod
 	def _read_any_file(path: str | Path) -> Any:
@@ -333,8 +292,10 @@ class BuilderConfigLoader:
 			)
 
 		if "relations" in out:
-			out["relations"] = _normalize_relations_config(out.get("relations"))
-
+			out["relations"] = parse_relations_spec(
+				out["relations"]
+			)
+			
 		if "callbacks" in out:
 			out["callbacks"] = _normalize_callbacks_for_backend(
 				out.get("callbacks"),

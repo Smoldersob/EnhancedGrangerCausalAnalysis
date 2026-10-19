@@ -48,7 +48,12 @@ class PreparedData:
 		default_factory=lambda: VariableRoles((), (), ())
 	)
 	cause_slices: dict[str, slice] = field(default_factory=dict)
-	removed_variables: dict[str, RemovedVariable] = field(default_factory=dict)
+	feature_lags: np.ndarray = field(
+        default_factory=lambda: np.empty(0, dtype=np.int64)
+    )
+	removed_variables: dict[str, RemovedVariable] = field(
+        default_factory=dict
+    )
 	sample_indices: np.ndarray = field(
 		default_factory=lambda: np.empty(0, dtype=int)
 	)
@@ -93,6 +98,7 @@ class PreparedData:
 			requested_roles=VariableRoles((), (), ()),
 			effective_roles=VariableRoles((), (), ()),
 			cause_slices={},
+			            feature_lags=np.empty(0, dtype=np.int64),
 			removed_variables={},
 			sample_indices=np.empty(0, dtype=int),
 		)

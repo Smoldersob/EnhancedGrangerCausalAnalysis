@@ -7,17 +7,17 @@ from .base_backend import BackendStrategy
 from ..core.exceptions import BackendNotAvailableError, BackendSelectionError
 
 try:
-	from .keras_backend import KerasBackendStrategy
+	from .keras import KerasBackendStrategy
 except Exception:  # pragma: no cover - optional backend module
 	KerasBackendStrategy = None  # type: ignore[assignment]
 
 try:
-	from .pytorch_backend import PyTorchBackendStrategy
+	from .pytorch import PyTorchBackendStrategy
 except Exception:  # pragma: no cover - optional backend module
 	PyTorchBackendStrategy = None  # type: ignore[assignment]
 
 try:
-	from .scikit_backend import ScikitBackendStrategy
+	from .numpy.scikit_backend import ScikitBackendStrategy
 except Exception:  # pragma: no cover - optional backend module
 	ScikitBackendStrategy = None  # type: ignore[assignment]
 

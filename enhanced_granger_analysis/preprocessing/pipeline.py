@@ -611,7 +611,7 @@ class DataPreparer:
             ),
         )
         
-        X_raw, y_raw, block_boundaries = engine.prepare(
+        X_raw, y_raw, block_boundaries, feature_lags = engine.prepare(
             self.data_list,
             causes=list(roles.causes),
             effects=list(roles.effects),
@@ -638,6 +638,7 @@ class DataPreparer:
 
         self.prepared_data_.X_raw = X_raw
         self.prepared_data_.y_raw = y_raw
+        self.prepared_data_.feature_lags = feature_lags.copy()
         self.prepared_data_.cause_slices = {
             cause: cause_slices[cause]
             for cause in self.prepared_data_.effective_roles.causes

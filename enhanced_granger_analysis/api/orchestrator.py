@@ -1,10 +1,14 @@
 from __future__ import annotations
 
-from typing import Any, Dict, Mapping, Optional, Sequence, Tuple
+from typing import Any, Dict, Mapping, Optional, Sequence
 
 import pandas as pd
 
+from EnhancedGrangerCausalAnalysis.enhanced_granger_analysis.core.components.constraint_spec import RelationConstraintsSpec
+
 from ..core.lag_config import LagConfiguration
+from ..core.components.constraint_parsing import RelationsInput
+from ..core.components.constraint_spec import RelationConstraintsSpec
 from ..preprocessing.lag import BaseLagSelector
 from ..preprocessing.missing import BaseImputer
 from ..preprocessing.sampling import SamplingStrategy
@@ -49,7 +53,8 @@ class MultiTaskGrangerAPI:
         causes: Optional[Sequence[str]] = None,
         effects: Optional[Sequence[str]] = None,
         tested_causes: Optional[Sequence[str]] = None,
-        relations: Optional[Mapping[Tuple[str, str], Any]] = None,
+        constraint_spec: Any = "mask_and_min_abs_sum",
+        relations: RelationsInput = RelationConstraintsSpec(),
         lag_config: Optional[LagConfiguration] = None,
         lag_selector: Optional[BaseLagSelector] = None,
         stationarity_transformer: Optional[StationarityTransformer] = StationarityTransformer(),
@@ -62,9 +67,7 @@ class MultiTaskGrangerAPI:
         sampling_strategy: Optional[SamplingStrategy] = None,
         x_scaler: Optional[Any] = "standard",
         y_scaler: Optional[Any] = "standard",
-        regularizer: Optional[Any] = None,
-        regularizer_spec: Optional[Dict[str, Any]] = None,
-        callbacks: Optional[Sequence[Any]] = None,
+        regularizer_spec: Any = None,callbacks: Optional[Sequence[Any]] = None,
         hiperoptimalization_state: Optional[str] = None,
         hiperoptimalization_conf: Optional[Dict[str, Any]] = None,
         initializer: Optional[Any] = None,
@@ -80,7 +83,7 @@ class MultiTaskGrangerAPI:
         """
         builder = MultiTaskGrangerBuilder(
             backend=self.backend, reuse_data=self._reuse_data
-        ).data(data).variables(causes, effects, tested_causes).relations(relations)
+        ).data(data).variables(causes, effects, tested_causes).relations(relations).constraint(constraint_spec)
         builder.lag(lag_config, lag_selector).stationarity(stationarity_transformer)
         builder._fit_kwargs.update({
             "missing_value_imputer": missing_value_imputer,
@@ -91,11 +94,12 @@ class MultiTaskGrangerAPI:
             "random_state": random_state,
             "sampling_strategy": sampling_strategy,
             "x_scaler": x_scaler, "y_scaler": y_scaler,
-            "regularizer": regularizer,
-            "regularizer_spec": regularizer_spec,
             "callbacks": list(callbacks) if callbacks is not None else None,
             "hiperoptimalization_state": hiperoptimalization_state,
             "hiperoptimalization_conf": hiperoptimalization_conf,
             "initializer": initializer, "model_config": model_config,
         })
+        builder.regularization(
+            regularizer_spec=regularizer_spec,
+        )
         return builder.fit(fit_restricted=fit_restricted)

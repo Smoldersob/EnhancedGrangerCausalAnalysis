@@ -9,8 +9,8 @@ from sklearn.linear_model._base import LinearModel, _preprocess_data
 from .base_model import BaseGrangerModel
 from ..callbacks.base_callback import Callback
 from ..callbacks.reset_utils import (
-    clone_custom_callback,
-    reset_callback_list,
+	clone_custom_callback,
+	reset_callback_list,
 )
 from ...core.exceptions import (
 	ConstraintConfigurationError,
@@ -137,9 +137,13 @@ class ScikitConstrainedGrangerModel(LinearModel, RegressorMixin, BaseGrangerMode
 		self._validate_components()
 
 	def _validate_components(self) -> None:
-		if self.regularizer is not None and not callable(self.regularizer):
-			raise RegularizerConfigurationError("regularizer must be callable for ScikitConstrainedGrangerModel")
-
+		if self.regularizer is not None:
+			from ..numpy.regularizers.base import BaseNumpyRegularizer
+			if not isinstance(self.regularizer, BaseNumpyRegularizer):
+				raise RegularizerConfigurationError(
+					"regularizer must be None or an instance of "
+					"BaseNumpyRegularizer."
+				)
 		if self.constraint is not None and not callable(self.constraint):
 			raise ConstraintConfigurationError("constraint must be callable for ScikitConstrainedGrangerModel")
 
@@ -163,36 +167,32 @@ class ScikitConstrainedGrangerModel(LinearModel, RegressorMixin, BaseGrangerMode
 		return True
 
 	def _evaluate_regularizer(
-		self, coef: NDArray[np.float64]
+		self,
+		coef: NDArray[np.float64],
 	) -> Tuple[float, NDArray[np.float64]]:
-		"""Return regularization penalty and gradient.
-
-		Supported callable outputs:
-		- scalar penalty
-		- (penalty, grad)
-		- grad ndarray (same shape as coef)
-		"""
+		"""Evaluate the penalty and its gradient for effective coefficients."""
 		if self.regularizer is None:
 			return 0.0, np.zeros_like(coef)
 
-		result = self.regularizer(coef)
-		if isinstance(result, tuple):
-			if len(result) != 2:
-				raise TrainingError("regularizer tuple output must be (penalty, grad)")
-			penalty = float(result[0])
-			grad = np.asarray(result[1], dtype=np.float64)
-			if grad.shape != coef.shape:
-				raise TrainingError("regularizer gradient has invalid shape")
-			return penalty, grad
+		effective_mask = np.array(
+			self.regularizer.data.layout.base_mask,
+			dtype=coef.dtype,
+			copy=True,
+		)
 
-		arr = np.asarray(result)
-		if arr.shape == coef.shape:
-			return 0.0, arr.astype(np.float64)
+		if self._variable_control_layer is not None:
+			effective_mask *= (
+				self._variable_control_layer.mask[np.newaxis, :]
+			)
 
-		if np.isscalar(result):
-			return float(result), np.zeros_like(coef)
+		effective_coef = coef * effective_mask
 
-		raise TrainingError("regularizer must return scalar, gradient array, or (penalty, grad)")
+		penalty, gradient = self.regularizer.value_and_grad(
+			effective_coef
+		)
+
+		# Chain rule: effective_coef = coef * effective_mask.
+		return float(penalty), gradient * effective_mask
 
 	def _apply_constraint(self, coef: NDArray[np.float64]) -> NDArray[np.float64]:
 		if self.constraint is None:

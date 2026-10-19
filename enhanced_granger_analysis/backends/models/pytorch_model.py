@@ -249,10 +249,12 @@ class PyTorchGrangerModel(BaseGrangerModel):
 	def _validate_torch_components(self) -> None:
 		"""Validate optional regularizer/constraint for PyTorch backend."""
 		if self.regularizer is not None:
-			is_valid_reg = isinstance(self.regularizer, nn.Module) or callable(self.regularizer)
-			if not is_valid_reg:
+			from ..pytorch.regularizers.base import BasePyTorchRegularizer
+			
+			if not isinstance(self.regularizer, BasePyTorchRegularizer):
 				raise RegularizerConfigurationError(
-					"regularizer must be torch.nn.Module or callable for PyTorchGrangerModel"
+					"regularizer must be None or an instance of "
+					"BasePyTorchRegularizer."
 				)
 
 		if self.constraint is not None and not callable(self.constraint):

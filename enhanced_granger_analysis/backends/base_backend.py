@@ -1,13 +1,11 @@
 """Shared backend strategy interface."""
 
 from abc import ABC, abstractmethod
-from typing import Any, Dict, List, Optional
-
-import numpy as np
-from numpy.typing import NDArray
+from typing import Any, Dict, Optional
 
 from .models.base_model import BaseGrangerModel
-
+from ..core.components.constraint_spec import PreparedConstraintData
+from ..core.components.regularizer_spec import PreparedRegularizerData
 
 class BackendStrategy(ABC):
 	"""Abstract interface for backend-specific Granger model orchestration."""
@@ -45,25 +43,31 @@ class BackendStrategy(ABC):
 	) -> BaseGrangerModel:
 		pass
 
+
 	@abstractmethod
-	def build_constraint_from_relations(
+	def build_regularizer(
 		self,
-		relations: Dict[tuple, Any],
-		predictor_names: List[str],
-		output_names: List[str],
-		col_offsets: NDArray[np.int_],
-		n_features: int,
-		base_mask: Optional[NDArray[np.float64]] = None,
+		regularizer_type: str | type | None,
+		*,
+		data: Optional[PreparedRegularizerData] = None,
 	) -> Any:
-		pass
+		"""Construct a regularizer from a selector and prepared data.
+
+		None means that regularization is disabled.
+		User parameters are supplied only through data.params.
+		"""
+		raise NotImplementedError
+
 
 	@abstractmethod
-	def build_regularizer(self, regularizer_spec: Any) -> Any:
-		pass
-
-	def build_constraint(self, constraint_spec: Any) -> Any:
-		"""Resolve backend-native constraint object from user-provided spec/object."""
-		return constraint_spec
+	def build_constraint(
+		self,
+		constraint_spec: Any,
+		*,
+		data: PreparedConstraintData,
+	) -> Any:
+		"""Resolve a backend constraint class and construct an instance."""
+		raise NotImplementedError
 
 
 	def resolve_callbacks(self, callbacks: Optional[list]) -> Optional[list]:
@@ -74,22 +78,4 @@ class BackendStrategy(ABC):
 		"""Resolve optimizer spec to backend-native optimizer object/class."""
 		return optimizer
 
-	def validate_components(
-		self,
-		regularizer: Optional[Any],
-		constraint: Optional[Any],
-		callbacks: Optional[list] = None,
-		optimizer: Optional[Any] = None,
-	) -> None:
-		if self._object_loader is None:
-			return
-		self._object_loader.set_loading_verbose(True)
-		if callbacks is not None:
-			self._object_loader.resolve_callbacks(callbacks)
-		if optimizer is not None:
-			_ = self._object_loader.resolve_optimizer(optimizer)
-		if regularizer is not None:
-			_ = self._object_loader.resolve_regularizer(regularizer)
-		if constraint is not None:
-			_ = self._object_loader.resolve_constraint(constraint)
-		self._object_loader.set_loading_verbose(self._loading_verbose)
+	
