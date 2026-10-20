@@ -609,26 +609,7 @@ class MultiTaskGrangerBuilder:
         )
 
         return self._regularizer
-
-    def prepare_regularizer(self):
-        """
-        Prepare the regularizer for the analysis.
-        Returns:
-            The prepared regularizer.
-        """
-        self._require_components_data()
-        spec = dict(self._fit_kwargs.get("regularizer_spec") or {})
-        if str(spec.get("type", "")).lower() == "lag_dependent_l1":
-            selection = getattr(self._prepared_data.lag_engine, "selection_result_", None)
-            if selection is not None:
-                spec.setdefault("max_lags_per_pred", list(selection.max_lags_per_pred))
-                spec.setdefault("col_offsets", list(selection.col_offsets))
-        if spec:
-            self._regularizer = self._strategy.build_regularizer(spec)
-        else:
-            self._regularizer = self._fit_kwargs.get("regularizer")
-        return self._regularizer
-
+    
     def prepare_callbacks(self):
         """
         Prepare the callbacks for the analysis.

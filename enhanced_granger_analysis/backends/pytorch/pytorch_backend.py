@@ -121,8 +121,6 @@ class PyTorchBackendStrategy(BackendStrategy):
 		model_name = config.get("model_name") or config.get("model") or config.get("model_type")
 		model_cls = self._object_loader.resolve_model(model_name, PyTorchGrangerModel)
 
-		regularizer_resolved = self.build_regularizer(regularizer)
-		constraint_resolved = self.build_constraint(constraint)
 		optimizer_spec = self._resolve_optimizer_spec(config)
 		gradient_accumulation_steps = self._extract_gradient_accumulation_steps(config, optimizer_spec)
 		optimizer_resolved = self.resolve_optimizer(optimizer_spec)
@@ -138,8 +136,6 @@ class PyTorchBackendStrategy(BackendStrategy):
 		kwargs["regularizer"] = regularizer
 		
 		kwargs.setdefault("backend", "pytorch")
-		kwargs.setdefault("regularizer", regularizer_resolved)
-		kwargs.setdefault("constraint", constraint_resolved)
 		kwargs.setdefault("optimizer", optimizer_resolved)
 		kwargs.setdefault("loss", config.get("loss", None))
 		kwargs.setdefault("learning_rate", config.get("learning_rate", 0.001))

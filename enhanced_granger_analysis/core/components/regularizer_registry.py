@@ -98,7 +98,7 @@ class RegularizerClassRegistry(Generic[RegularizerBase]):
     def resolve_spec(
         self,
         spec: Any,
-    ) -> tuple[type[RegularizerBase], dict[str, Any]] | None:
+    ) -> tuple[type[RegularizerBase], dict[str, Any]] | RegularizerBase | None:
         """Resolve an optional specification without constructing an instance.
 
         Raw specifications are parsed by the shared parser.
@@ -106,6 +106,9 @@ class RegularizerClassRegistry(Generic[RegularizerBase]):
         """
         if spec is None:
             return None
+
+        if isinstance(spec, self._base_class):
+            return spec
 
         normalized = (
             spec

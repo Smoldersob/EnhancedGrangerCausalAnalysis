@@ -66,13 +66,15 @@ class _RecordingStrategy:
     def __init__(self):
         self.model = None
         self.constraint_calls = []
+        self.regularizer_calls = []
 
-    def build_constraint_from_relations(self, **kwargs):
-        self.constraint_calls.append(kwargs)
-        return _Constraint(kwargs["base_mask"])
+    def build_constraint(self, constraint_spec, *, data):
+        self.constraint_calls.append((constraint_spec, data))
+        return _Constraint(data.mask)
 
-    def build_regularizer(self, spec):
-        return ("regularizer", dict(spec))
+    def build_regularizer(self, regularizer_type, *, data=None):
+        self.regularizer_calls.append((regularizer_type, data))
+        return ("regularizer", regularizer_type, data)
 
     def build_model(self, **kwargs):
         self.model = _RecordingModel(**kwargs)
@@ -95,6 +97,7 @@ def _prepared_data() -> PreparedData:
             "x": slice(1, 3),
             "z": slice(3, 4),
         },
+        feature_lags=np.arange(4, dtype=np.int64),
     )
     prepared.stationarity_transformer = SimpleNamespace()
     return prepared
@@ -114,7 +117,7 @@ def _configured_builder(monkeypatch):
             effects=["effect"],
             tested_causes=["z", "x"],
         )
-        .regularization(regularizer_spec={"type": "l1", "strength": 0.1})
+        .regularization(regularizer_spec={"type": "l1", "params": {"l1": 0.1}})
     )
     builder.prepare_data(_prepared_data())
     builder.prepare_components()
@@ -185,4 +188,3 @@ def test_reset_callbacks_is_delegated_with_updates(monkeypatch):
     assert strategy.model.reset_calls == [
         ("manual_run", {"EarlyStopping": {"patience": 2}})
     ]
-

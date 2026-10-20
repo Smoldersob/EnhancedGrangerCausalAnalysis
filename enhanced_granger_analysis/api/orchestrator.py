@@ -1,11 +1,10 @@
 from __future__ import annotations
 
-from typing import Any, Dict, Mapping, Optional, Sequence
+from typing import Any, Dict, Optional, Sequence
 
 import pandas as pd
 
-from EnhancedGrangerCausalAnalysis.enhanced_granger_analysis.core.components.constraint_spec import RelationConstraintsSpec
-
+from ..core.components.constraint_spec import RelationConstraintsSpec
 from ..core.lag_config import LagConfiguration
 from ..core.components.constraint_parsing import RelationsInput
 from ..core.components.constraint_spec import RelationConstraintsSpec

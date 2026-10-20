@@ -1,5 +1,5 @@
 import importlib
-if importlib.util.find_spec("numpy") is not None:
+if importlib.util.find_spec("sklearn") is not None:
     try:
         from . import constraints, regularizers
         from .scikit_backend import ScikitBackendStrategy

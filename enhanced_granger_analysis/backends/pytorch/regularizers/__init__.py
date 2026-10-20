@@ -4,7 +4,7 @@ from .registry import (
     register_regularizer,
     resolve_regularizer_spec,
 )
-from .base import BasePytorchRegularizer
+from .base import BasePyTorchRegularizer
 
 from .implementations import (
     L1Regularizer,
@@ -15,7 +15,7 @@ __all__ = [
     "get_regularizer_class",
     "available_regularizers",
     "resolve_regularizer_spec",
-    "BasePytorchRegularizer",
+    "BasePyTorchRegularizer",
     "L1Regularizer",
     "LagDependentL1Regularizer",
 ]

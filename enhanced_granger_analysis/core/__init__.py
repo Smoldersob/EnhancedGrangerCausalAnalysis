@@ -1,22 +1,25 @@
 import importlib.util
 
-from . import (
-	constraints_config, 
-	exceptions, 
-	lag_config, 
-	protocols,
-	training_config,
+from . import ( 
 	components,
+	exceptions,
+	initialization,
+	lag_config,
+	protocols,
+	registry,
+	training_config,
 )
 
 
 __all__ = [
+    "components",
 	"constraints_config",
     "exceptions",
+	"initialization",
     "lag_config",
     "protocols",
+    "registry",
     "training_config",
-    "components",
 ]
 
 

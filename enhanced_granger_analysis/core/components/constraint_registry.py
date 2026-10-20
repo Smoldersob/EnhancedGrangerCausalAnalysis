@@ -104,7 +104,7 @@ class ConstraintClassRegistry(Generic[ConstraintBase]):
     def resolve_spec(
         self,
         spec: Any,
-    ) -> tuple[type[ConstraintBase], dict[str, Any]]:
+    ) -> tuple[type[ConstraintBase], dict[str, Any]] | ConstraintBase | None:
         """Resolve a name, strict mapping, or class.
 
         Supported inputs:
@@ -115,8 +115,14 @@ class ConstraintClassRegistry(Generic[ConstraintBase]):
             class:
                 Concrete subclass of this backend's base class.
 
-        None, instances and factory functions are not accepted.
+        Return None, an existing instance, or a class with parameters.
         """
+        if spec is None:
+            return None
+
+        if isinstance(spec, self._base_class):
+            return spec
+        
         if isinstance(spec, str):
             return self.get_class(spec), {}
 
@@ -168,8 +174,8 @@ class ConstraintClassRegistry(Generic[ConstraintBase]):
             return self._validate_class(spec), {}
 
         raise TypeError(
-            "Constraint specification must be a registered name, "
-            "a mapping with 'type' and optional 'params', "
-            "or a concrete constraint class. "
-            "None, instances and factory functions are not supported."
-        )
+                "Constraint specification must be None, a registered name, "
+                "a mapping with 'type' and optional 'params', "
+                "a concrete constraint class, or an instance of "
+                f"{self._base_class.__name__}."
+                )

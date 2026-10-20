@@ -15,7 +15,7 @@ from ....core.components.regularizer_spec import (
 )
 
 
-class BaseNumpyRegularizer(ABC):
+class ScikitRegularizer(ABC):
     """
     Regularizer for canonical coefficient matrices:
 
@@ -107,7 +107,7 @@ class BaseNumpyRegularizer(ABC):
         )
 
     @abstractmethod
-    def _value_and_grad(
+    def value_and_grad(
         self,
         weights: np.ndarray,
     ) -> tuple[float, np.ndarray]:
@@ -123,7 +123,7 @@ class BaseNumpyRegularizer(ABC):
     def from_config(
         cls,
         config: Mapping[str, Any],
-    ) -> BaseNumpyRegularizer:
+    ) -> ScikitRegularizer:
         if not isinstance(config, Mapping) or set(config) != {"data"}:
             raise ValueError(
                 "Regularizer config must contain exactly 'data'."

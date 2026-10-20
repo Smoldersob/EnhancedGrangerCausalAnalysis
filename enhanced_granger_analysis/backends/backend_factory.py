@@ -1,6 +1,6 @@
 """Factory for instantiating backend strategies."""
 
-import importlib.util
+import importlib
 from typing import Dict, List, Optional, Set
 
 from .base_backend import BackendStrategy
@@ -8,17 +8,20 @@ from ..core.exceptions import BackendNotAvailableError, BackendSelectionError
 
 try:
 	from .keras import KerasBackendStrategy
-except Exception:  # pragma: no cover - optional backend module
+except Exception as e:  # pragma: no cover - optional backend module
+	print(f"Error importing KerasBackendStrategy: {e}")
 	KerasBackendStrategy = None  # type: ignore[assignment]
 
 try:
 	from .pytorch import PyTorchBackendStrategy
-except Exception:  # pragma: no cover - optional backend module
+except Exception as e:  # pragma: no cover - optional backend module
+	print(f"Error importing PyTorchBackendStrategy: {e}")
 	PyTorchBackendStrategy = None  # type: ignore[assignment]
 
 try:
-	from .numpy.scikit_backend import ScikitBackendStrategy
-except Exception:  # pragma: no cover - optional backend module
+	from .scikit.scikit_backend import ScikitBackendStrategy
+except Exception as e:  # pragma: no cover - optional backend module
+	print(f"Error importing ScikitBackendStrategy: {e}")
 	ScikitBackendStrategy = None  # type: ignore[assignment]
 
 

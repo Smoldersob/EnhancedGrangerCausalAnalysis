@@ -15,7 +15,7 @@ from ....core.components.constraint_serialization import (
 )
 
 
-class BaseNumpyConstraint(ABC):
+class ScikitConstraint(ABC):
     """Base constraint for weights shaped (n_outputs, n_features)."""
 
     def __init__(

@@ -64,7 +64,6 @@ class ScikitBackendStrategy(BackendStrategy):
 		kwargs["regularizer"] = regularizer
 				
 		kwargs.setdefault("backend", "sklearn")
-		kwargs.setdefault("regularizer", regularizer_resolved)
 		kwargs.setdefault("callbacks", callbacks_resolved)
 		kwargs.setdefault("fit_intercept", config.get("fit_intercept", True))
 		kwargs.setdefault("learning_rate", config.get("learning_rate", 1.0))

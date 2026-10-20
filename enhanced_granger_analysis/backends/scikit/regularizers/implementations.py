@@ -11,12 +11,12 @@ from ....core.components.regularizer_parameters import (
 from ....core.components.regularizer_spec import (
     PreparedRegularizerData,
 )
-from .base import BaseNumpyRegularizer
+from .base import ScikitRegularizer
 from .registry import register_regularizer
 
 
 @register_regularizer("l1")
-class L1Regularizer(BaseNumpyRegularizer):
+class L1Regularizer(ScikitRegularizer):
     DEFAULT_PARAMS = L1_DEFAULT_PARAMS
 
     def __init__(
@@ -40,7 +40,7 @@ class L1Regularizer(BaseNumpyRegularizer):
 
 
 @register_regularizer("lag_dependent_l1")
-class LagDependentL1Regularizer(BaseNumpyRegularizer):
+class LagDependentL1Regularizer(ScikitRegularizer):
     DEFAULT_PARAMS = LAG_L1_DEFAULT_PARAMS
 
     def __init__(

@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from typing import Any, Dict, List, Tuple, Union, Optional, Type, Mapping
+from typing import Any, Dict, List, Tuple, Union, Optional, Mapping
 import numpy as np
 from numpy.typing import NDArray
 from sklearn.base import RegressorMixin
@@ -138,7 +138,7 @@ class ScikitConstrainedGrangerModel(LinearModel, RegressorMixin, BaseGrangerMode
 
 	def _validate_components(self) -> None:
 		if self.regularizer is not None:
-			from ..numpy.regularizers.base import BaseNumpyRegularizer
+			from ..scikit.regularizers.base import BaseNumpyRegularizer
 			if not isinstance(self.regularizer, BaseNumpyRegularizer):
 				raise RegularizerConfigurationError(
 					"regularizer must be None or an instance of "
