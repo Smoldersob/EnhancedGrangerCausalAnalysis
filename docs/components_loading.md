@@ -1,25 +1,262 @@
 # Components Loading
 
-This document lists supported component types and dictionary names used to build components in each backend.
+Component loading depends on the component family. There is no single
+specification format shared unchanged by callbacks, optimizers,
+constraints, regularizers, and initializers.
 
-## Generic Spec Format
-You can pass either:
+Version 2.6 introduces dedicated parsing, preparation, and class-resolution
+paths for constraints and regularizers.
 
-- A concrete component object.
-- A string type name.
-- A dictionary with fields:
-  - `type` (preferred) or `name` or `kind`
-  - `params` (optional object)
-  - Extra keys outside `params` are also accepted and merged into params.
+> Version 2.6 is experimental. The interfaces below describe the new
+> component contract, but the current development commit still contains
+> integration defects in builder and backend execution paths.
 
-Example:
+## Component families
+
+| Component | Configuration entry point | Resolution mechanism |
+| --- | --- | --- |
+| Relations | `relations` / `.relations(...)` | Shared relation parser |
+| Constraint implementation | `constraint_spec` / `.constraint(...)` | Backend constraint class registry |
+| Regularizer | `regularizer_spec` / `.regularization(...)` | Shared parser and backend regularizer class registry |
+| Callbacks | `callbacks` / `.callbacks(...)` | Backend object loader |
+| Optimizer | `model_config.optimizer` | Backend optimizer loader |
+| Initializer | `initializer` / `.initializer(...)` | Initializer registry |
+
+Do not apply callback or optimizer compatibility rules to constraint and
+regularizer specifications. In particular, support for flattened
+parameters or `name`/`kind` aliases in one loader does not make them valid
+for the new component parsers.
+
+## Constraint configuration
+
+Constraint configuration has two independent parts:
+
+1. `relations` describes named cause/effect rules.
+2. `constraint_spec` selects the backend implementation enforcing the
+   prepared mask and rules.
+
+### Named relation rules
+
+Use a list of canonical declarations:
 
 ```python
-{"type": "early_stopping", "patience": 5}
-{"name": "l1", "params": {"l1": 0.01}}
+relations = [
+    {
+        "cause": "x1",
+        "effect": "y",
+        "rule": {"type": "zero"},
+    },
+    {
+        "cause": "x2",
+        "effect": "y",
+        "rule": {
+            "type": "min_abs_sum",
+            "params": {"value": 0.2},
+        },
+    },
+]
 ```
 
-## Scikit/Numpy Backend
+The supported rules are:
+
+- `zero`: masks all coefficients for the selected cause/effect relation.
+- `min_abs_sum`: requires the sum of absolute values of the relation's
+  active coefficients to be at least `value`.
+
+`value` must be finite and non-negative. A lower bound of zero adds no
+restriction; it is not equivalent to a `zero` rule.
+
+Each cause/effect pair may appear only once.
+
+The parser accepts a `RelationConstraintsSpec` instance or a list of
+declarations. Legacy tuple-key mappings, string-key mappings, shorthand
+numeric values, and `None` are not accepted.
+
+Use `[]` or `RelationConstraintsSpec()` when no explicit rules are needed.
+An empty relation specification preserves the preprocessing base mask.
+
+### Selecting the constraint implementation
+
+```python
+constraint_spec = {
+    "type": "mask_and_min_abs_sum",
+    "params": {"eps": 1e-8},
+}
+```
+
+Accepted selectors are:
+
+- a registered name;
+- a mapping with `type` and optional `params`;
+- a concrete subclass of the selected backend's constraint base class.
+
+The low-level component registries recognize existing instances of their
+backend base classes. The constraint registry also recognizes `None`.
+
+Registry-level acceptance is distinct from the public builder contract.
+Builder configuration and strategy construction must be documented
+according to their own accepted inputs; registry behavior alone does not
+establish support for passing instances through the complete pipeline.
+
+Built-in names shared by the backend registries:
+
+| Implementation | Registered names |
+| --- | --- |
+| Mask only | `MaskConstraint`, `mask_constraint`, `mask` |
+| Mask and minimum absolute sum | `MaskAndMinAbsSumConstraint`, `mask_and_min_abs_sum_constraint`, `mask_and_min_abs_sum` |
+
+Use `mask_and_min_abs_sum` when positive minimum-sum rules are present.
+The mask-only implementation rejects such rules.
+
+Do not put `mask`, indexed `rules`, `output_names`, `n_features`, or
+`cause_slices` inside `constraint_spec.params`. These values are prepared
+from the final input layout and are not constructor tuning parameters.
+
+### Preparation and construction
+
+The shared preparation utility combines:
+
+- named relation rules;
+- effective cause slices;
+- effective output ordering;
+- the preprocessing base mask.
+
+It produces `PreparedConstraintData`, whose mask uses the canonical shape
+`(n_outputs, n_features)`.
+
+Positive minimum-sum rules include only coefficients still active after
+masking. If none remain, preparation raises an error by default. The
+low-level utility supports `infeasible_policy="warn"`; the builder currently
+uses the default error policy.
+
+The backend then resolves the selected class and constructs it using
+`build_constraint(constraint_spec, data=prepared_constraint_data)`.
+
+## Regularizer configuration
+
+Use `regularizer_spec` as the configuration source:
+
+```python
+regularizer_spec = {
+    "type": "l1",
+    "params": {"l1": 0.01},
+}
+```
+
+Accepted forms are:
+
+- `None`, which disables regularization;
+- a registered name;
+- a concrete backend regularizer class;
+- a concrete backend regularizer instance;
+- a mapping containing `type` and optional `params`;
+- a normalized `RegularizerSpec`.
+
+In Python mappings, `type` may also be a concrete class. JSON/YAML
+configuration must use a registered string name.
+
+Instances and factory functions are not accepted. The parser rejects
+`name`, `kind`, and extra top-level parameter fields.
+
+Built-in registered names are:
+
+- `l1`;
+- `lag_dependent_l1`.
+
+Historical backend-prefixed regularizer aliases are not registered by
+the new built-in implementations.
+
+### Lag-dependent L1
+
+```python
+regularizer_spec = {
+    "type": "lag_dependent_l1",
+    "params": {
+        "l1": 0.01,
+        "lag_weights": [1.0, 2.0, 3.0, 4.0],
+        "relative_lag_indexing": False,
+    },
+}
+```
+
+The regularizer uses `PreparedData.feature_lags`, not inferred block
+positions.
+
+With absolute indexing, each feature uses
+`lag_weights[feature_lag]`. For example, lag 1 uses index 1, not index 0.
+
+With `relative_lag_indexing=True`, the minimum lag across the complete
+feature layout is subtracted before indexing. This origin is global,
+not calculated separately for each cause.
+
+`lag_weights` must be a non-empty one-dimensional sequence of finite,
+non-negative numbers and must cover every required index.
+
+The built-in default `l1` is `0.0`. Selecting a regularizer by name alone
+therefore does not introduce a nonzero penalty.
+
+Do not supply `max_lags_per_pred` or `col_offsets` as regularizer
+parameters. The new preparation path derives layout metadata from
+`cause_slices`, `output_names`, `feature_lags`, and `base_mask`.
+
+### Preparation and construction
+
+The shared preparation stage creates:
+
+- `RegularizationLayout`, describing the canonical coefficient layout;
+- `PreparedRegularizerData`, containing that layout and user parameters.
+
+The backend resolves the class and constructs it using:
+
+```python
+regularizer = strategy.build_regularizer(
+    parsed_spec.selector,
+    data=prepared_regularizer_data,
+)
+```
+
+Registry resolution selects and validates a class without constructing it.
+Prepared data is supplied separately to the constructor.
+
+Regularizer implementations do not automatically apply every model mask.
+The model integration is responsible for supplying the appropriate
+effective coefficients.
+
+## Backend-specific component bases
+
+| Backend | Constraint base | Regularizer base |
+| --- | --- | --- |
+| Scikit | `BaseScikitConstraint` | `BaseScikitRegularizer` |
+| Native PyTorch | `BasePyTorchConstraint` | `BasePyTorchRegularizer` |
+| Keras | `BaseKerasConstraint` | `BaseKerasRegularizer` |
+
+Scikit and native PyTorch coefficient matrices use
+`(n_outputs, n_features)`.
+
+Keras Dense kernels use `(n_features, n_outputs)`. The prepared data
+retains the canonical layout; backend implementations handle orientation.
+
+Custom components must inherit from the selected backend's library base
+class. Inheriting only from a native Keras regularizer or providing an
+arbitrary callable is not sufficient for the new model validation rules.
+
+## Serialization
+
+Regularizer specification serialization stores a registered type name and
+parameters. Serializing a class-based specification requires an explicit
+`registered_name`.
+
+Prepared regularizer serialization stores:
+
+- `schema_version`;
+- layout metadata;
+- parameters.
+
+Backend components expose configuration serialization methods. Custom
+components must include any additional constructor parameters required
+for reconstruction.
+
+## Scikit Backend
 Backend names: `sklearn` / `scikit` / `scikit-learn`
 
 ### Callbacks
@@ -38,58 +275,6 @@ callbacks = [
 ]
 ```
 
-### Regularizers
-Supported dictionary types:
-
-- `l1` / `numpy_l1`
-- `lag_dependent_l1` / `lagdependentl1` / `numpy_lag_dependent_l1`
-
-Simple example:
-
-```python
-reg = {"type": "l1", "l1": 0.01}
-```
-
-Lag-dependent example:
-
-```python
-reg = {
-    "type": "lag_dependent_l1",
-    "l1": 0.01,
-    "lag_weights": [1.0, 2.0, 3.0],
-    "max_lags_per_pred": [2, 2],
-    "col_offsets": [0, 3],
-}
-```
-
-### Constraints
-Supported dictionary types:
-
-- `mask` / `mask_constraint` / `numpy_mask`
-- `mask_and_min_abs_sum` / `mask_min_abs_sum` / `numpy_mask_and_min_abs_sum`
-
-Simple mask example:
-
-```python
-constraint = {
-    "type": "mask",
-    "mask": [[1, 1, 0], [1, 0, 0]],
-}
-```
-
-Mask + rules example:
-
-```python
-constraint = {
-    "type": "mask_and_min_abs_sum",
-    "mask": [[1, 1, 1]],
-    "rules": [
-        {"output_index": 0, "feature_indices": [1, 2], "min_abs_sum": 1.0}
-    ],
-    "eps": 1e-8,
-}
-```
-
 ## PyTorch Backend
 Backend names: `pytorch` / `torch`
 
@@ -105,18 +290,6 @@ Simple example:
 
 ```python
 callbacks = [{"type": "torch_tensorboard", "log_dir": "runs/demo"}]
-```
-
-### Regularizers
-Supported dictionary types:
-
-- `l1` / `torch_l1` / `pytorch_l1`
-- `lag_dependent_l1` / `lagdependentl1` / `torch_lag_dependent_l1` / `pytorch_lag_dependent_l1`
-
-Simple example:
-
-```python
-reg = {"type": "pytorch_l1", "l1": 0.005}
 ```
 
 ### Optimizer and training settings
@@ -174,21 +347,6 @@ that the underlying optimizer accepts the same argument.
 Check the selected loader before moving accumulation settings between
 model-level and optimizer-level configuration.
 
-### Constraints
-Supported dictionary types:
-
-- `mask` / `mask_constraint` / `torch_mask` / `pytorch_mask`
-- `mask_and_min_abs_sum` / `mask_min_abs_sum` / `torch_mask_and_min_abs_sum` / `pytorch_mask_and_min_abs_sum`
-
-Simple example:
-
-```python
-constraint = {
-    "type": "pytorch_mask",
-    "mask": [[1, 0, 1]],
-}
-```
-
 ## Keras-based strategy
 
 This section describes components loaded for the library's Keras-based
@@ -216,32 +374,6 @@ callbacks = [
 ]
 ```
 
-### Regularizers
-Supported dictionary types:
-
-- `l1` / `keras_l1` / `tensorflow_l1`
-- `lag_dependent_l1` / `lagdependentl1` / `keras_lag_dependent_l1` / `tensorflow_lag_dependent_l1`
-
-Simple example:
-
-```python
-reg = {"type": "keras_l1", "l1": 0.01}
-```
-
-### Constraints
-Supported dictionary types:
-
-- `mask` / `mask_constraint` / `keras_mask` / `tensorflow_mask`
-- `mask_and_min_abs_sum` / `mask_min_abs_sum` / `keras_mask_and_min_abs_sum` / `tensorflow_mask_and_min_abs_sum`
-
-Simple example:
-
-```python
-constraint = {
-    "type": "tensorflow_mask",
-    "mask": [[1, 1, 0, 0]],
-}
-```
 ## Callback lifecycle
 
 Resolving a callback specification constructs or selects a callback.
@@ -257,17 +389,18 @@ by the selected model.
 
 ## Feature-block metadata
 
-Some component specifications, including lag-dependent regularizers, may use
-positional offsets.
+Component preparation uses the final effective feature layout:
 
-These offsets belong to the component's internal configuration and should not
-be confused with `PreparedData.cause_slices`.
+- `PreparedData.cause_slices` maps each cause to its feature columns;
+- `PreparedData.effects` defines output ordering;
+- `PreparedData.feature_lags` gives the actual lag of each feature column;
+- `PreparedData.base_mask` describes the preprocessing coefficient mask.
 
-When constructing a component from prepared data, preserve the effective
-input order and derive positional information from the corresponding named
-feature slices.
+These values must agree with the prepared input and target dimensions.
 
 The order of `tested_causes` is not a feature-layout specification.
+Do not reconstruct regularizer lag metadata from tested-cause order or
+legacy positional offsets.
 
 ## Verbose Loading
 All strategies support internal loader logging via `loading_verbose=True`.

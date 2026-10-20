@@ -50,21 +50,49 @@ only a facade over the orchestrator.
 
 ### backends
 
-Backend abstraction layer and implementations:
+### backends
+
+Backend abstraction, model implementations, and backend-native components:
 
 - `backend_factory.py`: backend selection and strategy dispatch.
-- `base_backend.py`: shared backend contract.
-- `pytorch_backend.py`, `keras_backend.py`, `scikit_backend.py`: backend-specific logic.
-- Subfolders (`callbacks`, `constraints`, `models`, `object_loaders`, `regularizers`): backend-native components.
+- `base_backend.py`: shared strategy contract.
+- `keras/keras_backend.py`: Keras strategy.
+- `pytorch/pytorch_backend.py`: native PyTorch strategy.
+- `scikit/scikit_backend.py`: scikit strategy.
+- `keras/constraints/`, `pytorch/constraints/`, `scikit/constraints/`:
+  constraint bases, class registries, and implementations.
+- `keras/regularizers/`, `pytorch/regularizers/`, `scikit/regularizers/`:
+  regularizer bases, class registries, and implementations.
+- `models/`: model implementations and lifecycle contracts.
+- `callbacks/`: shared callback infrastructure and implementations.
+- `object_loaders/`: backend object loading, including callback and
+  optimizer resolution.
+
+Constraint and regularizer specifications are no longer resolved by
+the object loaders. Their dedicated registries select classes, and
+strategies construct instances from prepared component data.
 
 ### core
 
-Low-level shared contracts and data models:
+Shared contracts, configuration objects, registries, and exceptions.
 
-- configuration objects such as lag and training constraints,
-- protocol-style interfaces,
-- exception classes,
-- output dataclasses.
+`components/` contains backend-independent component infrastructure:
+
+- `constraint_spec.py`: named relation rules and prepared constraint data;
+- `constraint_parsing.py`: canonical relation parsing;
+- `constraint_preparation.py`: compilation against effective feature layout;
+- `constraint_registry.py`: reusable constraint class-registry logic;
+- `constraint_serialization.py`: prepared constraint serialization;
+- `regularizer_spec.py`: normalized regularizer selection and layout data;
+- `regularizer_parsing.py`: regularizer specification parsing;
+- `regularizer_preparation.py`: layout and constructor-data preparation;
+- `regularizer_parameters.py`: shared built-in parameter validation and
+  lag-weight mapping;
+- `regularizer_registry.py`: reusable regularizer class-registry logic;
+- `regularizer_serialization.py`: specification and prepared-data serialization.
+
+Backend-independent preparation does not construct backend-native
+component instances.
 
 ### initializers
 

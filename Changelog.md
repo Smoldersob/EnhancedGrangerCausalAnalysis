@@ -296,3 +296,157 @@ Additonaly registry mechanizm have been generalized and slightly updated. New co
 ### Fixed
 - Unified initializer name handling across file-based and programmatic configuration.
 - Removed the `TypeError` fallback that could mask initializer execution errors.
+
+## Version Changes 2.6
+
+This version introduces a staged configuration and construction workflow
+for constraints and regularizers.
+
+User specifications, backend-independent preparation data, class
+resolution, and backend-native component instances are handled separately.
+The builder integrates these stages into the analysis pipeline and exposes
+them individually for inspection and custom execution.
+
+This release also updates backend package organization, component import
+paths, and staged builder tests to match the new construction contract.
+
+### Added
+
+#### Backend-independent component preparation
+
+- Added `core/components/` with constraint and regularizer specifications,
+  parsing, preparation, class registries, and serialization utilities.
+- Added `RelationConstraintsSpec`, `RelationConstraint`,
+  `ZeroRelationRule`, and `MinAbsSumRelationRule` for named relation
+  declarations.
+- Added `PreparedConstraintData` for compiled masks and indexed
+  minimum-absolute-sum rules.
+- Added `RegularizerSpec`, `RegularizationLayout`, and
+  `PreparedRegularizerData` for regularizer selection, feature metadata,
+  and constructor parameters.
+- Added backend-specific class registries with decorator-based
+  registration and alias support. Registry resolution selects a class
+  without constructing its instance.
+- Added serialization of regularizer specifications and prepared data.
+  Prepared regularizer data includes an explicit schema version.
+
+#### Builder stages and configuration
+
+- Added `.constraint(...)` for selecting the constraint implementation
+  independently of the named rules supplied through `.relations(...)`.
+- Added `prepare_constraint_data()` and `prepare_regularizer_data()` for
+  inspecting backend-independent component inputs before construction.
+- Added a default `mask_and_min_abs_sum` constraint selection, including
+  when no explicit relation rules are supplied.
+- Added validation preventing constraint and regularizer configuration
+  from being supplied through `model_config`.
+
+#### Explicit lag metadata
+
+- Added `PreparedData.feature_lags`, containing the actual lag associated
+  with each input-feature column.
+- Extended `LagEngine.prepare()` to return
+  `(X, y, block_boundaries, feature_lags)`.
+- Propagated feature-lag metadata through the preparation pipeline.
+- Added lag-dependent L1 parameter preparation using actual feature lags,
+  with absolute or relative lag indexing.
+
+#### Tests
+
+- Added tests for canonical relation parsing, invalid declarations,
+  feature-layout validation, mask preservation, infeasible rules,
+  JSON/YAML references, and builder integration.
+
+### Changed
+
+#### Component organization and construction
+
+- Moved backend-specific constraints and regularizers into
+  `backends/keras/`, `backends/pytorch/`, and `backends/scikit/`.
+- Introduced backend-specific constraint and regularizer base classes.
+- Replaced strategy-level `build_constraint_from_relations(...)` with
+  explicit preparation followed by `build_constraint(spec, data=...)`.
+- Changed regularizer construction to
+  `build_regularizer(selector, data=...)`.
+- Removed constraint and regularizer resolution from the backend object
+  loaders. Those components now use their dedicated class registries.
+- Introduced an explicit NumPy regularizer penalty-and-gradient contract.
+- Added diagnostic messages for backend import failures.
+
+#### Relation declarations
+
+- Replaced legacy relation mappings and shorthand values with a strict
+  list of declarations containing `cause`, `effect`, and `rule`.
+- Restricted rule types to `zero` and `min_abs_sum`.
+- Added rejection of duplicate cause/effect declarations.
+- Changed `min_abs_sum=0` to mean no additional lower-bound restriction;
+  it does not force the relation to zero.
+- Changed infeasible positive minimum-sum rules to raise an error by
+  default when no active coefficients remain. The preparation utility
+  also supports an explicit warning policy.
+
+#### Builder invalidation
+
+- Changing the backend through `.backend(...)` now clears the selected
+  strategy and invalidates dependent component and model artifacts.
+- Backend and regularization setters preserve an existing preparation
+  result context while clearing model snapshots.
+- Preparing data invalidates previously constructed components before
+  creating the new result context.
+
+### Breaking changes and migration
+
+- Replace the top-level `regularizer` field with `regularizer_spec`.
+- Replace `.regularization(regularizer=...)` with
+  `.regularization(regularizer_spec=...)`.
+- Put regularizer parameters inside `params`; flattened parameter
+  mappings and the `name`/`kind` alternatives are not supported by the
+  new regularizer parser.
+- Replace legacy relation mappings, tuple keys, and shorthand rule values
+  with canonical relation declarations.
+- Use `[]` or `RelationConstraintsSpec()` for no explicit relation rules.
+  `relations=None` is not accepted by the new parser.
+- Resolve relation-file references through `BuilderConfigLoader` or
+  `.from_file(...)`; `.relations(...)` does not perform file I/O.
+- Do not pass `mask`, indexed `rules`, or layout metadata through
+  `constraint_spec.params`; these belong to prepared constraint data.
+- Constraint selection does not accept `None`, instances, or factory
+  functions. Regularizer selection accepts `None` to disable
+  regularization, but does not accept instances or factory functions.
+- Update imports from the removed shared `backends/constraints/` and
+  `backends/regularizers/` packages to the backend-specific packages.
+- Update callers unpacking the former three-value return from
+  `LagEngine.prepare()`.
+
+### Current integration limitations
+
+- The builder still contains a legacy `prepare_regularizer()` definition
+  that overrides the new implementation.
+- Backend import, component registration, and model-construction paths
+  still contain inconsistencies introduced during the refactor.
+- The new interfaces and added tests do not establish that the complete
+  analysis pipeline works across all backends.
+- End-to-end validation is required before treating this version as a
+  stable release.
+
+  ### Fixed
+
+- Removed the legacy `prepare_regularizer()` definition that overrode the
+  new staged implementation in `MultiTaskGrangerBuilder`.
+- Corrected PyTorch dependency detection and the import/export name of
+  `BasePyTorchRegularizer`.
+- Replaced the repository-dependent absolute import in the orchestrator
+  with a package-relative import.
+- Removed obsolete component-resolution calls from PyTorch model
+  construction. Prepared constraint and regularizer instances are now
+  passed directly to the model.
+- Removed an undefined legacy regularizer variable from scikit model
+  construction.
+- Aligned the scikit regularizer abstract interface with the built-in
+  `value_and_grad()` implementations.
+- Removed the import of the deleted `constraints_config` module from
+  core package initialization.
+- Updated staged builder tests to use the new component construction
+  signatures and nested regularizer parameters.
+
+  

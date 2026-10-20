@@ -15,7 +15,7 @@ from ....core.components.regularizer_spec import (
 )
 
 
-class ScikitRegularizer(ABC):
+class BaseScikitRegularizer(ABC):
     """
     Regularizer for canonical coefficient matrices:
 
@@ -123,7 +123,7 @@ class ScikitRegularizer(ABC):
     def from_config(
         cls,
         config: Mapping[str, Any],
-    ) -> ScikitRegularizer:
+    ) -> BaseScikitRegularizer:
         if not isinstance(config, Mapping) or set(config) != {"data"}:
             raise ValueError(
                 "Regularizer config must contain exactly 'data'."

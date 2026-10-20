@@ -1,4 +1,4 @@
-from .base import ScikitConstraint
+from .base import BaseScikitConstraint
 from .registry import (
     available_constraints,
     get_constraint_class,
@@ -11,7 +11,7 @@ from .implementations import (
 )
 
 __all__ = [
-    "ScikitConstraint",
+    "BaseScikitConstraint",
     "available_constraints",
     "get_constraint_class",
     "register_constraint",

@@ -12,7 +12,7 @@ The library provides three analysis entry points:
    implemented by the builder.
 3. `SimpleGrangerAPI` — an independent pair-wise statsmodels baseline.
 
-`MultiTaskGrangerBuilder` is a compatibility alias of
+`MultitaskGrangerBuilder` is a compatibility alias of
 `MultiTaskGrangerBuilder`.
 
 Related utilities:
@@ -36,20 +36,42 @@ analysis.
 
 **Key Method:**
 
+### Constraint and regularizer configuration
+
 ```python
 output = api.fit(
-    data: DataFrame | Sequence[DataFrame],
-    causes: Optional[Sequence[str]] = None,
-    effects: Optional[Sequence[str]] = None,
-    tested_causes: Optional[Sequence[str]] = None,
-    relations: Optional[Mapping[Tuple[str, str], Any]] = None,
-    lag_config: Optional[LagConfiguration] = None,
-    regularizer: Optional[Any] = None,
-    callbacks: Optional[Sequence[Any]] = None,
-    model_config: Optional[Dict[str, Any]] = None,
-    ...
-) -> GrangerAnalysisResults
+    data=df,
+    causes=["x1", "x2", "y"],
+    effects=["y"],
+    tested_causes=["x1"],
+    constraint_spec="mask_and_min_abs_sum",
+    relations=[
+        {
+            "cause": "x2",
+            "effect": "y",
+            "rule": {"type": "zero"},
+        },
+    ],
+    regularizer_spec={
+        "type": "l1",
+        "params": {"l1": 0.01},
+    },
+    model_config={"epochs": 20},
+)
 ```
+
+`relations` accepts a canonical declaration list or a
+`RelationConstraintsSpec`. Its default is an empty specification.
+
+`constraint_spec` selects the enforcing implementation and defaults to
+`"mask_and_min_abs_sum"`.
+
+`regularizer_spec=None` disables regularization. The former `regularizer`
+argument is no longer part of this interface.
+
+This example illustrates the version 2.6 configuration contract.
+End-to-end execution remains subject to the experimental integration
+limitations described in the changelog.
 
 **Variable Selection Parameters:**
 
@@ -67,7 +89,8 @@ results: GrangerAnalysisResults
 **Features:**
 - One model object is reused for the base and restricted runs.
 - Each restricted run starts from an independent copy of the base weights.
-- Relation-based constraint specification (e.g., `{"y->x1": {"zero": true}}`).
+- Named relation declarations configured separately from constraint
+  implementation selection.
 - Backend abstraction via `BackendFactory` strategy pattern.
 - Optional initializer support through the builder.
 
@@ -143,26 +166,12 @@ Execution methods do not share one fluent return contract:
 | `fit_restricted(cause)` | `None` |
 | `fit_restricted_models()` | Result container |
 | `get_results()` | Current result container |
-
-Prepare components individually when needed:
-
-```python
-builder.prepare_backend()
-builder.prepare_constraint()
-builder.prepare_regularizer()
-builder.prepare_callbacks()
-```
-
-`fit_restricted(cause)` requires a completed base fit. In normal use, `cause`
-should be one of the effective `prepared.tested_causes`.
-
-Every restricted run restores the base weights, selects the cause's input
-block, resets callbacks for that run, fits the working model, and saves a
-reference snapshot.
-
-`get_results()` does not fit a model or evaluate all metrics. A result container
-is created during data preparation, so its availability does not imply that
-base and restricted fitting have completed.
+| `prepare_constraint_data()` | `PreparedConstraintData` |
+| `prepare_regularizer_data()` | `PreparedRegularizerData` or `None` |
+| `prepare_backend()` | Backend strategy |
+| `prepare_constraint()` | Backend constraint |
+| `prepare_regularizer()` | Backend regularizer or `None`; current integration caveat applies |
+| `prepare_callbacks()` | Copied callback configuration list or `None` |
 
 **In Practice:**
 
@@ -186,26 +195,131 @@ causality = output.result(threshold=0.01, with_sign=True)
 print(causality)  # DataFrame with signed causality indicators
 ```
 
+### Component preparation stages
 
-**Configuration changes and current caveats**
+After preparing data, backend-independent component data can be inspected
+separately:
 
-Data, variable, lag, scaling, relation, regularization, callback, initializer,
-and model changes invalidate different dependent runtime artifacts.
+```python
+prepared = builder.prepare_data()
 
-After changing settings in a partially executed analysis, rerun the affected
-stages. In the current implementation, invalidation may also remove the result
-container; rerunning the full pipeline is the simplest way to rebuild a
-consistent result context.
+constraint_data = builder.prepare_constraint_data()
+regularizer_data = builder.prepare_regularizer_data()
+```
 
-Create a new builder when changing backends after execution has started.
-The current `.backend(...)` setter does not invalidate existing runtime
-artifacts.
+`prepare_constraint_data()` returns `PreparedConstraintData`.
 
-The builder configures a `StationarityTransformer` by default.
-Calling `.stationarity()` currently disables stationarity.
+`prepare_regularizer_data()` returns `PreparedRegularizerData`, or `None`
+when regularization is disabled. Refreshing regularizer data clears the
+existing regularizer and invalidates the working model and its snapshots.
 
-Hyperoptimization can be configured through `.hyperoptimization(...)`, but
-`fit()` does not currently execute an optimization stage.
+Backend-native construction requires a selected strategy:
+
+```python
+strategy = builder.prepare_backend()
+constraint = builder.prepare_constraint()
+regularizer = builder.prepare_regularizer()
+callbacks = builder.prepare_callbacks()
+```
+
+`prepare_constraint()` recompiles the named rules and updates the result
+container's mask when that container is available.
+
+`prepare_callbacks()` stores a copy of the configured callback sequence;
+backend-native callback resolution occurs in the backend construction
+path.
+
+`prepare_components()` groups backend preparation, component-data
+preparation, component construction, and callback preparation.
+
+The explicit calls above illustrate the intended stage contract. In the
+current experimental commit, a remaining legacy definition overrides the
+new `prepare_regularizer()` implementation and must be removed before
+relying on the new regularizer construction path.
+
+### Configuring constraints and regularization
+
+```python
+builder = (
+    MultiTaskGrangerBuilder(backend="pytorch")
+    .data(df)
+    .variables(
+        causes=["x1", "x2", "y"],
+        effects=["y"],
+        tested_causes=["x1"],
+    )
+    .lag(LagConfiguration(max_lag=3, use_lag_zero=False))
+    .relations([
+        {
+            "cause": "x2",
+            "effect": "y",
+            "rule": {"type": "zero"},
+        },
+    ])
+    .constraint({
+        "type": "mask_and_min_abs_sum",
+        "params": {"eps": 1e-8},
+    })
+    .regularization({
+        "type": "l1",
+        "params": {"l1": 0.01},
+    })
+    .model({"epochs": 20})
+)
+```
+
+These methods store configuration; they do not construct backend component
+instances or train the model.
+
+Use `.relations([])` for no explicit named rules and
+`.regularization(None)` to disable regularization.
+
+`.constraint(None)` is not supported: the preprocessing mask must remain
+part of the constraint preparation path.
+
+Do not put `regularizer`, `regularizer_spec`, `constraint`, or
+`constraint_spec` inside `model_config`.
+
+`.relations(...)` does not read files. Use `.from_file(...)` or
+`BuilderConfigLoader.load_relations_file(...)` for external rule files.
+
+
+### Configuration changes and invalidation
+
+Configuration changes invalidate dependent runtime artifacts.
+
+- `.backend(...)` clears the selected strategy, compiled component data,
+  component instances, and working model. Prepared data is retained.
+  An existing result container is preserved, but its model snapshots
+  are cleared.
+- `.regularization(...)` clears compiled component data and component
+  instances and invalidates the working model. An existing preparation
+  result context is preserved, but model snapshots are cleared.
+- `.relations(...)` and `.constraint(...)` invalidate component and model
+  artifacts and currently discard the result container.
+- `prepare_regularizer_data()` clears the existing regularizer and
+  invalidates the working model while preserving an existing preparation
+  result context.
+- `prepare_data()` invalidates old components and creates a new result
+  container for the supplied or newly prepared data.
+
+After changing configuration, rerun the affected stages. If a setter has
+discarded the result container, rerun data preparation before fitting;
+reconstructing components alone does not recreate that container.
+
+`fit()` and `run()` execute the complete pipeline rather than resume a
+partially completed analysis.
+
+The builder configures a default `StationarityTransformer`.
+Calling `.stationarity()` stores a default transformer;
+`.stationarity(None)` disables the transformation.
+
+Hyperoptimization settings can be stored, but the standard pipeline does
+not currently execute an optimization stage.
+
+Version 2.6 remains experimental. Component import, registration, and
+construction inconsistencies must be resolved before the new workflow
+can be considered validated end to end.
 
 **When to use:**
 - Simpler, more readable configuration workflows.
@@ -298,9 +412,13 @@ print(output.p_value)
   "callbacks": [
     {"type": "early_stopping", "patience": 5}
   ],
-  "relations": {
-    "y->x1": {"zero": true}
-  },
+  "relations": [
+    {
+        "cause": "x1",
+        "effect": "y",
+        "rule": {"type": "zero"}
+    }
+  ],
   "model_config": {
     "epochs": 50,
     "learning_rate": 0.001
@@ -614,10 +732,22 @@ output = (MultiTaskGrangerBuilder(backend="pytorch")
     .variables(causes=["x1", "x2"], effects=["y"], tested_causes=["x1", "x2"])
     .lag(LagConfiguration(max_lag=5))
     .model({"epochs": 30})
-    .relations({
-    ("y", "x1"): {"zero": True},
-    ("y", "x2"): {"min_abs_sum": 0.5},
-    })
+    .relations([
+        {
+            "cause": "x1",
+            "effect": "y",
+            "rule": {"type": "zero"},
+        },
+        {
+            "cause": "x2",
+            "effect": "y",
+            "rule": {
+                "type": "min_abs_sum",
+                "params": {"value": 0.5},
+            },
+        },
+    ])
+    .constraint("mask_and_min_abs_sum")
     .fit()
 )
 

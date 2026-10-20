@@ -23,23 +23,88 @@ Useful aliases:
 
 - TensorFlow: `tensorflow` / `tf` / `keras`
 - PyTorch: `pytorch` / `torch`
-- Scikit/Numpy: `sklearn` / `scikit` / `scikit-learn`
+- Scikit: `sklearn` / `scikit` / `scikit-learn`
 
 ## 2. Create Components Using Strategy
 
-### Regularizer from dict
+### Regularizer from a selector and prepared data
+
+Backend strategies receive a selector separately from regularizer data.
+Do not pass a raw parameter dictionary directly to
+`build_regularizer(...)`.
 
 ```python
-regularizer = strategy.build_regularizer({"type": "l1", "l1": 0.01})
-```
+import numpy as np
 
-### Constraint from dict
+from enhanced_granger_analysis.core.components.regularizer_parsing import (
+    parse_regularizer_spec,
+)
+from enhanced_granger_analysis.core.components.regularizer_preparation import (
+    prepare_regularization_layout,
+    prepare_regularizer_data,
+)
 
-```python
-constraint = strategy.build_constraint(
-    {"type": "mask", "mask": [[1, 1, 0], [1, 0, 0]]}
+layout = prepare_regularization_layout(
+    cause_slices={
+        "x1": slice(0, 2),
+        "x2": slice(2, 4),
+    },
+    output_names=["y"],
+    feature_lags=np.array(, dtype=np.int64),[1][2]
+    base_mask=np.ones((1, 4), dtype=bool),
+)
+
+spec = parse_regularizer_spec({
+    "type": "l1",
+    "params": {"l1": 0.01},
+})
+
+data = prepare_regularizer_data(layout=layout, spec=spec)
+
+regularizer = strategy.build_regularizer(
+    spec.selector,
+    data=data,
 )
 ```
+
+`strategy.build_regularizer(None)` disables regularization.
+Non-disabled built-in regularizers require prepared data.
+
+### Constraint from a specification and prepared data
+
+```python
+from enhanced_granger_analysis.core.components.constraint_parsing import (
+    parse_relations_spec,
+)
+from enhanced_granger_analysis.core.components.constraint_preparation import (
+    prepare_constraint_data,
+)
+
+relations = parse_relations_spec([
+    {
+        "cause": "x1",
+        "effect": "y",
+        "rule": {"type": "zero"},
+    },
+])
+
+data = prepare_constraint_data(
+    relations,
+    cause_slices=layout.cause_slices,
+    output_names=layout.output_names,
+    n_features=layout.n_features,
+    base_mask=layout.base_mask,
+)
+
+constraint = strategy.build_constraint(
+    "mask_and_min_abs_sum",
+    data=data,
+)
+```
+
+These examples describe the version 2.6 construction interface.
+Current backend import and construction defects must be resolved before
+using them as end-to-end execution examples.
 
 ### Callbacks from dict list
 
@@ -67,9 +132,6 @@ You can use `resolve_...` and `build_...` methods as a practical validation step
 Simple validation examples:
 
 ```python
-# Validates regularizer spec for selected backend
-strategy.build_regularizer({"type": "l1", "l1": 0.01})
-
 # Validates callback specs for selected backend
 strategy.resolve_callbacks([
     {"type": "early_stopping", "patience": 5}
@@ -86,6 +148,17 @@ mixed_callbacks = strategy.resolve_callbacks([
     EarlyStoppingCallback(patience=6),
 ])
 ```
+
+Constraint and regularizer validation is staged:
+
+1. Parse the user specification.
+2. Validate and prepare layout-dependent data.
+3. Resolve the selected backend class.
+4. Construct the component and validate implementation-specific parameters.
+
+Registry resolution alone does not construct the component or validate
+every constructor parameter. Successful component construction does not
+establish that training or serialization works for the complete model.
 
 ## 4. Build Model Using Components
 
@@ -126,25 +199,19 @@ This extension mechanism is not a general cross-backend model registry (maybe ad
 Check the selected strategy's accepted `model` or `model_type` configuration
 before using a custom subclass.
 
-## 6. Build Constraint from Relation Mapping
+## 6. Compile Named Relations Before Backend Construction
 
-Use backend-native conversion from relation rules:
+The former `build_constraint_from_relations(...)` strategy method has been
+removed.
 
-```python
-constraint = strategy.build_constraint_from_relations(
-    relations={("y1", "x1"): 0, ("y1", "x2"): 1.0},
-    predictor_names=["x1", "x2"],
-    output_names=["y1"],
-    col_offsets=[0, 3],
-    n_features=6,
-    base_mask=None,
-)
-```
-Positional offsets in this strategy-level interface are distinct from the
-public `PreparedData.cause_slices` mapping (were available in older implementation).
+Use `parse_relations_spec(...)`, then `prepare_constraint_data(...)`,
+then `strategy.build_constraint(spec, data=...)`.
 
-When integrating prepared data, derive offsets from named slices in the
-effective input order rather than from the order of tested causes.
+The preparation stage uses named `cause_slices` and effective output
+ordering. It does not require callers to reconstruct `col_offsets`.
+
+The builder exposes the same separation through
+`prepare_constraint_data()` and `prepare_constraint()`.
 
 ## 7. How to Add New Components
 
@@ -154,7 +221,7 @@ Use the interfaces accepted by the selected library strategy.
 
 ### Callbacks
 
-For the native PyTorch and scikit/numpy implementations, follow the callback
+For the native PyTorch and Scikit implementations, follow the callback
 interface used by their models.
 
 For the Keras-based implementation, use callbacks compatible with the Keras
@@ -168,13 +235,40 @@ component should be available through configuration files.
 
 ### Constraints and regularizers
 
-Implement the interface required by the selected model and loader.
+Implement a concrete subclass of the selected backend's library base
+class and register it through that backend's component registry.
 
-For Keras-based components, use the Keras constraint and regularizer APIs.
-Avoid introducing a dependency on `tf.keras` unless that dependency is
-intentional and documented.
+Package locations:
 
-Register component names and aliases in the corresponding loader.
+- `backends.scikit.constraints` and `backends.scikit.regularizers`;
+- `backends.pytorch.constraints` and `backends.pytorch.regularizers`;
+- `backends.keras.constraints` and `backends.keras.regularizers`.
+
+Constraint implementations provide `enforce(...)` and
+`is_satisfied(...)`. Their constructors receive `PreparedConstraintData`
+and any implementation-specific parameters selected through
+`constraint_spec.params`.
+
+Regularizer constructors receive `PreparedRegularizerData`.
+User parameters are available through `data.params`.
+
+For custom regularizers:
+
+- Scikit subclasses implement `_value_and_grad(...)`, returning a scalar
+  penalty and a gradient matching the coefficient shape.
+- PyTorch subclasses implement `forward(...)`, returning a tensor penalty.
+- Keras subclasses implement `__call__(...)`, returning a backend-native
+  penalty.
+
+Register classes using `register_constraint(...)` or
+`register_regularizer(...)` from the corresponding backend registry.
+The first registered name is canonical; additional names are aliases.
+
+Registries reject abstract classes, incompatible subclasses, instances,
+and factory functions.
+
+Additional serialized constructor parameters must be included in the
+component's configuration methods..
 
 ### Optimizers
 

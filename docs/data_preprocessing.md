@@ -92,10 +92,16 @@ preparer = DataPreparer(
 )
 ```
 
-The analysis builder currently behaves differently:
-`.stationarity(None)` creates a default transformer.
+The analysis builder stores a default `StationarityTransformer`.
+Calling `.stationarity()` retains an enabled default transformation.
 
-To disable stationarity through the builder configuration:
+To disable stationarity explicitly:
+
+```python
+builder.stationarity(None)
+```
+
+The equivalent configuration setting is:
 
 ```python
 builder.from_config({"stationarity_transformer": None})
@@ -237,7 +243,7 @@ engine = LagEngine(
     config=LagConfiguration(max_lag=12, use_lag_zero=False),
     selector=selector,
 )
-X_raw, y_raw, block_boundaries = engine.prepare(
+X_raw, y_raw, block_boundaries, feature_lags = engine.prepare(
     data_stationary,
     causes=["x1", "x2"],
     effects=["x1", "x2"],
@@ -249,13 +255,52 @@ y_scaler = StandardScaler()
 X_scaled = x_scaler.fit_transform(X_raw)
 y_scaled = y_scaler.fit_transform(y_raw)
 
-print(X_scaled.shape, y_scaled.shape, block_boundaries)
+print(X_scaled.shape, y_scaled.shape)
+print(block_boundaries)
+print(feature_lags)
 ```
-
-`LagEngine.prepare()` returns block boundaries with `n_causes + 1` entries:
-`block_boundaries[i]:block_boundaries[i + 1]` is the feature block for the
-`i`-th cause. The higher-level `PreparedData` exposes the preferred named
+`LagEngine.prepare()` returns four values:
+- `X_scaled`: scaled features.
+- `y_scaled`: scaled targets.
+- `block_boundaries`: block boundaries with `n_causes+1` elment (`block_boundaries[i]:block_boundaries[i + 1]` is the feature block for the
+`i`-th cause). The higher-level `PreparedData` exposes the preferred named
 mapping, `cause_slices`, so callers do not need to depend on cause order.
+- `feature_lags`: one-dimensional integer array with one entry per input
+column. Each entry records the actual lag represented by that column.
+
+For example:
+
+```python
+cause_slices = {
+    "x1": slice(0, 2),
+    "x2": slice(2, 5),
+}
+
+feature_lags = [1, 2, 0, 1, 2]
+```
+Here `x1` contributes lags 1 and 2, while `x2` contributes lags 0, 1, and 2.
+Lag values are not positions within the cause block.
+
+The preparation pipeline stores a copy as `PreparedData.feature_lags`.
+Lag-dependent regularizer preparation uses this metadata directly.
+
+Code unpacking the former three-value return must be updated.
+
+### Feature-lag metadata
+
+`feature_lags` records the actual lag of each column in `X_raw` and
+`X_scaled`.
+
+It must have shape `(n_features,)`, with entries matching the exact feature
+column order.
+
+Externally supplied prepared data used with regularization must include
+valid `feature_lags` consistent with `cause_slices`, `base_mask`, and the
+input dimensions.
+
+The empty default field is not a substitute for valid feature metadata.
+Changing builder lag settings does not repair or regenerate metadata in an
+externally supplied `PreparedData` object.
 
 ## Stationarity
 

@@ -2,7 +2,10 @@
 
 This document explains how to load a builder configuration file and pass it into the builder/orchestrator pipeline.
 
-For the generic component spec format used by callbacks, regularizers, and constraints, see [components loading](components_loading.md).
+For component-family-specific formats, see
+[Components Loading](components_loading.md).
+Constraints and regularizers use dedicated parsers and registries;
+their accepted formats differ from callback and optimizer loader formats.
 
 ## What the loader does
 
@@ -14,10 +17,11 @@ It can:
 - normalize relation constraints,
 - validate and normalize backend aliases,
 - preserve backend-specific callback specs for later resolution,
-- normalize relation-based constraint declarations into the `relations` mapping,
-- move backend defaults from a backend spec into `model_config` when present,
-- normalize `initializer` strings to initializer classes (e.g., `"ols"`, `"zeros"`, `"random_normal"`),
-- normalize `compute_device` strings to backend-specific device configuration.
+- parse canonical relation declarations into `RelationConstraintsSpec`;
+- resolve relation-file paths relative to the configuration file;
+- preserve initializer specifications for resolution by the builder;
+- leave backend-native constraint and regularizer construction to the
+component preparation and backend construction stages.
 
 The loader also accepts `relations` as a file path when you want to keep constraint rules in a separate JSON/YAML file.
 
@@ -111,26 +115,44 @@ The value can also be passed as a Python class object when working directly from
 {
   "backend": "tensorflow",
   "reuse_data": true,
+  "causes": ["x1", "x2", "y"],
+  "effects": ["y"],
+  "tested_causes": ["x1", "x2"],
   "lag_config": {
-    "max_lag": 8,
+    "max_lag": 3,
     "use_lag_zero": false
   },
-  "callbacks": [
-    {
-      "type": "early_stopping",
-      "monitor": "loss",
-      "patience": 5
-    }
-  ],
-  "relations": {
-    "y->x1": {
-      "zero": true
-    },
-    "y->x2": {
-      "min_abs_sum": 0.2
+  "constraint_spec": {
+    "type": "mask_and_min_abs_sum",
+    "params": {
+      "eps": 1e-8
     }
   },
-  "model": "TensorFlowGrangerModel",
+  "relations": [
+    {
+      "cause": "x1",
+      "effect": "y",
+      "rule": {
+        "type": "zero"
+      }
+    },
+    {
+      "cause": "x2",
+      "effect": "y",
+      "rule": {
+        "type": "min_abs_sum",
+        "params": {
+          "value": 0.2
+        }
+      }
+    }
+  ],
+  "regularizer_spec": {
+    "type": "l1",
+    "params": {
+      "l1": 0.01
+    }
+  },
   "model_config": {
     "epochs": 50,
     "batch_size": 32,
@@ -139,7 +161,13 @@ The value can also be passed as a Python class object when working directly from
 }
 ```
 
-Or keep the relation rules in a separate file and point `relations` at it:
+The top-level `regularizer` field is no longer supported.
+
+Constraint and regularizer configuration must remain outside
+`model_config`. An explicit `constraint_spec: null` is invalid;
+`regularizer_spec: null` disables regularization.
+
+To keep relation rules in a separate file:
 
 ```json
 {
@@ -147,7 +175,12 @@ Or keep the relation rules in a separate file and point `relations` at it:
 }
 ```
 
-The referenced file may contain either the list-of-objects form or the mapping form.
+The referenced file must contain the canonical declaration list itself,
+without a `rules` or `relations` wrapper.
+
+Relative paths are resolved against the configuration file location,
+not the process working directory. Legacy relation mappings and
+`{"path": "..."}` references are not supported by the new path.
 
 ## Optimizer and training parameter control
 You can tune optimizer and training behavior directly in the builder config under `model_config` (or, for backward compatibility, by top-level keys such as `learning_rate`). Supported patterns are:
@@ -246,7 +279,7 @@ Important fields:
 
 - `reuse_data` keeps prepared preprocessing artifacts available across compatible cases. It is a top-level flag copied into each expanded config, not a `sweep.param_names` target.
 - `compute_device` may be `cpu`, `gpu`, or `auto`.
-- `base_config.relations` may be an inline mapping/list or a path to a JSON/YAML file.
+- `base_config.relations` may be an inline canonical declaration list or a path to a JSON/YAML file containing that list.
 - `sweep.param_names` uses dotted keys for nested values.
 - `sweep.cases` must match the order and length of `param_names`.
 
@@ -295,10 +328,27 @@ You can sweep these fields:
   - `null` is accepted and means no custom weight initialization; each backend uses its defaults (PyTorch: Kaiming, TensorFlow: Glorot, scikit-learn: zeros).
 
 - `relations`
-  - Supported: yes.
-  - You can provide a full relation object/list inline or point `relations` to a JSON/YAML file path.
-  - The file is resolved relative to the group-config file.
-  - Nested per-relation dotted edits are practical only when `relations` is represented as a mapping of mappings.
+  - Replace the complete canonical declaration list per case, or supply
+    a relation-file path handled by the file-loading workflow.
+  - Dotted updates through relation-list indices are not supported.
+  - Legacy relation mappings are not a supported workaround.
+
+- regularizer type and presence
+  - Sweep `regularizer_spec`, not `regularizer`.
+  - Set `regularizer_spec` to `null` to disable regularization.
+  - Built-in names are `l1` and `lag_dependent_l1`.
+
+- regularizer parameters
+  - Use mapping-form specifications with nested `params`.
+  - Example paths: `regularizer_spec.type`,
+    `regularizer_spec.params.l1`,
+    `regularizer_spec.params.relative_lag_indexing`.
+
+- constraint implementation and parameters
+  - Use `constraint_spec` or mapping-form paths such as
+    `constraint_spec.type` and `constraint_spec.params.eps`.
+  - Do not sweep prepared masks or indexed rules through
+    `constraint_spec.params`.
 
 - `model_config` parameters
   - Supported: yes.
@@ -321,13 +371,6 @@ You can sweep these fields:
   - Works via dotted keys only when callbacks are modeled as named mapping nodes (not as list items).
   - In common list form, use full-list replacement per case instead of trying list-index paths.
 
-- regularizer type and presence
-  - Supported: yes.
-  - You can sweep `regularizer` / `regularizer_spec` and set them to `null` to disable regularization in a case.
-  - Supported regularizer types: `l1`, `lag_dependent_l1`.
-
-- regularizer parameters
-  - Supported: yes, for object form (for example `regularizer.type`, `regularizer.l1`).
 
 ### Not directly supported (or limited)
 
@@ -361,31 +404,44 @@ Then pass the normalized mapping to `MultitaskGrangerBuilder.from_config(...)`.
 
 ## Constraints
 
-Constraints for Granger analysis are specified via `relations`. This is a mapping of `(effect, cause)` pairs to constraint rules, and the loader also accepts JSON-friendly string notation or a list of objects.
-
-Examples:
-
-```json
-{
-  "relations": {
-    "y->x1": { "zero": true },
-    "y->x2": { "min_abs_sum": 0.2 }
-  }
-}
-```
-
-and:
+`relations` describes named rules, while `constraint_spec` selects the
+backend implementation enforcing the compiled data.
 
 ```json
 {
+  "constraint_spec": "mask_and_min_abs_sum",
   "relations": [
-    { "effect": "y", "cause": "x1", "zero": true },
-    { "effect": "y", "cause": "x2", "min_abs_sum": 0.2 }
+    {
+      "cause": "x1",
+      "effect": "y",
+      "rule": {"type": "zero"}
+    },
+    {
+      "cause": "x2",
+      "effect": "y",
+      "rule": {
+        "type": "min_abs_sum",
+        "params": {"value": 0.2}
+      }
+    }
   ]
 }
 ```
 
-This is consistent with the description in [components loading](components_loading.md): `relations` contains the rules, and the backend strategy translates them into backend-native constraint objects.
+Use an empty list for no explicit relation rules. Omit `relations` to use
+the builder's empty default specification; do not set it to `null`.
+
+A `min_abs_sum` value of zero adds no lower-bound restriction. It does not
+mask the relation.
+
+Named rules are compiled against effective variables after preprocessing.
+Unknown effective causes or effects are rejected.
+
+The preprocessing mask is preserved. A positive minimum-sum rule with no
+remaining active coefficients raises an error in the builder path.
+
+Relation-file loading is handled by `BuilderConfigLoader`, not by
+`.relations(...)` or `.from_config(...)`.
 
 ## `reuse_data`
 

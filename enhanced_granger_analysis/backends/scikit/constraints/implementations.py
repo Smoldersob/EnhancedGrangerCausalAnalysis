@@ -3,14 +3,14 @@ from __future__ import annotations
 import numpy as np
 from numpy.typing import NDArray
 
-from .base import ScikitConstraint
+from .base import BaseScikitConstraint
 from .registry import register_constraint 
 from ....core.components.constraint_spec import PreparedConstraintData
 from ....core.exceptions import ConstraintConfigurationError
 
 
 @register_constraint("MaskConstraint", "mask_constraint", "mask")
-class MaskConstraint(ScikitConstraint):
+class MaskConstraint(BaseScikitConstraint):
 	"""Hard mask constraint for numpy/scikit coefficient matrices.
 
 	Expected coefficient shape: (n_outputs, n_features).
@@ -40,7 +40,7 @@ class MaskConstraint(ScikitConstraint):
 		return bool(np.allclose(w * (1.0 - self.mask), 0.0))
 
 @register_constraint("MaskAndMinAbsSumConstraint","mask_and_min_abs_sum_constraint","mask_and_min_abs_sum")
-class MaskAndMinAbsSumConstraint(ScikitConstraint):
+class MaskAndMinAbsSumConstraint(BaseScikitConstraint):
 	"""Mask + min abs-sum constraint for numpy/scikit coefficient matrices."""
 	def __init__(
 		self,
