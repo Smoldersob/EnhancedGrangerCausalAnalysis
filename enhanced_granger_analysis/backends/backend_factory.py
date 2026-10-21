@@ -6,24 +6,33 @@ from typing import Dict, List, Optional, Set
 from .base_backend import BackendStrategy
 from ..core.exceptions import BackendNotAvailableError, BackendSelectionError
 
-try:
-	from .keras import KerasBackendStrategy
-except Exception as e:  # pragma: no cover - optional backend module
-	print(f"Error importing KerasBackendStrategy: {e}")
-	KerasBackendStrategy = None  # type: ignore[assignment]
 
-try:
-	from .pytorch import PyTorchBackendStrategy
-except Exception as e:  # pragma: no cover - optional backend module
-	print(f"Error importing PyTorchBackendStrategy: {e}")
-	PyTorchBackendStrategy = None  # type: ignore[assignment]
+if importlib.util.find_spec("keras") is not None:
+	try:
+		from . import keras as  keras_backend
+	except Exception as e:  # pragma: no cover - optional backend module
+		print(f"Error importing keras backend: {e}")
+		keras_backend = None  # type: ignore[assignment]
+else:
+	keras_backend = None  # type: ignore[assignment]
 
-try:
-	from .scikit.scikit_backend import ScikitBackendStrategy
-except Exception as e:  # pragma: no cover - optional backend module
-	print(f"Error importing ScikitBackendStrategy: {e}")
-	ScikitBackendStrategy = None  # type: ignore[assignment]
+if importlib.util.find_spec("torch") is not None:
+	try:
+		from . import pytorch as pytorch_backend
+	except Exception as e:  # pragma: no cover - optional backend module
+		print(f"Error importing PyTorch backend: {e}")
+		pytorch_backend = None  # type: ignore[assignment]
+else:
+	pytorch_backend = None  # type: ignore[assignment]
 
+if importlib.util.find_spec("sklearn") is not None:
+	try:
+		from . import scikit as scikit_backend
+	except Exception as e:  # pragma: no cover - optional backend module
+		print(f"Error importing Scikit backend: {e}")
+		scikit_backend = None  # type: ignore[assignment]
+else:
+	scikit_backend = None  # type: ignore[assignment]
 
 class BackendFactory:
 	"""
@@ -48,27 +57,27 @@ class BackendFactory:
 		"scikit": "sklearn",
 		"scikit-learn": "sklearn",
 	}
-	if importlib.util.find_spec("keras") is not None and KerasBackendStrategy is not None:
+	if keras_backend is not None:
 		_BACKEND_REGISTRY.update(
 			{
-				"tensorflow": KerasBackendStrategy,
-				"tf": KerasBackendStrategy,
-				"keras": KerasBackendStrategy,
+				"tensorflow": keras_backend.KerasBackendStrategy,
+				"tf": keras_backend.KerasBackendStrategy,
+				"keras": keras_backend.KerasBackendStrategy,
 			}
 		)
-	if importlib.util.find_spec("torch") is not None and PyTorchBackendStrategy is not None:
+	if pytorch_backend is not None:
 		_BACKEND_REGISTRY.update(
 			{
-				"pytorch": PyTorchBackendStrategy,
-				"torch": PyTorchBackendStrategy,
+				"pytorch": pytorch_backend.PyTorchBackendStrategy,
+				"torch": pytorch_backend.PyTorchBackendStrategy,
 			}
 		)
-	if importlib.util.find_spec("sklearn") is not None and ScikitBackendStrategy is not None:
+	if scikit_backend is not None:
 		_BACKEND_REGISTRY.update(
 			{
-				"sklearn": ScikitBackendStrategy,
-				"scikit": ScikitBackendStrategy,
-				"scikit-learn": ScikitBackendStrategy,
+				"sklearn": scikit_backend.ScikitBackendStrategy,
+				"scikit": scikit_backend.ScikitBackendStrategy,
+				"scikit-learn": scikit_backend.ScikitBackendStrategy,
 			}
 		)
 

@@ -4,7 +4,7 @@ EnhancedGrangerCausalAnalysis is a compact framework for advanced Granger-causal
 
 It extends classic pair-wise Granger tests with configurable multitask modeling, backend abstraction, constraint-aware training, and config-driven experiment sweeps.
 
-Current package version: `2.6`
+Current package version: `2.7`
 
 ## Architecture at a glance
 

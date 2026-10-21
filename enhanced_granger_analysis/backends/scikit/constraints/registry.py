@@ -14,7 +14,7 @@ ConstraintClass = TypeVar(
 
 _CONSTRAINTS = ConstraintClassRegistry[BaseScikitConstraint](
     base_class=BaseScikitConstraint,
-    label="NumPy constraint",
+    label="Scikit-learn constraint",
 )
 
 
@@ -39,5 +39,9 @@ def available_constraints(
 
 def resolve_constraint_spec(
     spec: Any,
-) -> tuple[type[BaseScikitConstraint], dict[str, Any]]:
+) -> (
+    tuple[type[BaseScikitConstraint], dict[str, Any]]
+    | BaseScikitConstraint
+    | None
+):
     return _CONSTRAINTS.resolve_spec(spec)

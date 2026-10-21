@@ -5,7 +5,7 @@ import inspect
 from collections.abc import Callable, Mapping, Sequence
 from typing import Any
 
-from ...core.exceptions import ConstraintConfigurationError
+from ..exceptions import ConstraintConfigurationError
 
 
 def validate_run_name(run_name: str) -> None:

@@ -15,7 +15,7 @@ RegularizerClass = TypeVar(
 
 _REGULARIZERS = RegularizerClassRegistry[BaseScikitRegularizer](
     base_class=BaseScikitRegularizer,
-    label="NumPy regularizer",
+    label="Scikit-learn regularizer",
 )
 
 
@@ -44,6 +44,10 @@ def available_regularizers(
 
 def resolve_regularizer_spec(
     spec: Any,
-) -> tuple[type[BaseScikitRegularizer], dict[str, Any]] | None:
+) -> (
+    tuple[type[BaseScikitRegularizer], dict[str, Any]]
+    | BaseScikitRegularizer
+    | None
+):
     """Resolve a raw or parsed specification; None disables regularization."""
     return _REGULARIZERS.resolve_spec(spec)

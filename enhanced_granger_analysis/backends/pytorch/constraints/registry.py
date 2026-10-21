@@ -39,5 +39,9 @@ def available_constraints(
 
 def resolve_constraint_spec(
     spec: Any,
-) -> tuple[type[BasePyTorchConstraint], dict[str, Any]]:
+) -> (
+    tuple[type[BasePyTorchConstraint], dict[str, Any]]
+    | BasePyTorchConstraint
+    | None
+):
     return _CONSTRAINTS.resolve_spec(spec)
