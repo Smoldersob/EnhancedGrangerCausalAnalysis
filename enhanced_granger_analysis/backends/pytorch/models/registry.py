@@ -15,10 +15,10 @@ _MODELS = ModelClassRegistry[GrangerModelProtocol](
 )
 
 
+
 def register_model(
     *names: str,
 ) -> Callable[[ModelClass], ModelClass]:
-    """Register a class; the first name is canonical."""
     return _MODELS.register(*names)
 
 
@@ -37,11 +37,35 @@ def available_models(
     )
 
 
+
+
+def _require_torch_model(
+    model: GrangerModelProtocol,
+) -> GrangerModelProtocol:
+    if model.backend != "pytorch" and model.backend != "torch":
+        raise ValueError(
+            f"Expected a PyTorch model, got backend {model.backend!r}."
+        )
+
+    return model
+
+
+def validate_model_instance(
+    model: Any,
+) -> GrangerModelProtocol:
+    validated = _MODELS.validate_instance(model)
+    return _require_torch_model(validated)
+
+
 def resolve_model_spec(
     spec: Any,
-) -> (
-    tuple[type[GrangerModelProtocol], dict[str, Any]]
-    | GrangerModelProtocol
-    | None
-):
-    return _MODELS.resolve_spec(spec)
+) -> tuple[
+    type[GrangerModelProtocol] | GrangerModelProtocol | None,
+    dict[str, Any],
+]:
+    target, params = _MODELS.resolve_spec(spec)
+
+    if target is not None and not isinstance(target, type):
+        _require_torch_model(target)
+
+    return target, params

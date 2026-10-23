@@ -1,13 +1,7 @@
-from .resolver import (
-    OptimizerFactory,
-    ResolvedOptimizer,
-    resolve_optimizer,
-    validate_optimizer_binding,
-)
+from .adapter import PyTorchOptimizerAdapter
+from .resolver import resolve_optimizer
 
 __all__ = [
-    "OptimizerFactory",
-    "ResolvedOptimizer",
+    "PyTorchOptimizerAdapter",
     "resolve_optimizer",
-    "validate_optimizer_binding",
 ]

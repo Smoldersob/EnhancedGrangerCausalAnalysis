@@ -3,7 +3,7 @@ from __future__ import annotations
 from collections.abc import Callable
 from typing import Any, TypeVar
 
-from ....core.components.model_registry import ModelClassRegistry
+from ....core.models.model_registry import ModelClassRegistry
 from ....core.models.protocol import GrangerModelProtocol
 
 
@@ -18,7 +18,6 @@ _MODELS = ModelClassRegistry[GrangerModelProtocol](
 def register_model(
     *names: str,
 ) -> Callable[[ModelClass], ModelClass]:
-    """Register a class; the first name is canonical."""
     return _MODELS.register(*names)
 
 
@@ -37,11 +36,34 @@ def available_models(
     )
 
 
+
+def _require_sklearn_model(
+    model: GrangerModelProtocol,
+) -> GrangerModelProtocol:
+    if model.backend != "scikit-learn" and model.backend != "sklearn":
+        raise ValueError(
+            f"Expected a Scikit-learn model, got backend {model.backend!r}."
+        )
+
+    return model
+
+
+def validate_model_instance(
+    model: Any,
+) -> GrangerModelProtocol:
+    validated = _MODELS.validate_instance(model)
+    return _require_sklearn_model(validated)
+
+
 def resolve_model_spec(
     spec: Any,
-) -> (
-    tuple[type[GrangerModelProtocol], dict[str, Any]]
-    | GrangerModelProtocol
-    | None
-):
-    return _MODELS.resolve_spec(spec)
+) -> tuple[
+    type[GrangerModelProtocol] | GrangerModelProtocol | None,
+    dict[str, Any],
+]:
+    target, params = _MODELS.resolve_spec(spec)
+
+    if target is not None and not isinstance(target, type):
+        _require_sklearn_model(target)
+
+    return target, params

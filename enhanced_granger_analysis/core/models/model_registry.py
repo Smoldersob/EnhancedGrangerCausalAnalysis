@@ -138,13 +138,36 @@ class ModelClassRegistry(Generic[ModelT]):
             include_aliases=include_aliases,
         )
 
+    def validate_instance(self, instance: Any) -> ModelT:
+        """Validate an existing model without resolving a specification.
+
+        Checks required members, not complete signature/type compatibility.
+        """
+        if isinstance(instance, type):
+            raise TypeError(
+                "Expected a model instance, not a model class."
+            )
+
+        return self._validate_instance(instance)
+
+
     def resolve_spec(
         self,
         spec: Any,
-    ) -> tuple[type[ModelT], dict[str, Any]] | ModelT | None:
-        """Resolve None, a name, mapping, class or existing model."""
+    ) -> tuple[type[ModelT] | ModelT | None, dict[str, Any]]:
+        """Resolve a specification without constructing a model.
+
+        Always returns (target, params).
+
+        target:
+            None, a concrete model class or a validated model instance.
+
+        params:
+            Constructor parameters for a class.
+            Empty for None and existing instances.
+        """
         if spec is None:
-            return None
+            return None, {}
 
         if isinstance(spec, str):
             return self.get_class(spec), {}
@@ -154,7 +177,7 @@ class ModelClassRegistry(Generic[ModelT]):
 
         if isinstance(spec, Mapping):
             if any(not isinstance(key, str) for key in spec):
-                raise ValueError(
+                raise TypeError(
                     "Model specification keys must be strings."
                 )
 
@@ -184,4 +207,4 @@ class ModelClassRegistry(Generic[ModelT]):
 
             return self.get_class(name), dict(params)
 
-        return self._validate_instance(spec)
+        return self.validate_instance(spec), {}

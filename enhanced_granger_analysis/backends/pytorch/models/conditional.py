@@ -31,11 +31,8 @@ from ....core.exceptions import (
 
 
 @register_model(
-    "linear",
-    "default",
-    "base",
-    "standard",
-    "granger",
+    "conditional",
+    "conditional_linear",
 )
 class PyTorchGrangerModel:
 	"""PyTorch implementation of Granger model with variable masking and linear coefficients."""

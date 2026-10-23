@@ -30,7 +30,6 @@ from .registry import register_model
 
 
 @register_model(
-    "linear",
     "conditional",
     "conditional_linear",
 )
