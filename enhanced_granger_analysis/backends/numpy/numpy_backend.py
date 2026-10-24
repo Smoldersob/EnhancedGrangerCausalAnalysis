@@ -11,10 +11,10 @@ from ...core.exceptions import BackendNotAvailableError
 from ...core.models.protocol import GrangerModelProtocol
 
 
-class ScikitBackendStrategy(BackendStrategy):
-    """Construct scikit backend components and model adapters."""
+class NumpyBackendStrategy(BackendStrategy):
+    """Construct numpy backend components and model adapters."""
 
-    name = "scikit"
+    name = "numpy"
 
     _component_names = frozenset({
         "callbacks",
@@ -29,25 +29,25 @@ class ScikitBackendStrategy(BackendStrategy):
 
     def is_available(self) -> bool:
         try:
-            if importlib.util.find_spec("sklearn") is None:
+            if importlib.util.find_spec("numpy") is None:
                 return False
 
-            import sklearn  # noqa: F401
+            import numpy  # noqa: F401
 
         except ImportError:
             return False
 
         return True
 
-    def _require_sklearn(self) -> Any:
+    def _require_numpy(self) -> Any:
         try:
-            import sklearn
+            import numpy
         except ImportError as exc:
             raise BackendNotAvailableError(
-                "scikit-learn is unavailable."
+                "numpy is unavailable."
             ) from exc
 
-        return sklearn
+        return numpy
 
     def build_optimizer(
         self,
@@ -56,7 +56,7 @@ class ScikitBackendStrategy(BackendStrategy):
     ) -> None:
         if context:
             raise TypeError(
-                "Scikit optimizer construction does not accept context: "
+                "Numpy optimizer construction does not accept context: "
                 + ", ".join(sorted(context))
             )
 
@@ -66,7 +66,7 @@ class ScikitBackendStrategy(BackendStrategy):
 
         if optimizer is not None:
             raise TypeError(
-                "Scikit optimizer resolver must return None."
+                "Numpy optimizer resolver must return None."
             )
 
         self._log_component("optimizer", optimizer)
@@ -79,7 +79,7 @@ class ScikitBackendStrategy(BackendStrategy):
 
         if loss is not None:
             raise TypeError(
-                "Scikit loss resolver must return None."
+                "Numpy loss resolver must return None."
             )
 
         self._log_component("loss", loss)
@@ -89,7 +89,7 @@ class ScikitBackendStrategy(BackendStrategy):
         if specs is None:
             return []
 
-        self._require_sklearn()
+        self._require_numpy()
 
         from . import callbacks as _callbacks  # noqa: F401
         from .callbacks.base import Callback
@@ -135,11 +135,11 @@ class ScikitBackendStrategy(BackendStrategy):
         if spec is None:
             return None
 
-        self._require_sklearn()
+        self._require_numpy()
 
-        from .regularizers.base import BaseScikitRegularizer
+        from .regularizers.base import BaseNumpyRegularizer
 
-        if isinstance(spec, BaseScikitRegularizer):
+        if isinstance(spec, BaseNumpyRegularizer):
             self._log_component("regularizer", spec)
             return spec
 
@@ -159,7 +159,7 @@ class ScikitBackendStrategy(BackendStrategy):
 
         regularizer = regularizer_class(data=data)
 
-        if not isinstance(regularizer, BaseScikitRegularizer):
+        if not isinstance(regularizer, BaseNumpyRegularizer):
             raise TypeError(
                 "Regularizer construction returned an invalid object."
             )
@@ -176,11 +176,11 @@ class ScikitBackendStrategy(BackendStrategy):
         if spec is None:
             return None
 
-        self._require_sklearn()
+        self._require_numpy()
 
-        from .constraints.base import BaseScikitConstraint
+        from .constraints.base import BaseNumpyConstraint
 
-        if isinstance(spec, BaseScikitConstraint):
+        if isinstance(spec, BaseNumpyConstraint):
             self._log_component("constraint", spec)
             return spec
 
@@ -199,7 +199,7 @@ class ScikitBackendStrategy(BackendStrategy):
             **params,
         )
 
-        if not isinstance(constraint, BaseScikitConstraint):
+        if not isinstance(constraint, BaseNumpyConstraint):
             raise TypeError(
                 "Constraint construction returned an invalid object."
             )
@@ -214,7 +214,7 @@ class ScikitBackendStrategy(BackendStrategy):
         components: Mapping[str, Any] | None = None,
         config: Mapping[str, Any] | None = None,
     ) -> GrangerModelProtocol:
-        self._require_sklearn()
+        self._require_numpy()
 
         from .models.registry import (
             resolve_model_spec,

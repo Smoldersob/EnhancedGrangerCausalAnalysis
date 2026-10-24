@@ -11,7 +11,7 @@ ModelClass = TypeVar("ModelClass", bound=type)
 
 
 _MODELS = ModelClassRegistry[GrangerModelProtocol](
-    label="scikit-learn model",
+    label="Numpy model",
 )
 
 
@@ -37,12 +37,12 @@ def available_models(
 
 
 
-def _require_sklearn_model(
+def _require_numpy_model(
     model: GrangerModelProtocol,
 ) -> GrangerModelProtocol:
-    if model.backend != "scikit-learn" and model.backend != "sklearn":
+    if model.backend != "numpy":
         raise ValueError(
-            f"Expected a Scikit-learn model, got backend {model.backend!r}."
+            f"Expected a Numpy model, got backend {model.backend!r}."
         )
 
     return model
@@ -52,7 +52,7 @@ def validate_model_instance(
     model: Any,
 ) -> GrangerModelProtocol:
     validated = _MODELS.validate_instance(model)
-    return _require_sklearn_model(validated)
+    return _require_numpy_model(validated)
 
 
 def resolve_model_spec(
@@ -64,6 +64,6 @@ def resolve_model_spec(
     target, params = _MODELS.resolve_spec(spec)
 
     if target is not None and not isinstance(target, type):
-        _require_sklearn_model(target)
+        _require_numpy_model(target)
 
     return target, params

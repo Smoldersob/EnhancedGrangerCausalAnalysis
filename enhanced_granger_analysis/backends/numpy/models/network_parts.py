@@ -4,8 +4,8 @@ from typing import Any
 
 import numpy as np
 
-from ..constraints.base import BaseScikitConstraint
-from ..regularizers.base import BaseScikitRegularizer
+from ..constraints.base import BaseNumpyConstraint
+from ..regularizers.base import BaseNumpyRegularizer
 
 
 def positive_int(value: Any, name: str) -> int:
@@ -116,8 +116,8 @@ class LinearGrangerNetwork:
         self,
         n_features: int,
         n_outputs: int,
-        constraint: BaseScikitConstraint | None = None,
-        regularizer: BaseScikitRegularizer | None = None,
+        constraint: BaseNumpyConstraint | None = None,
+        regularizer: BaseNumpyRegularizer | None = None,
         use_bias: bool = True,
     ) -> None:
         self.n_features = positive_int(n_features, "n_features")
@@ -127,17 +127,17 @@ class LinearGrangerNetwork:
             raise TypeError("use_bias must be a bool.")
 
         if constraint is not None and not isinstance(
-            constraint, BaseScikitConstraint
+            constraint, BaseNumpyConstraint
         ):
             raise TypeError(
-                "constraint must be a BaseScikitConstraint or None."
+                "constraint must be a BaseNumpyConstraint or None."
             )
 
         if regularizer is not None and not isinstance(
-            regularizer, BaseScikitRegularizer
+            regularizer, BaseNumpyRegularizer
         ):
             raise TypeError(
-                "regularizer must be a BaseScikitRegularizer or None."
+                "regularizer must be a BaseNumpyRegularizer or None."
             )
 
         shape = (self.n_outputs, self.n_features)

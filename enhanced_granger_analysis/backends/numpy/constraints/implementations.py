@@ -3,14 +3,14 @@ from __future__ import annotations
 import numpy as np
 from numpy.typing import NDArray
 
-from .base import BaseScikitConstraint
+from .base import BaseNumpyConstraint
 from .registry import register_constraint 
 from ....core.components.constraint_spec import PreparedConstraintData
 from ....core.exceptions import ConstraintConfigurationError
 
 
 @register_constraint("MaskConstraint", "mask_constraint", "mask")
-class MaskConstraint(BaseScikitConstraint):
+class MaskConstraint(BaseNumpyConstraint):
 	"""Hard mask constraint for numpy/scikit coefficient matrices.
 
 	Expected coefficient shape: (n_outputs, n_features).
@@ -38,8 +38,15 @@ class MaskConstraint(BaseScikitConstraint):
 		return bool(values.shape == self.mask.shape and np.isfinite(values).all()
 			and np.allclose(values * (1.0 - self.mask), 0.0, atol=1e-8, rtol=0.0))
 
+	def zero_only_mask(self) -> np.ndarray | None:
+		return np.array(
+			self.prepared_data.mask,
+			dtype=bool,
+			copy=True,
+		)
+
 @register_constraint("MaskAndMinAbsSumConstraint","mask_and_min_abs_sum_constraint","mask_and_min_abs_sum")
-class MaskAndMinAbsSumConstraint(BaseScikitConstraint):
+class MaskAndMinAbsSumConstraint(BaseNumpyConstraint):
 	"""Mask + min abs-sum constraint for numpy/scikit coefficient matrices."""
 	def __init__(
 		self,
@@ -101,4 +108,14 @@ class MaskAndMinAbsSumConstraint(BaseScikitConstraint):
 		return all(
 			np.sum(np.abs(values[rule.output_index, list(rule.feature_indices)])) + self.eps
 			>= rule.min_abs_sum for rule in self.rules
+		)
+
+	def zero_only_mask(self) -> np.ndarray | None:
+		if self.prepared_data.rules:
+			return None
+
+		return np.array(
+			self.prepared_data.mask,
+			dtype=bool,
+			copy=True,
 		)

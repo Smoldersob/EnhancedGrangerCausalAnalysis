@@ -4,7 +4,7 @@ from .registry import (
     register_regularizer,
     resolve_regularizer_spec,
 )
-from .base import BaseScikitRegularizer
+from .base import BaseNumpyRegularizer
 from .implementations import (
     L1Regularizer,
     LagDependentL1Regularizer,
@@ -14,7 +14,7 @@ __all__ = [
     "get_regularizer_class",
     "available_regularizers",
     "resolve_regularizer_spec",
-    "BaseScikitRegularizer",
+    "BaseNumpyRegularizer",
     "L1Regularizer",
     "LagDependentL1Regularizer",
 ]

@@ -7,13 +7,13 @@ from .registry import (
 )
 from .network_parts import LinearGrangerNetwork, NumpyFeatureMask
 from .conditional import (
-    ScikitConditionalAdapter,
-    ScikitConstrainedGrangerModel,
+    NumpyConditionalAdapter,
+    NumpyConstrainedGrangerModel,
 )
 
 __all__ = [
-    "ScikitConditionalAdapter",
-    "ScikitConstrainedGrangerModel",
+    "NumpyConditionalAdapter",
+    "NumpyConstrainedGrangerModel",
     "LinearGrangerNetwork",
     "NumpyFeatureMask",
     "register_model",

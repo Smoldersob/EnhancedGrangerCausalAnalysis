@@ -10,7 +10,7 @@ CallbackClass = TypeVar("CallbackClass", bound=type[Callback])
 
 _CALLBACKS = CallbackClassRegistry[Callback](
     base_class=Callback,
-    label="Scikit-learn callback",
+    label="Numpy callback",
 )
 
 

@@ -15,7 +15,7 @@ from ....core.components.constraint_serialization import (
 )
 
 
-class BaseScikitConstraint(ABC):
+class BaseNumpyConstraint(ABC):
     """Base constraint for weights shaped (n_outputs, n_features)."""
 
     def __init__(
@@ -68,3 +68,15 @@ class BaseScikitConstraint(ABC):
         params = dict(config)
         data = constraint_data_from_config(params.pop("data"))
         return cls(data=data, **params)
+
+    def zero_only_mask(self) -> np.ndarray | None:
+        """Describe this constraint as pure coefficient zeroing.
+
+        Return a boolean mask if it completely describes the
+        feasible set:
+            False -> coefficient must be zero
+            True  -> coefficient is unrestricted
+
+        Return None if this representation is not declared.
+        """
+        return None

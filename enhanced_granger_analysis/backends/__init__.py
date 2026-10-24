@@ -26,11 +26,11 @@ if importlib.util.find_spec("torch") is not None:
 	except Exception:
 		PyTorchBackendStrategy = None
 
-if importlib.util.find_spec("sklearn") is not None:
+if importlib.util.find_spec("numpy") is not None:
 	try:
-		from .scikit.scikit_backend import ScikitBackendStrategy
-		__all__.append("ScikitBackendStrategy")
-		from . import scikit 
+		from .numpy.numpy_backend import NumpyBackendStrategy
+		__all__.append("NumpyBackendStrategy")
+		from . import numpy 
 		__all__.append("numpy")
 	except Exception:
-		ScikitBackendStrategy = None
+		NumpyBackendStrategy = None

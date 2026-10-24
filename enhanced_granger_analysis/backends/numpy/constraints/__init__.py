@@ -1,4 +1,4 @@
-from .base import BaseScikitConstraint
+from .base import BaseNumpyConstraint
 from .registry import (
     available_constraints,
     get_constraint_class,
@@ -11,7 +11,7 @@ from .implementations import (
 )
 
 __all__ = [
-    "BaseScikitConstraint",
+    "BaseNumpyConstraint",
     "available_constraints",
     "get_constraint_class",
     "register_constraint",

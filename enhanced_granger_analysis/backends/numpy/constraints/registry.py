@@ -4,17 +4,17 @@ from collections.abc import Callable
 from typing import Any, TypeVar
 
 from ....core.components.constraint_registry import ConstraintClassRegistry
-from .base import BaseScikitConstraint
+from .base import BaseNumpyConstraint
 
 
 ConstraintClass = TypeVar(
     "ConstraintClass",
-    bound=type[BaseScikitConstraint],
+    bound=type[BaseNumpyConstraint],
 )
 
-_CONSTRAINTS = ConstraintClassRegistry[BaseScikitConstraint](
-    base_class=BaseScikitConstraint,
-    label="Scikit-learn constraint",
+_CONSTRAINTS = ConstraintClassRegistry[BaseNumpyConstraint](
+    base_class=BaseNumpyConstraint,
+    label="Numpy constraint",
 )
 
 
@@ -24,7 +24,7 @@ def register_constraint(
     return _CONSTRAINTS.register(*names)
 
 
-def get_constraint_class(name: str) -> type[BaseScikitConstraint]:
+def get_constraint_class(name: str) -> type[BaseNumpyConstraint]:
     return _CONSTRAINTS.get_class(name)
 
 
@@ -40,8 +40,8 @@ def available_constraints(
 def resolve_constraint_spec(
     spec: Any,
 ) -> (
-    tuple[type[BaseScikitConstraint], dict[str, Any]]
-    | BaseScikitConstraint
+    tuple[type[BaseNumpyConstraint], dict[str, Any]]
+    | BaseNumpyConstraint
     | None
 ):
     return _CONSTRAINTS.resolve_spec(spec)

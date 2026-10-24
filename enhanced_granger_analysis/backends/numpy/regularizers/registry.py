@@ -4,18 +4,18 @@ from collections.abc import Callable
 from typing import Any, TypeVar
 
 from ....core.components.regularizer_registry import RegularizerClassRegistry
-from .base import BaseScikitRegularizer
+from .base import BaseNumpyRegularizer
 
 
 RegularizerClass = TypeVar(
     "RegularizerClass",
-    bound=type[BaseScikitRegularizer],
+    bound=type[BaseNumpyRegularizer],
 )
 
 
-_REGULARIZERS = RegularizerClassRegistry[BaseScikitRegularizer](
-    base_class=BaseScikitRegularizer,
-    label="Scikit-learn regularizer",
+_REGULARIZERS = RegularizerClassRegistry[BaseNumpyRegularizer](
+    base_class=BaseNumpyRegularizer,
+    label="Numpy regularizer",
 )
 
 
@@ -28,7 +28,7 @@ def register_regularizer(
 
 def get_regularizer_class(
     name: str,
-) -> type[BaseScikitRegularizer]:
+) -> type[BaseNumpyRegularizer]:
     """Return a registered class without constructing it."""
     return _REGULARIZERS.get_class(name)
 
@@ -45,8 +45,8 @@ def available_regularizers(
 def resolve_regularizer_spec(
     spec: Any,
 ) -> (
-    tuple[type[BaseScikitRegularizer], dict[str, Any]]
-    | BaseScikitRegularizer
+    tuple[type[BaseNumpyRegularizer], dict[str, Any]]
+    | BaseNumpyRegularizer
     | None
 ):
     """Resolve a raw or parsed specification; None disables regularization."""
