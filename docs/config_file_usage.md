@@ -7,7 +7,26 @@ For component-family-specific formats, see
 Constraints and regularizers use dedicated parsers and registries;
 their accepted formats differ from callback and optimizer loader formats.
 
-## What the loader does
+# Table of content
+
+- [Introduction](#introduction)
+- [How to write different components](#how-to-write-different-components)
+  - [Supported backend formats](#supported-backend-forms)
+  - [Variable selection](#variable-selection-causes-effects-tested_causes)
+  - [Model selection](#model-selection-and-construction)
+  - [Optimizers and other components](#optimizers-losses-and-other-components)
+  - [Constraints](#constraints)
+- [Structural metadata and training observations](#structural-metadata-and-training-observations)
+- [Hyperparameter optimization status](#hyperoptimization-status)
+- [Group test configuration](#group-test-configuration)
+  - [What can and cannot be swept)](#what-can-and-cannot-be-swept)
+  - [Supported sweeping hyperparameters](#supported-directly-or-conditionally)
+  - [Indirectly supported hyperparameters](#not-directly-supported-or-limited)
+  - [How to load and use](#how-to-load-and-use-it)
+  - [Reuse data optiom](#reuse_data)
+- [Recommended workflow](#recommended-workflow)
+# Introduction
+
 
 `BuilderConfigLoader` is responsible for normalization only. It does not run training and does not create the final analysis result.
 
@@ -24,6 +43,8 @@ It can:
 component preparation and backend construction stages.
 
 The loader also accepts `relations` as a file path when you want to keep constraint rules in a separate JSON/YAML file.
+
+# How to write different components
 
 ## Supported backend forms
 
@@ -82,171 +103,277 @@ In this case:
 - It predicts 2 outputs: `x3`, `x4`.
 - Causality is tested only for `f1→x3`, `f1→x4`, `f2→x3`, `f2→x4`, saving time on the reference loop for `u`, `x1`, `x2`.
 
-## Model selection in config files
+## Model selection and construction
 
-A configuration can also carry a `model` or `model_type` field. This is supported as a compatibility hook for the current backend model family.
+The builder constructs models through the selected backend strategy. Model
+selection, ready backend components, and model constructor parameters are handled
+separately.
 
-Current behavior:
-
-- The default implementation remains the active fallback for each backend.
-- If `model` / `model_type` points to a subclass of the backend's current base model class, that subclass is used.
-- There is no model registry or automatic plugin discovery yet.
-- The model config remains the place for additional parameters such as hidden layers, dropout, or custom training settings.
-
-Example:
+Use `model_config.model` to select a registered model:
 
 ```json
 {
-  "backend": "tensorflow",
-  "model": "TensorFlowGrangerModel",
   "model_config": {
-    "hidden_layers": 2,
+    "model": "conditional_linear",
     "epochs": 50,
     "batch_size": 32
   }
 }
 ```
 
-The value can also be passed as a Python class object when working directly from code rather than through JSON.
+`model_type` is accepted as an alternative to `model`. Specifying both keys is
+an error.
 
-## Example configuration
+When neither key is provided, the backend strategy selects the default
+`conditional_linear` model.
+
+Model selection is resolved by the selected backend's model registry. An unknown
+registered name raises an error rather than silently falling back to the default
+model.
+
+### Typed model specifications
+
+A model can also be selected using a typed specification:
+
+```json
+{
+  "model_config": {
+    "model": {
+      "type": "conditional_linear",
+      "params": {
+        "use_bias": true
+      }
+    },
+    "epochs": 50,
+    "batch_size": 32
+  }
+}
+```
+
+Parameters inside the model specification and the remaining `model_config`
+entries must not define the same constructor argument more than once.
+
+For example, placing `epochs` both in `model.params` and directly in
+`model_config` is an error.
+
+JSON/YAML configuration uses registered string names. Python callers may also
+supply compatible concrete model classes. Passing a ready model instance with
+builder-managed constructor arguments and components is not supported by this
+builder construction path.
+
+## Optimizers, losses, and other components
+
+Optimizer and loss specifications are configured through `model_config`:
+
+```json
+{
+  "model_config": {
+    "optimizer": {
+      "type": "adam",
+      "params": {
+        "lr": 0.001
+      }
+    },
+    "loss": "mse"
+  }
+}
+```
+
+The builder extracts these specifications, constructs backend-compatible
+components, and passes the ready objects to the model separately from constructor
+configuration.
+
+Callbacks, regularization, and constraints use their dedicated configuration
+fields:
+
+| Configuration field | Responsibility |
+| --- | --- |
+| `callbacks` | Callback specifications |
+| `regularizer_spec` | Regularizer selection and parameters |
+| `relations` | Named cause/effect constraint declarations |
+| `constraint_spec` | Constraint implementation and constructor parameters |
+| `model_config.optimizer` | Backend optimizer specification |
+| `model_config.loss` | Backend loss specification |
+
+Do not place `callbacks`, `regularizer`, `regularizer_spec`, `constraint`, or
+`constraint_spec` inside `model_config`.
+
+The builder also manages structural arguments such as `input_spec`, `n_features`,
+and `n_outputs`. These must not be supplied in `model_config`.
+
+### PyTorch configuration
+
+PyTorch optimizer parameters follow native PyTorch naming conventions. For Adam,
+use `lr` inside optimizer `params`:
+
+```json
+{
+  "backend": "pytorch",
+  "model_config": {
+    "model": "conditional_linear",
+    "epochs": 50,
+    "batch_size": 32,
+    "device": "cpu",
+    "optimizer": {
+      "type": "adam",
+      "params": {
+        "lr": 0.001
+      }
+    },
+    "loss": "mse"
+  }
+}
+```
+
+Do not use a model-level `learning_rate` as a replacement for the PyTorch
+optimizer's `lr`.
+
+### Keras configuration
+
+Keras optimizer parameters follow native Keras naming conventions. For Adam,
+use `learning_rate` inside optimizer `params`:
 
 ```json
 {
   "backend": "tensorflow",
-  "reuse_data": true,
-  "causes": ["x1", "x2", "y"],
-  "effects": ["y"],
-  "tested_causes": ["x1", "x2"],
-  "lag_config": {
-    "max_lag": 3,
-    "use_lag_zero": false
-  },
-  "constraint_spec": {
-    "type": "mask_and_min_abs_sum",
-    "params": {
-      "eps": 1e-8
-    }
-  },
+  "model_config": {
+    "model": "conditional_linear",
+    "epochs": 50,
+    "batch_size": 32,
+    "device": "cpu",
+    "optimizer": {
+      "type": "adam",
+      "params": {
+        "learning_rate": 0.001
+      }
+    },
+    "loss": "mse"
+  }
+}
+```
+
+The `tensorflow`, `tf`, and `keras` backend selection names select the Keras
+strategy.
+
+Backend selection identifies the library strategy; it does not make optimizer
+configuration interchangeable with the native PyTorch strategy.
+
+### NumPy configuration
+
+The NumPy adapter uses a built-in MSE objective and an internal solver loop.
+Configure its solver directly:
+
+```json
+{
+  "backend": "numpy",
+  "model_config": {
+    "model": "conditional_linear",
+    "solver": "auto",
+    "epochs": 1000,
+    "learning_rate": 1.0,
+    "tol": 1e-8,
+    "use_bias": true
+  }
+}
+```
+
+Do not configure a custom optimizer or loss for the NumPy adapter. Its optimizer
+and loss resolvers return `None`; supplying such specifications does not enable
+custom optimizer or loss behavior.
+
+NumPy's `learning_rate` is a relaxation/step-control parameter, not the same
+quantity as a neural-network optimizer's learning rate.
+
+Available solver selections are:
+
+- `auto`: select a solver according to the fitting configuration and component
+  capabilities.
+- `restricted_lstsq`: request direct restricted least-squares fitting.
+- `coefficient`: use the iterative coefficient-update path.
+
+Automatic direct least-squares fitting requires a full batch, no regularizer
+object, and either no constraint or a constraint declaring only coefficient
+zeroing. Additional minimum-absolute-sum rules require the iterative path.
+
+A regularizer object with zero penalty strength still prevents automatic direct
+least-squares selection.
+
+See [NumPy Backend Optimization](./numpy_backend_optimization.md) for solver
+eligibility, objective normalization, proximal updates, stopping criteria, and
+limitations.
+
+## Constraints
+
+`relations` describes named rules, while `constraint_spec` selects the
+backend implementation enforcing the compiled data.
+
+```json
+{
+  "constraint_spec": "mask_and_min_abs_sum",
   "relations": [
     {
       "cause": "x1",
       "effect": "y",
-      "rule": {
-        "type": "zero"
-      }
+      "rule": {"type": "zero"}
     },
     {
       "cause": "x2",
       "effect": "y",
       "rule": {
         "type": "min_abs_sum",
-        "params": {
-          "value": 0.2
-        }
+        "params": {"value": 0.2}
       }
     }
-  ],
-  "regularizer_spec": {
-    "type": "l1",
-    "params": {
-      "l1": 0.01
-    }
-  },
-  "model_config": {
-    "epochs": 50,
-    "batch_size": 32,
-    "optimizer": "adam"
-  }
+  ]
 }
 ```
 
-The top-level `regularizer` field is no longer supported.
+Use an empty list for no explicit relation rules. Omit `relations` to use
+the builder's empty default specification; do not set it to `null`.
 
-Constraint and regularizer configuration must remain outside
-`model_config`. An explicit `constraint_spec: null` is invalid;
-`regularizer_spec: null` disables regularization.
+A `min_abs_sum` value of zero adds no lower-bound restriction. It does not
+mask the relation.
 
-To keep relation rules in a separate file:
+Named rules are compiled against effective variables after preprocessing.
+Unknown effective causes or effects are rejected.
 
-```json
-{
-  "relations": "./relations.json"
-}
-```
+The preprocessing mask is preserved. A positive minimum-sum rule with no
+remaining active coefficients raises an error in the builder path.
 
-The referenced file must contain the canonical declaration list itself,
-without a `rules` or `relations` wrapper.
+Relation-file loading is handled by `BuilderConfigLoader`, not by
+`.relations(...)` or `.from_config(...)`.
 
-Relative paths are resolved against the configuration file location,
-not the process working directory. Legacy relation mappings and
-`{"path": "..."}` references are not supported by the new path.
 
-## Optimizer and training parameter control
-You can tune optimizer and training behavior directly in the builder config under `model_config` (or, for backward compatibility, by top-level keys such as `learning_rate`). Supported patterns are:
+## Structural metadata and training observations
 
-```json
-{
-  "model_config": {
-    "optimizer": "adam",
-    "learning_rate": 1e-4,
-    "epochs": 100,
-    "batch_size": 32
-  }
-}
-```
+The builder creates `ModelInputSpec` from the effective prepared-data layout,
+including:
 
-```json
-{
-  "model_config": {
-    "optimizer": {
-      "type": "adam",
-      "params": {
-        "lr": 1e-4,
-        "beta_1": 0.9,
-        "beta_2": 0.999
-      }
-    }
-  }
-}
-```
+- The number of prepared input features and outputs.
+- Ordered effective cause and effect names.
+- Named cause slices.
+- Actual feature lags.
 
-This works for both TensorFlow and PyTorch. The difference is how backend-specific optimizer settings are forwarded:
+Training observations are not supplied during model construction. The builder
+passes the prepared input and target arrays explicitly to each base and
+restricted fit.
 
-- TensorFlow/Keras: `optimizer.params` is the canonical location for optimizer arguments. If a backend-specific optimizer parameter is expected there, it should be placed under `optimizer.params` as part of the optimizer configuration.
-- PyTorch: `gradient_accumulation_steps` is also accepted outside `optimizer.params` as a legacy compatibility alias, because the training loop consumes it at the model level rather than passing it to the optimizer constructor.
+Do not configure structural metadata manually to reproduce the raw input-column
+layout: preprocessing may change the effective variables and expand each cause
+into multiple lagged features.
 
-Canonical TensorFlow/Keras form:
+# Hyperoptimization status
 
-```json
-{
-  "model_config": {
-    "optimizer": {
-      "type": "adam",
-      "params": {
-        "learning_rate": 1e-4,
-        "gradient_accumulation_steps": 4
-      }
-    }
-  }
-}
-```
+Hyperoptimization remains disabled in the standard builder pipeline, as in the
+previous implementation.
 
-Legacy PyTorch-compatible form:
+The builder may retain hyperoptimization settings for compatibility, but these
+settings do not trigger parameter search, alter model selection, or modify the
+training configuration.
 
-```json
-{
-  "model_config": {
-    "optimizer": "adam",
-    "learning_rate": 1e-4,
-    "gradient_accumulation_steps": 4
-  }
-}
-```
+Enabling hyperoptimization is outside the scope of this update.
 
-The important distinction is that the backward-compatibility alias is PyTorch-only. In TensorFlow/Keras, the valid placement is under `optimizer.params`; the reverse is not the canonical or supported pattern.
-
-## Group Test Configuration
+# Group Test Configuration
 
 Use a group-test file when you want to run multiple cases from one shared base config.
 
@@ -285,7 +412,7 @@ Important fields:
 
 The group iterator expands the file into specific builder configs and then normalizes them.
 
-## What can and cannot be swept
+### What can and cannot be swept
 
 `TestGroupConfigIterator` applies sweep values using dotted keys and then calls `BuilderConfigLoader.normalize_builder_config(...)`.
 
@@ -293,7 +420,7 @@ Important implementation detail:
 - Dotted updates work only through mappings (dictionaries/objects).
 - List indexing is not supported by dotted keys (for example, `callbacks.0.patience` will not work).
 
-### Supported (directly or conditionally)
+## Supported (directly or conditionally)
 
 You can sweep these fields:
 
@@ -372,13 +499,13 @@ You can sweep these fields:
   - In common list form, use full-list replacement per case instead of trying list-index paths.
 
 
-### Not directly supported (or limited)
+## Not directly supported (or limited)
 
 - Dotted paths through list indices are not supported.
   - Not supported: `callbacks.0.patience`, `relations.0.min_abs_sum`.
   - Use whole-object/list replacement in `cases` values.
 
-### Practical recommendation
+## Practical recommendation
 
 For sweep dimensions with many list/object internals (`callbacks`, `relations`), treat each case value as a full replacement object.
 For scalar and simple nested options (`model_config.*`, `lag_config.*`, `lag_selector.*`, `x_scaler`, `y_scaler`, `backend`), dotted keys are the most robust approach.
@@ -402,52 +529,11 @@ cfg = BuilderConfigLoader.load_file("config.json")
 
 Then pass the normalized mapping to `MultitaskGrangerBuilder.from_config(...)`.
 
-## Constraints
-
-`relations` describes named rules, while `constraint_spec` selects the
-backend implementation enforcing the compiled data.
-
-```json
-{
-  "constraint_spec": "mask_and_min_abs_sum",
-  "relations": [
-    {
-      "cause": "x1",
-      "effect": "y",
-      "rule": {"type": "zero"}
-    },
-    {
-      "cause": "x2",
-      "effect": "y",
-      "rule": {
-        "type": "min_abs_sum",
-        "params": {"value": 0.2}
-      }
-    }
-  ]
-}
-```
-
-Use an empty list for no explicit relation rules. Omit `relations` to use
-the builder's empty default specification; do not set it to `null`.
-
-A `min_abs_sum` value of zero adds no lower-bound restriction. It does not
-mask the relation.
-
-Named rules are compiled against effective variables after preprocessing.
-Unknown effective causes or effects are rejected.
-
-The preprocessing mask is preserved. A positive minimum-sum rule with no
-remaining active coefficients raises an error in the builder path.
-
-Relation-file loading is handled by `BuilderConfigLoader`, not by
-`.relations(...)` or `.from_config(...)`.
-
 ## `reuse_data`
 
 If `reuse_data` is set to `true`, the orchestrator can keep the prepared data object on the output when the builder/orchestrator decides to preserve it. This is useful when you want to inspect or reuse preprocessing artifacts across repeated runs.
 
-## Recommended workflow
+# Recommended workflow
 
 - Keep the file focused on configuration data.
 - Let the loader normalize the shape.
