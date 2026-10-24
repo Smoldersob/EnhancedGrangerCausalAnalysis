@@ -8,6 +8,7 @@ from pathlib import Path
 from typing import Any, Dict, List, Mapping, Optional, Sequence
 from time import perf_counter
 
+from ..core.models.input_spec import ModelInputSpec
 from ..core.exceptions import DataValidationError, RegistryError, ConstraintConfigurationError
 from ..core.initialization import InitializationContext
 from ..core.components.constraint_parsing import (
@@ -330,17 +331,14 @@ class MultiTaskGrangerBuilder:
         return self
 
     def hyperoptimization(self, state=None, config=None):
-        """
-        Configure hyperparameter optimization for the analysis.
+        """Store reserved hyperoptimization settings.
 
-        Args:
-            state: The state of the hyperparameter optimization
-            config: The configuration for the hyperparameter optimization
-        Returns:
-            Self for method chaining
+        Hyperoptimization is disabled in the standard builder pipeline.
+        These settings do not trigger optimization or modify model selection.
         """
         self._fit_kwargs["hiperoptimalization_state"] = state
         self._fit_kwargs["hiperoptimalization_conf"] = copy.deepcopy(config)
+        return self
         return self
 
     def initializer(self, initializer):
@@ -611,20 +609,18 @@ class MultiTaskGrangerBuilder:
         return self._regularizer
     
     def prepare_callbacks(self):
-        """
-        Prepare the callbacks for the analysis.
-        returns:
-            The list of prepared callbacks.
-        """
-        callbacks = self._fit_kwargs.get("callbacks")
-        self._callbacks = list(callbacks) if callbacks is not None else None
-        return self._callbacks
+        """Resolve callback specifications using the selected backend."""
+        self._require_components_data()
 
+        self._callbacks = self._strategy.build_callbacks(
+            self._fit_kwargs.get("callbacks")
+        )
+        return self._callbacks
+    
     def prepare_components(self):
         """Prepare all components for the analysis."""
         self.prepare_backend()
 
-        self.prepare_constraint_data()
         self.prepare_constraint()
 
         self.prepare_regularizer_data()
@@ -634,65 +630,116 @@ class MultiTaskGrangerBuilder:
 
         return self
 
-    def build_model(self, model_config: Optional[Mapping[str, Any]] = None):
-        """
-        Build the Granger model for the analysis.
+
+    def build_model(
+        self,
+        model_config: Optional[Mapping[str, Any]] = None,
+    ):
+        """Construct a model from prepared metadata and ready components.
         Args:
             model_config: Optional configuration for the model
         Returns:
             The built model.
+        Hyperoptimization remains disabled. Model construction does not
+        retain training observations or perform fitting.
         """
         self._require_components_data()
+
+        if self._constraint is None:
+            self.prepare_constraint()
+
         if (
             self._fit_kwargs.get("regularizer_spec") is not None
             and self._regularizer is None
         ):
             self.prepare_regularizer()
 
-        config = dict(
-            self._fit_kwargs.get("model_config") or {}
-        )
+        config = dict(self._fit_kwargs.get("model_config") or {})
         if model_config is not None:
             config.update(model_config)
-        
-        if self._callbacks is not None:
-            config["callbacks"] = list(self._callbacks)
 
-        # Validation of one configuration source for regularization and constraint.
-        if "regularizer" in config or "regularizer_spec" in config:
-            raise DataValidationError(
-                "Configure regularization through regularizer_spec "
-                "or regularization(), not model_config."
-            )
+        for reserved in ("regularizer", "regularizer_spec"):
+            if reserved in config:
+                raise DataValidationError(
+                    f"{reserved!r} must not be placed in model_config. "
+                    "Use regularizer_spec or builder.regularization(...)."
+                )
+
         for reserved in ("constraint", "constraint_spec"):
             if reserved in config:
                 raise ConstraintConfigurationError(
                     f"{reserved!r} must not be placed in model_config. "
-                    "Use builder.constraint(...) or top-level constraint_spec."
+                    "Use constraint_spec or builder.constraint(...)."
                 )
 
-        self._model_config = config
-                    
-        self._model = self._strategy.build_model(
-            n_features=self._prepared_data.X_scaled.shape[1],
-            n_outputs=self._prepared_data.y_scaled.shape[1],
-            regularizer=self._regularizer,
-            constraint=self._constraint,
-            **config,
+        for reserved in (
+            "callbacks",
+            "components",
+            "input_spec",
+            "n_features",
+            "n_outputs",
+        ):
+            if reserved in config:
+                raise DataValidationError(
+                    f"{reserved!r} is managed by the builder and must "
+                    "not be placed in model_config."
+                )
+
+        if "model" in config and "model_type" in config:
+            raise DataValidationError(
+                "Specify either 'model' or 'model_type', not both."
+            )
+
+        if "model" in config:
+            model_spec = config.pop("model")
+        else:
+            model_spec = config.pop("model_type", None)
+
+        optimizer_spec = config.pop("optimizer", None)
+        loss_spec = config.pop("loss", None)
+
+        self.prepare_callbacks()
+
+        optimizer = self._strategy.build_optimizer(optimizer_spec)
+        loss = self._strategy.build_loss(loss_spec)
+
+        prepared = self._prepared_data
+        input_spec = ModelInputSpec(
+            n_features=prepared.X_scaled.shape[1],
+            n_outputs=prepared.y_scaled.shape[1],
+            causes=tuple(prepared.causes),
+            effects=tuple(prepared.effects),
+            cause_slices=prepared.cause_slices,
+            feature_lags=tuple(prepared.feature_lags),
         )
-        self._model.initialize(
-            self._prepared_data.X_scaled, 
-            targets=self._prepared_data.y_scaled
+
+        constructor_config = dict(config)
+        constructor_config["input_spec"] = input_spec
+
+        components = {
+            "optimizer": optimizer,
+            "loss": loss,
+            "callbacks": self._callbacks,
+            "regularizer": self._regularizer,
+            "constraint": self._constraint,
+        }
+
+        model = self._strategy.build_model(
+            model_spec,
+            components=components,
+            config=constructor_config,
         )
-        
+
+        self._model_config = dict(config)
+        self._model = model
         self._initial_weights = None
         self._base_weights = None
-        
+
         if self._results is not None:
             self._results.base_snapshot = None
             self._results.reference_snapshots.clear()
-        
-        return self._model
+
+        return model
 
     def initialize_weights(self, initializer=None):
         """Resolve, construct, and execute an initializer.
@@ -761,76 +808,131 @@ class MultiTaskGrangerBuilder:
         ])
 
     def reset_callbacks(self, run_name: str, callback_updates=None):
-        """
-        Reset the callbacks of the model for a new run.
-        Args:
-            run_name: The name of the run (e.g., 'base_model', 'reference_cause_X')            
-            callback_updates: Optional updates to the callbacks.
-        """
+        """Reset callbacks without changing optimizer state or model weights."""
         self._require_model()
-        self._model.reset_callbacks(run_name=run_name, callback_updates=callback_updates)
+
+        self._model.reset_components(
+            reset_optimizer=False,
+            reset_callbacks=True,
+            run_name=run_name,
+            callback_updates=callback_updates,
+        )
 
     def fit_base(self):
         """
-        Fit the base model for the analysis.
+        Fit the unrestricted model using explicit prepared arrays.
         Returns:
             The weights of the fitted base model.
         """
         self._require_model()
-        self._model.omit_variables([])
+        self._require_prepared()
+
         timings = {}
+
         t0 = perf_counter()
         if self._initial_weights is not None:
             self.set_weights(self._initial_weights)
         timings["restore_weights"] = perf_counter() - t0
-        
-        t0 = perf_counter()
-        self.reset_callbacks("base_model")
-        timings["reset_callbacks"] = perf_counter() - t0
 
         t0 = perf_counter()
-        self._model.fit()
+        self._model.omit_variables([])
+        timings["update_mask"] = perf_counter() - t0
+
+        t0 = perf_counter()
+        self._model.reset_components(
+            reset_optimizer=True,
+            reset_callbacks=True,
+            run_name="base_model",
+        )
+        timings["reset_components"] = perf_counter() - t0
+
+        t0 = perf_counter()
+        self._model.fit(
+            self._prepared_data.X_scaled,
+            self._prepared_data.y_scaled,
+            reset_components=False,
+        )
         timings["fit_model"] = perf_counter() - t0
-        self._save_snapshot(None, additional_metadata={"timings": timings})
+
+        self._save_snapshot(
+            None,
+            additional_metadata={"timings": timings},
+        )
+
         self._base_weights = [
-                np.asarray(weight).copy()
-                for weight in self._model.get_weights()
+            np.asarray(weight).copy()
+            for weight in self._model.get_weights()
         ]
+
         return self._base_weights
 
-    def fit_restricted(self, cause: str, start_with_base: bool = True, start_with_initial: bool = False):
+    def fit_restricted(
+        self,
+        cause: str,
+        start_with_base: bool = True,
+        start_with_initial: bool = False,
+    ):
         """
         Fit a restricted model for a specific cause.
         Args:
             cause: The cause for which to fit the restricted model.
-            use_hot_start: Whether to use the base model weights as a starting point.
+            start_with_base: Whether to use the base model weights as a starting point.
+            start_with_initial: Whether to use the initial model weights as a starting point.
         """
-        if self._base_weights is None:
-            raise DataValidationError("fit_base() must be completed before fit_restricted()")
-        if cause not in self._prepared_data.cause_slices:
-            raise DataValidationError(f"Unknown tested cause: {cause!r}")
         self._require_model()
+        self._require_prepared()
+
+        if self._base_weights is None:
+            raise DataValidationError(
+                "fit_base() must be completed before fit_restricted()."
+            )
+
+        prepared = self._prepared_data
+
+        if cause not in prepared.cause_slices:
+            raise DataValidationError(
+                f"Unknown cause: {cause!r}."
+            )
+
         timings = {}
+
         t0 = perf_counter()
         if start_with_initial and self._initial_weights is not None:
             self.set_weights(self._initial_weights)
-        elif start_with_base and self._base_weights is not None:
+        elif start_with_base:
             self.set_weights(self._base_weights)
         timings["restore_weights"] = perf_counter() - t0
 
         t0 = perf_counter()
-        block = self._prepared_data.cause_slices[cause]
-        self._model.omit_variables(list(range(block.start, block.stop)))
+        block = prepared.cause_slices[cause]
+        self._model.omit_variables(
+            list(range(block.start, block.stop))
+        )
         timings["update_mask"] = perf_counter() - t0
-        
-        t0 = perf_counter()
-        self.reset_callbacks(f"reference_cause_{cause}")
-        timings["reset_callbacks"] = perf_counter() - t0
+
+        cause_index = tuple(prepared.causes).index(cause)
 
         t0 = perf_counter()
-        self._model.fit()
+        self._model.reset_components(
+            reset_optimizer=True,
+            reset_callbacks=True,
+            run_name=f"reference_cause_{cause_index}",
+        )
+        timings["reset_components"] = perf_counter() - t0
+
+        t0 = perf_counter()
+        self._model.fit(
+            prepared.X_scaled,
+            prepared.y_scaled,
+            reset_components=False,
+        )
         timings["fit_model"] = perf_counter() - t0
-        self._save_snapshot(cause, additional_metadata={"timings": timings})
+
+        self._save_snapshot(
+            cause,
+            additional_metadata={"timings": timings},
+        )
+
 
     def fit_restricted_models(self):
         """Fit restricted models for all tested causes."""

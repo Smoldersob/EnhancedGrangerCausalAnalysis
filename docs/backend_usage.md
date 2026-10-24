@@ -25,6 +25,96 @@ Useful aliases:
 - PyTorch: `pytorch` / `torch`
 - Scikit: `sklearn` / `scikit` / `scikit-learn`
 
+| Strategy | Accepted selection names | Adapter identifier |
+| --- | --- | --- |
+| Native PyTorch | `pytorch`, `torch` | `pytorch` |
+| Keras | `keras`, `tensorflow`, `tf` | `keras` |
+| NumPy | `numpy`, `sklearn`, `scikit`, `scikit-learn` | `numpy` |
+
+Automatic selection prefers PyTorch, then Keras, then NumPy, subject to
+availability checks.
+
+Select a backend explicitly for reproducible experiments. Legacy scikit names
+are selection aliases only; the removed `backends.scikit` import namespace is
+not restored.
+
+## Construction interface
+
+Strategies expose:
+
+- `build_optimizer(spec=None)`.
+- `build_loss(spec=None)`.
+- `build_callbacks(specs=None)`.
+- `build_regularizer(spec=None, *, data=None)`.
+- `build_constraint(spec=None, *, data=None)`.
+- `build_model(spec=None, *, components=None, config=None)`.
+
+Model construction receives ready components. Structural and training options
+belong in `config`; component keys must not be repeated there.
+
+The built-in model is registered as `conditional`, with alias
+`conditional_linear`.
+
+## NumPy example
+
+The following illustration assumes an existing `PreparedData` object:
+
+```python
+from enhanced_granger_analysis import BackendFactory
+from enhanced_granger_analysis.core.models import ModelInputSpec
+
+strategy = BackendFactory.get_strategy("numpy")
+
+input_spec = ModelInputSpec(
+    n_features=prepared.X_scaled.shape,[1]
+    n_outputs=prepared.y_scaled.shape,[1]
+    causes=tuple(prepared.causes),
+    effects=tuple(prepared.effects),
+    cause_slices=prepared.cause_slices,
+    feature_lags=tuple(prepared.feature_lags),
+)
+
+model = strategy.build_model(
+    "conditional_linear",
+    config={
+        "input_spec": input_spec,
+        "solver": "auto",
+        "epochs": 1000,
+    },
+)
+
+training = model.fit(
+    prepared.X_scaled,
+    prepared.y_scaled,
+    collect_history=True,
+)
+```
+
+This is a source-reviewed illustration, not an executed example or a complete
+Granger-analysis workflow.
+
+NumPy uses a built-in MSE objective and internal solver loop. Its optimizer and
+loss resolvers return `None`; supplied specifications must not be described as
+custom optimizer/loss functionality.
+
+See [NumPy optimization](numpy_backend_optimization.md) for solver eligibility,
+proximal updates, stopping criteria, and limitations.
+
+## Model registration
+
+Backend-local model registries expose `register_model`, `get_model_class`,
+`available_models`, and `resolve_model_spec`.
+
+A model selection may be omitted, a registered name, a strict
+`{"type": name, "params": {...}}` mapping, a compatible concrete class, or a
+validated existing instance.
+
+Existing instances cannot be combined with non-empty construction overrides.
+Unknown names and duplicate constructor parameters are errors, not requests for
+silent fallback.
+
+See [Model Contract](model_contract.md).
+
 ## 2. Create Components Using Strategy
 
 ### Regularizer from a selector and prepared data

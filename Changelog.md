@@ -449,4 +449,130 @@ paths, and staged builder tests to match the new construction contract.
 - Updated staged builder tests to use the new component construction
   signatures and nested regularizer parameters.
 
-  
+## Version Changes 2.7
+
+This section describes the backend refactor and its integration into the standard
+builder pipeline. The analysis script and unit tests were successfully executed
+after the integration changes. Validation is limited to the exercised environment,
+configurations, and test cases; numerical equivalence and statistical calibration
+across backends are not implied.
+
+### Added
+
+- Added `ModelInputSpec` for immutable structural input/output metadata,
+  including named feature blocks and per-feature lags.
+- Added `GrangerModelProtocol`, separating the model lifecycle contract
+  from backend-specific implementations.
+- Added `TrainingResult` for optional training history and diagnostics.
+- Added backend-local model registries supporting registered names,
+  specification mappings, concrete classes, and ready model instances.
+- Added backend-local conditional linear adapters and separate
+  `LinearGrangerNetwork` implementations for NumPy, PyTorch, and Keras.
+- Added explicit strategy builders for optimizers, losses, and callbacks.
+- Added a PyTorch optimizer adapter for model-owned optimizer construction
+  and independent optimizer-state reset.
+- Added backend-local callback registries for NumPy and PyTorch and shared
+  callback lifecycle utilities.
+- Added NumPy solver selection through `auto`, `restricted_lstsq`, and
+  `coefficient`, with the selected solver exposed as `solver_used_`.
+- Added proximal operators for the built-in NumPy L1 and lag-dependent L1
+  regularizers.
+- Added shared prepared-constraint validation and configuration conversion.
+- Added ground-truth evaluation options:
+  `evaluate_only_known_gt`, `gt_nan_means_unknown`, and `drop_diagonal`.
+- Added `n_evaluated` to ground-truth evaluation output.
+- Added `docs/numpy_backend_optimization.md`.
+- Added backend construction and component test modules for NumPy,
+  PyTorch, and Keras.
+
+### Changed
+
+- Changed model construction to:
+  `build_model(spec=None, *, components=None, config=None)`.
+- Separated ready component objects from ordinary constructor settings.
+- Changed model construction to require `ModelInputSpec` instead of
+  receiving training observations through model initialization.
+- Changed fitting to explicit `fit(X, y, ...)` calls returning
+  `TrainingResult`.
+- Added explicit lifecycle separation between predictor rebuilding,
+  weight restoration, input omission, and training-component reset.
+- Replaced `backends/scikit/` with `backends/numpy/`.
+  The selection aliases `sklearn`, `scikit`, and `scikit-learn` remain
+  accepted and resolve to the NumPy strategy.
+- Moved model and component construction responsibilities from shared
+  object loaders into backend strategies and dedicated resolvers.
+- Strengthened validation of model specifications, constructor arguments,
+  training arrays, coefficients, constraints, and regularizers.
+- Changed ground-truth alignment from axis intersection to separate
+  row/column unions with an explicit evaluation mask.
+- Revised SHD calculation for reciprocal edge pairs and rectangular
+  effect-by-cause matrices.
+- Replaced staged-builder test definitions with tests targeting the new
+  construction and explicit-data fitting interfaces.
+- Renamed `test_scalers_2_3.py` to `test_scalers_2_7.py` without changing
+  its contents (tested to be stil valid).
+
+### Removed
+
+- Removed the shared `backends/models/` implementations and
+  `BaseGrangerModel`.
+- Removed `backends/object_loaders/`.
+- Removed the former scikit backend implementation package.
+- Removed the implementation from the former shared Keras callback-reset
+  module. An empty file remains; new adapters use backend-local helpers.
+
+### Breaking Changes
+
+- Replace imports from removed model, object-loader, and scikit packages
+  with the corresponding backend-local or `core/models/` modules.
+- Replace dimension-keyword model construction with the new
+  `spec` / `components` / `config` interface.
+- Replace model-level `initialize(X, targets=y)` with structural
+  construction through `ModelInputSpec`.
+- Pass prepared observations explicitly to each `fit(X, y, ...)` call.
+- Do not rely on silent fallback from an unknown model name to a default
+  model.
+- For PyTorch, place native optimizer options such as `lr` in optimizer
+  `params`; keep `gradient_accumulation_steps` in model configuration.
+- Custom NumPy regularizers should implement `_value_and_grad()` through
+  the validated `BaseNumpyRegularizer` interface.
+- Update direct access to `MetricCalculator` working attributes to the
+  new raw, aligned, binary, and evaluation-mask attributes.
+- Recalculate benchmark baselines when adopting the new evaluation-domain
+  and SHD conventions.
+
+### Builder integration
+
+- Migrated `MultiTaskGrangerBuilder` to the new backend construction contract:
+  `build_model(spec=None, *, components=None, config=None)`.
+- Added construction of `ModelInputSpec` from effective prepared-data metadata,
+  including ordered causes/effects, named feature slices, and actual feature lags.
+- Routed callback specifications through backend-specific callback construction.
+- Added explicit optimizer and loss preparation before model construction.
+- Separated ready backend components from non-component model configuration.
+- Replaced observation-based model initialization and parameterless fitting
+  with explicit `fit(X, y)` calls.
+- Added independent optimizer and callback resets for base and restricted runs
+  without rebuilding predictor parameters.
+- Preserved explicit weight restoration and named feature-block omission for
+  restricted fits.
+- Avoided duplicate component resets by resetting components before fitting and
+  calling `fit(..., reset_components=False)`.
+
+### Validation
+
+- Successfully ran the analysis script and unit tests after migrating the
+  builder to the new backend/model interface.
+- These checks validate the exercised execution paths and test cases; they do
+  not establish exhaustive coverage of every backend, device, component, or
+  configuration combination.
+- No new performance, cross-backend numerical equivalence, or statistical
+  calibration claim is made.
+
+### Known limitations
+
+- Hyperoptimization remains disabled in the standard builder pipeline, as in
+  the previous implementation. This update neither enables automatic parameter
+  search nor introduces a hyperoptimization regression.
+- Backend-specific optimizer parameters and training diagnostics are not
+  interchangeable merely because they share a common construction interface.

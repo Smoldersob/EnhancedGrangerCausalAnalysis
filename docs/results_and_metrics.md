@@ -543,3 +543,13 @@ metrics together with the threshold, tested axes, sign convention, and
 handling of removed variables.
 
 The entries being compared must describe the same cause-effect pairs.
+
+## Training and benchmark diagnostics
+
+`TrainingResult` contains adapter-level fitting diagnostics. It does not replace
+`GrangerAnalysisResults`, model snapshots, statistical metrics, or causality
+matrices.
+
+Evaluation against externally supplied ground truth is handled separately by
+`MetricCalculator`. Version `2.7` changes its alignment and missing-value policy;
+see [Ground-Truth Evaluation](ground_truth_evaluation.md).

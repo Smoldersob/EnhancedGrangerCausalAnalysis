@@ -1,3 +1,13 @@
+> **Historical calibration**
+>
+> The measurements below concern the earlier backend implementation.
+> The scikit backend has since been replaced by the NumPy adapter, and the
+> model/component lifecycle has changed.
+>
+> These measurements are retained as historical results, not as validated
+> calibration for versions `>=2.7`. Reusing a regularization strength across the
+> old and new implementations requires new experimental evidence.
+
 # Regularization Calibration Across Backends
 
 This note compares the **effect strength** of L1 regularization across:
