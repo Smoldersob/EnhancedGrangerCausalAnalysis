@@ -7,14 +7,10 @@ from ....core.models.model_registry import ModelClassRegistry
 from ....core.models.protocol import GrangerModelProtocol
 
 
-ModelClass = TypeVar(
-    "ModelClass",
-    bound=type[GrangerModelProtocol],
-)
+ModelClass = TypeVar("ModelClass", bound=type)
 
 
 _MODELS = ModelClassRegistry[GrangerModelProtocol](
-    base_class=GrangerModelProtocol,
     label="Keras model",
 )
 

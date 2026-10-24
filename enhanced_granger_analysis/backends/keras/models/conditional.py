@@ -17,6 +17,8 @@ from ....core.models.protocol import (
     ModelWeights,
     TrainingResult,
 )
+from ....core.models.input_spec import ModelInputSpec
+from ....core.models.validation import validate_training_arrays
 from ..callbacks.reset import reset_callbacks_for_run
 from ..device import DeviceManager
 from ..optimizers.reset import (
@@ -39,6 +41,7 @@ class KerasConditionalAdapter:
     def __init__(
         self,
         *,
+        input_spec: ModelInputSpec,
         optimizer: keras.optimizers.Optimizer,
         loss: Any,
         regularizer: keras.regularizers.Regularizer | None = None,
@@ -51,6 +54,8 @@ class KerasConditionalAdapter:
         keras_backend: str | None = None,
         use_jit: bool = False,
         use_bias: bool = True,
+        seed: int | None = None,
+        **kwargs,
     ) -> None:
         if not isinstance(optimizer, keras.optimizers.Optimizer):
             raise TypeError(
@@ -107,17 +112,23 @@ class KerasConditionalAdapter:
         self.verbose = verbose
         self.use_jit = use_jit
         self.use_bias = use_bias
-
+        self.seed = seed
         # Configuration template, never attached directly to a new network.
         self._optimizer_template = optimizer
 
         self.model: LinearGrangerNetwork | None = None
         self._optimizer_snapshot: OptimizerSnapshot | None = None
 
-        self._X_train: Any = None
-        self._y_train: Any = None
-        self._n_features: int | None = None
-        self._n_outputs: int | None = None
+        if not isinstance(input_spec, ModelInputSpec):
+            raise TypeError("input_spec must be a ModelInputSpec.")
+
+        self._input_spec = input_spec
+
+        self._n_features = input_spec.n_features
+        self._n_outputs = input_spec.n_outputs
+
+        self._validate_training_config()
+        self.rebuild(seed=seed)
 
         self._fitted = False
         self._run_counter = 0
@@ -128,6 +139,10 @@ class KerasConditionalAdapter:
     def backend(self) -> str:
         return "keras"
 
+    @property
+    def input_spec(self) -> ModelInputSpec:
+        return self._input_spec
+    
     @property
     def is_fitted(self) -> bool:
         return self._fitted
@@ -193,41 +208,37 @@ class KerasConditionalAdapter:
 
     def _require_model(self) -> LinearGrangerNetwork:
         if self.model is None:
-            raise ModelNotFittedError(
-                "Model is not initialized. Call initialize() first."
+            raise RuntimeError(
+                "Predictor construction did not complete."
             )
         return self.model
 
     @staticmethod
     def _data_array(value: Any, name: str) -> np.ndarray:
-        return real_array(
-            value,
-            name=name,
-            dtype=np.float32,
-            ndim=2,
-        )
+        raw = np.asarray(value)
 
-    def initialize(
+        if raw.ndim != 2:
+            raise ValueError(f"{name} must be a two-dimensional array.")
+
+        if raw.dtype.kind not in "fiu":
+            raise TypeError(f"{name} must contain real numeric values.")
+
+        with np.errstate(over="ignore", invalid="ignore"):
+            array = np.array(raw, dtype=np.float32, copy=True)
+
+        if not np.all(np.isfinite(array)):
+            raise ValueError(
+                f"{name} must contain finite float32-representable values."
+            )
+
+        return array
+
+    def rebuild(
         self,
-        X: FloatArray,
         *,
-        targets: FloatArray,
         seed: int | None = None,
     ) -> None:
         self._validate_training_config()
-
-        x_array = self._data_array(X, "X")
-        y_array = self._data_array(targets, "targets")
-
-        if x_array.shape[0] != y_array.shape[0]:
-            raise ValueError("X and targets must have the same sample count.")
-
-        if (
-            x_array.shape[0] == 0
-            or x_array.shape[1] == 0
-            or y_array.shape[1] == 0
-        ):
-            raise ValueError("Training data dimensions must be non-zero.")
 
         if seed is not None:
             if (
@@ -235,23 +246,22 @@ class KerasConditionalAdapter:
                 or not isinstance(seed, (int, np.integer))
                 or seed < 0
             ):
-                raise ValueError("seed must be a non-negative integer or None.")
+                raise ValueError(
+                    "seed must be a non-negative integer or None."
+                )
+
             keras.utils.set_random_seed(int(seed))
 
-        n_features = x_array.shape[1]
-        n_outputs = y_array.shape[1]
-
-        # Commit new state only after successful construction.
         with self.device_manager.scope():
             network = LinearGrangerNetwork(
-                n_features=n_features,
-                n_outputs=n_outputs,
+                n_features=self.input_spec.n_features,
+                n_outputs=self.input_spec.n_outputs,
                 constraint=self.constraint,
                 regularizer=self.regularizer,
                 use_bias=self.use_bias,
                 dtype="float32",
             )
-            network.build((None, n_features))
+            network.build((None, self.input_spec.n_features))
 
             optimizer = clone_optimizer(self._optimizer_template)
 
@@ -264,15 +274,8 @@ class KerasConditionalAdapter:
             optimizer.build(network.trainable_variables)
             snapshot = capture_optimizer_state(optimizer)
 
-            x_tensor = keras.ops.convert_to_tensor(x_array, dtype="float32")
-            y_tensor = keras.ops.convert_to_tensor(y_array, dtype="float32")
-
         self.model = network
         self._optimizer_snapshot = snapshot
-        self._X_train = x_tensor
-        self._y_train = y_tensor
-        self._n_features = n_features
-        self._n_outputs = n_outputs
         self._fitted = False
 
     def reset_components(
@@ -330,6 +333,8 @@ class KerasConditionalAdapter:
 
     def fit(
         self,
+        X: FloatArray,
+        y: FloatArray,
         *,
         collect_history: bool = False,
         reset_components: bool = True,
@@ -346,21 +351,32 @@ class KerasConditionalAdapter:
             raise TypeError("reset_components must be a bool.")
 
         if not reset_components and (
-            callback_updates is not None or run_name is not None
+            run_name is not None or callback_updates is not None
         ):
             raise ValueError(
-                "run_name and callback_updates require reset_components=True. "
-                "Alternatively, call reset_components() explicitly."
+                "run_name and callback_updates require reset_components=True."
             )
 
-        if self._X_train is None or self._y_train is None:
-            raise TrainingError("Training data is unavailable.")
+        x_array, y_array = validate_training_arrays(
+            X,
+            y,
+            input_spec=self.input_spec,
+        )
 
         batch_size = (
-            int(self._X_train.shape[0])
+            int(x_array.shape[0])
             if self.batch_size is None
             else int(self.batch_size)
         )
+
+        # Konwersja danych nie zmienia aktywnego predyktora.
+        with self.device_manager.scope():
+            x_train = keras.ops.convert_to_tensor(
+                x_array, dtype="float32"
+            )
+            y_train = keras.ops.convert_to_tensor(
+                y_array, dtype="float32"
+            )
 
         self._fitted = False
 
@@ -373,8 +389,8 @@ class KerasConditionalAdapter:
 
             with self.device_manager.scope():
                 history = network.fit(
-                    self._X_train,
-                    self._y_train,
+                    x_train,
+                    y_train,
                     epochs=int(self.epochs),
                     batch_size=batch_size,
                     callbacks=self.callbacks,
@@ -383,6 +399,7 @@ class KerasConditionalAdapter:
                 )
 
         except Exception as exc:
+            self._fitted = False
             raise TrainingError(
                 f"Keras model training failed: {exc}"
             ) from exc
@@ -390,7 +407,7 @@ class KerasConditionalAdapter:
         self._fitted = True
 
         if not collect_history:
-            return {}
+            return TrainingResult()
 
         history_data = {
             name: [float(value) for value in values]
@@ -398,20 +415,20 @@ class KerasConditionalAdapter:
         }
         iterations = len(history.epoch)
 
-        return {
-            "history": history_data,
-            "metrics": {
+        return TrainingResult(
+            history=history_data,
+            metrics={
                 name: values[-1]
                 for name, values in history_data.items()
                 if values
             },
-            "n_iterations": iterations,
-            "stop_reason": (
+            n_iterations=iterations,
+            stop_reason=(
                 "stopped_before_max_epochs"
                 if iterations < int(self.epochs)
                 else "max_epochs_reached"
             ),
-        }
+        )
 
     def predict(self, X: FloatArray) -> FloatArray:
         network = self._require_model()

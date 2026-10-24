@@ -13,7 +13,7 @@ ModelClass = TypeVar("ModelClass", bound=type)
 
 
 _REQUIRED_METHODS = (
-    "initialize",
+    "rebuild",
     "fit",
     "predict",
     "get_weights",

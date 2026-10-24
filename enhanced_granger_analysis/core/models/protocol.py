@@ -1,11 +1,13 @@
 from __future__ import annotations
 
 from collections.abc import Mapping, Sequence
-from typing import Any, Protocol, TypeAlias, TypedDict
+from typing import Any, Protocol, TypeAlias
 
 import numpy as np
 from numpy.typing import NDArray
 
+from .input_spec import ModelInputSpec
+from .training_result import TrainingResult
 
 FloatArray: TypeAlias = NDArray[np.floating[Any]]
 
@@ -20,15 +22,6 @@ CallbackUpdates: TypeAlias = Mapping[
 ]
 
 
-class TrainingResult(TypedDict, total=False):
-    """Training diagnostics, not Granger-test results."""
-
-    history: Mapping[str, Sequence[float]]
-    metrics: Mapping[str, float]
-    n_iterations: int
-    stop_reason: str | None
-
-
 class GrangerModelProtocol(Protocol):
     """Backend-independent, multi-output model used by Granger analysis."""
 
@@ -38,119 +31,87 @@ class GrangerModelProtocol(Protocol):
         ...
 
     @property
+    def input_spec(self) -> ModelInputSpec:
+        """Structural description used to construct this model."""
+        ...
+        
+    @property
     def is_fitted(self) -> bool:
         """Whether the model currently contains a successful fit."""
         ...
 
-    def initialize(
+    def rebuild(
         self,
-        X: FloatArray,
         *,
-        targets: FloatArray,
         seed: int | None = None,
     ) -> None:
-        """Bind prepared data and initialize a new model state.
+        """Create a fresh predictor with the same structural specification.
 
-        X:
-            Shape (n_samples, n_features).
-        targets:
-            Shape (n_samples, n_outputs), including single-output models.
-        seed:
-            Seed for initialization, where supported.
+        Reinitialize numerical parameters.
+        Restore the baseline input-control state.
+        Recreate the optimizer and its reset baseline.
+        Discard model-owned training diagnostics.
+        Set is_fitted to False.
 
-        Requirements:
-        - validate data dimensions and sample alignment;
-        - initialize model parameters;
-        - restore the baseline input-control state;
-        - discard previous training/runtime state;
-        - set is_fitted to False;
-        - do not generate lags, scale data or perform stationarization.
+        Do not accept or retain training observations.
+        Do not change input_spec.
 
-        The implementation may convert data to its native dtype/device.
-        It must not modify the supplied arrays.
+        Callback run preparation remains the responsibility of
+        reset_components() or the default fit() behavior.
         """
         ...
 
     def fit(
         self,
+        X: FloatArray,
+        y: FloatArray,
         *,
         collect_history: bool = False,
         reset_components: bool = True,
         run_name: str | None = None,
         callback_updates: CallbackUpdates | None = None,
     ) -> TrainingResult:
-        """Train from current model parameters and input-control state.
+        """Train on explicitly supplied prepared observations.
 
-        reset_components=True:
-            Restore the initialization baseline of training components
-            and prepare fresh callbacks.
+        X has shape (n_samples, input_spec.n_features).
+        y has shape (n_samples, input_spec.n_outputs).
 
-        reset_components=False:
-            Do not perform library-managed component reset.
-            This does not suppress the framework's normal training hooks.
+        Validate dimensions, finite values and sample alignment.
+        Do not modify caller-owned arrays.
+        Do not retain training observations after the call.
 
-        Never reset model parameters or input-control state here.
+        Continue from current parameters and input-control state.
+        Never rebuild the predictor implicitly.
+
+        reset_components=True resets training components, not weights
+        or the current input-control state.
         """
         ...
 
     def predict(self, X: FloatArray) -> FloatArray:
-        """Return predictions of shape (n_samples, n_outputs).
-
-        Apply the current input-control state.
-        Do not modify X or model/training state.
-
-        Raise an appropriate error if the model is not fitted or the
-        feature dimension is incompatible.
-        """
+        """Predict using the current parameters and input-control state."""
         ...
 
     def get_weights(self) -> ModelWeights:
-        """Return independent NumPy copies of model parameters.
+        """Return independent parameter copies.
 
-        Available after initialize(), also before fit().
-
-        Include trainable and inference-relevant numerical parameters
-        required to reproduce the model's predictor.
-
-        Exclude:
-        - input-control masks;
-        - optimizer state;
-        - callback state;
-        - bound training data.
-
-        Ordering and shapes are implementation-specific, but stable for
-        the same architecture. Arrays need not all be matrices.
+        Available immediately after construction, also before fit().
+        Excludes input-control masks and optimizer/callback state.
         """
         ...
 
     def set_weights(self, weights: ModelWeights) -> None:
-        """Restore parameters compatible with the initialized architecture.
+        """Restore compatible parameters and invalidate fitted status.
 
-        Validate all arrays before assignment.
-        Do not retain references to supplied arrays.
-        Do not change input-control, optimizer or callback state.
-
-        Mark the fit as invalidated: is_fitted becomes False.
-        The caller should fit() before calling predict().
+        Preserve input-control, optimizer and callback state.
         """
         ...
 
     def omit_variables(self, variable_indices: Sequence[int]) -> None:
-        """Replace the current set of omitted input-feature columns.
+        """Replace the current omitted prepared-feature columns.
 
-        Indices refer to columns of the prepared X, not original series.
-
-        Each call is relative to the baseline established by initialize(),
-        not cumulative. An empty sequence restores that baseline.
-
-        Requirements:
-        - reject booleans, non-integers and out-of-range indices;
-        - preserve model parameters;
-        - preserve externally configured structural constraints;
-        - apply the omission during both fit() and predict().
-
-        This changes the current evaluation restriction without
-        invalidating already fitted numerical parameters.
+        Relative to the baseline established by construction/rebuild().
+        Preserve parameters, structural constraints and fitted status.
         """
         ...
 
@@ -162,11 +123,9 @@ class GrangerModelProtocol(Protocol):
         run_name: str | None = None,
         callback_updates: CallbackUpdates | None = None,
     ) -> None:
-        """Reset selected training components without changing the predictor.
+        """Reset training components without rebuilding the predictor.
 
-        Preserve model parameters, input-control state and fitted status.
-        Unsupported components may raise an explicit error.
-        Absent components require no action.
+        Preserve parameters, input-control state and fitted status.
         """
         ...
 
