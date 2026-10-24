@@ -27,7 +27,7 @@ class L1Regularizer(BaseScikitRegularizer):
         super().__init__(data=prepare_l1_data(data))
         self.l1 = self.data.params["l1"]
 
-    def value_and_grad(
+    def _value_and_grad(
         self,
         weights: np.ndarray,
     ) -> tuple[float, np.ndarray]:
@@ -36,6 +36,35 @@ class L1Regularizer(BaseScikitRegularizer):
         return (
             float(self.l1 * np.sum(np.abs(array))),
             self.l1 * np.sign(array),
+        )
+
+    def prox(
+        self,
+        weights: np.ndarray,
+        step_size: float,
+    ) -> np.ndarray:
+        array = self._validate_weights(weights)
+
+        raw_step = np.asarray(step_size)
+        if raw_step.shape != () or raw_step.dtype.kind not in "iuf":
+            raise TypeError(
+                "step_size must be a real numeric scalar."
+            )
+
+        step = float(raw_step)
+        if not np.isfinite(step) or step < 0:
+            raise ValueError(
+                "step_size must be finite and non-negative."
+            )
+
+        threshold = step * self.l1
+
+        if not np.isfinite(threshold):
+            raise ValueError("L1 threshold is non-finite.")
+
+        return np.sign(array) * np.maximum(
+            np.abs(array) - threshold,
+            0.0,
         )
 
 
@@ -83,7 +112,7 @@ class LagDependentL1Regularizer(BaseScikitRegularizer):
     def feature_weights(self) -> np.ndarray:
         return self._feature_weights.copy()
 
-    def value_and_grad(
+    def _value_and_grad(
         self,
         weights: np.ndarray,
     ) -> tuple[float, np.ndarray]:
@@ -96,4 +125,37 @@ class LagDependentL1Regularizer(BaseScikitRegularizer):
                 * np.sum(np.abs(array) * feature_weights)
             ),
             self.l1 * np.sign(array) * feature_weights,
+        )
+    
+    def prox(
+        self,
+        weights: np.ndarray,
+        step_size: float,
+    ) -> np.ndarray:
+        array = self._validate_weights(weights)
+
+        raw_step = np.asarray(step_size)
+        if raw_step.shape != () or raw_step.dtype.kind not in "iuf":
+            raise TypeError(
+                "step_size must be a real numeric scalar."
+            )
+
+        step = float(raw_step)
+        if not np.isfinite(step) or step < 0:
+            raise ValueError(
+                "step_size must be finite and non-negative."
+            )
+
+        threshold = (
+            step
+            * self.l1
+            * self._feature_weights[np.newaxis, :]
+        )
+
+        if not np.isfinite(threshold).all():
+            raise ValueError("Lag-dependent L1 threshold is non-finite.")
+
+        return np.sign(array) * np.maximum(
+            np.abs(array) - threshold,
+            0.0,
         )

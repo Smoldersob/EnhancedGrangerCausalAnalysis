@@ -1,576 +1,802 @@
 from __future__ import annotations
 
-from typing import Any, Dict, List, Tuple, Union, Optional, Mapping
+from collections.abc import Sequence
+from typing import Any
+
 import numpy as np
-from numpy.typing import NDArray
-from sklearn.base import RegressorMixin
-from sklearn.linear_model._base import LinearModel, _preprocess_data
 
+from ....core.exceptions import ModelNotFittedError, TrainingError
+from ....core.models.input_spec import ModelInputSpec
+from ....core.models.protocol import (
+    CallbackUpdates,
+    FloatArray,
+    ModelWeights,
+    TrainingResult,
+)
 from ..callbacks.base import Callback
-from ....core.components.callback_lifecycle import (
-	clone_custom_callback,
-	reset_callback_list,
+from ..callbacks.reset import reset_callbacks_for_run
+from ..constraints.base import BaseScikitConstraint
+from ..regularizers.base import BaseScikitRegularizer
+from .network_parts import (
+    LinearGrangerNetwork,
+    positive_int,
+    real_array,
 )
-from ....core.exceptions import (
-	ConstraintConfigurationError,
-	RegularizerConfigurationError,
-	ModelNotFittedError,
-	TrainingError,
-)
-
-
-class _OptimizerProxy:
-	"""Small optimizer-like adapter exposing param_groups for callback compatibility."""
-
-	def __init__(self, lr: float):
-		self.param_groups: List[Dict[str, float]] = [{"lr": float(lr)}]
-
-
-class _ArrayAdapter:
-	"""Tensor-like adapter used by callbacks that expect detach().cpu()."""
-
-	def __init__(self, array: NDArray[np.float64]):
-		self._array = array
-
-	def detach(self) -> "_ArrayAdapter":
-		return self
-
-	def cpu(self) -> NDArray[np.float64]:
-		return self._array
-
-
-class _CoefficientLayerAdapter:
-	"""Layer-like adapter exposing a weight attribute used by logging callbacks."""
-
-	def __init__(self, model: "ScikitConstrainedGrangerModel"):
-		self._model = model
-
-	@property
-	def weight(self) -> _ArrayAdapter:
-		coef = np.asarray(self._model.coef_, dtype=np.float64)
-		return _ArrayAdapter(coef)
-
-
-class _VariableControlLayer:
-	"""Non-trainable diagonal masking layer for scikit-based model."""
-
-	def __init__(self, n_features: int):
-		self.trainable = False
-		self._n_features = n_features
-		self._mask = np.ones(n_features, dtype=np.float64)
-		self.weight = np.diag(self._mask).astype(np.float64)
-
-	def reset(self) -> None:
-		self._mask = np.ones(self._n_features, dtype=np.float64)
-		self.weight = np.diag(self._mask).astype(np.float64)
-
-	def omit(self, variable_indices: List[int]) -> None:
-		for idx in variable_indices:
-			if idx < 0 or idx >= self._n_features:
-				raise TrainingError(f"Variable index {idx} out of range [0, {self._n_features - 1}]")
-			self._mask[idx] = 0.0
-		self.weight = np.diag(self._mask).astype(np.float64)
-
-	def transform(self, x: NDArray[np.float64]) -> NDArray[np.float64]:
-		return x @ self.weight
-
-	@property
-	def mask(self) -> NDArray[np.float64]:
-		return self._mask.copy()
-
-
 from .registry import register_model
 
-@register_model(
-    "conditional",
-    "conditional_linear",
-)
-class ScikitConstrainedGrangerModel(LinearModel, RegressorMixin):
-	"""Scikit-compatible Granger model with gradient descent, callbacks, constraints and regularization."""
-
-	_NEWTON_EPS = 1e-12
-
-	def __init__(
-		self,
-		backend: str = "sklearn",
-		regularizer: Optional[Any] = None,
-		constraint: Optional[Any] = None,
-		callbacks: List[Callback] = None,
-		fit_intercept: bool = True,
-		learning_rate: float = 1.0,
-		max_iter: int = 1000,
-		tol: float = 1e-8,
-		batch_size: Optional[int] = None,
-		verbose: int = 0,
-		**kwargs: Any
-	):
-		self.backend = backend
-		self.regularizer=regularizer,
-		self.constraint=constraint,
-		callbacks=callbacks or [],
-		needs_reinit=False,
-
-		if learning_rate <= 0:
-			raise ConstraintConfigurationError("learning_rate must be > 0")
-		if max_iter <= 0:
-			raise ConstraintConfigurationError("max_iter must be > 0")
-		if tol < 0:
-			raise ConstraintConfigurationError("tol must be >= 0")
-		if batch_size is not None and batch_size <= 0:
-			raise ConstraintConfigurationError("batch_size must be > 0 when provided")
-
-		self.fit_intercept = fit_intercept
-		self.learning_rate = learning_rate
-		self.max_iter = max_iter
-		self.tol = tol
-		self.batch_size = batch_size
-		self.verbose = verbose
-
-		self._n_features: Optional[int] = None
-		self._n_outputs: Optional[int] = None
-		self._variable_mask: Optional[NDArray[np.float64]] = None
-		self._X_train: Optional[NDArray[np.float64]] = None
-		self._y_train: Optional[NDArray[np.float64]] = None
-		self._loss_history: List[float] = []
-		self._optimizer_proxy = _OptimizerProxy(self.learning_rate)
-		self._variable_control_layer: Optional[_VariableControlLayer] = None
-		self._coefficient_layer = _CoefficientLayerAdapter(self)
-
-		self._validate_components()
-
-	def _validate_components(self) -> None:
-		if self.regularizer is not None:
-			from ..regularizers.base import BaseNumpyRegularizer
-			if not isinstance(self.regularizer, BaseNumpyRegularizer):
-				raise RegularizerConfigurationError(
-					"regularizer must be None or an instance of "
-					"BaseNumpyRegularizer."
-				)
-		if self.constraint is not None and not callable(self.constraint):
-			raise ConstraintConfigurationError("constraint must be callable for ScikitConstrainedGrangerModel")
-
-		if not isinstance(self.callbacks, list):
-			raise ConstraintConfigurationError("callbacks must be a list of Callback objects")
-		for callback in self.callbacks:
-			if not isinstance(callback, Callback):
-				raise ConstraintConfigurationError(
-					"All callbacks must inherit from callbacks.base_callback.Callback"
-				)
-
-	def _run_callback_hook(self, hook_name: str, state: Dict[str, Any]) -> bool:
-		for callback in self.callbacks:
-			hook = getattr(callback, hook_name)
-			response = hook(state)
-			if response is False:
-				state["stop_training"] = True
-				if not state.get("stop_reason"):
-					state["stop_reason"] = f"{callback.__class__.__name__}:{hook_name}"
-				return False
-		return True
-
-	def _evaluate_regularizer(
-		self,
-		coef: NDArray[np.float64],
-	) -> Tuple[float, NDArray[np.float64]]:
-		"""Evaluate the penalty and its gradient for effective coefficients."""
-		if self.regularizer is None:
-			return 0.0, np.zeros_like(coef)
-
-		effective_mask = np.array(
-			self.regularizer.data.layout.base_mask,
-			dtype=coef.dtype,
-			copy=True,
-		)
-
-		if self._variable_control_layer is not None:
-			effective_mask *= (
-				self._variable_control_layer.mask[np.newaxis, :]
-			)
-
-		effective_coef = coef * effective_mask
-
-		penalty, gradient = self.regularizer.value_and_grad(
-			effective_coef
-		)
-
-		# Chain rule: effective_coef = coef * effective_mask.
-		return float(penalty), gradient * effective_mask
-
-	def _apply_constraint(self, coef: NDArray[np.float64]) -> NDArray[np.float64]:
-		if self.constraint is None:
-			return coef
-
-		constrained = self.constraint(coef)
-		constrained = np.asarray(constrained, dtype=np.float64)
-		if constrained.shape != coef.shape:
-			raise TrainingError("constraint returned array with invalid shape")
-		return constrained
-
-	def _calculate_hessian(self, X: NDArray[np.float64]) -> NDArray[np.float64]:
-		"""Compute Hessian for linear least-squares objective: H = X^T X."""
-		return X.T @ X
-
-	def _calculate_gradient(
-		self,
-		X: NDArray[np.float64],
-		coef: NDArray[np.float64],
-		y: NDArray[np.float64],
-	) -> NDArray[np.float64]:
-		"""Compute multitask gradient: dL/dW = (XW^T - y)^T X."""
-		pred = X @ coef.T
-		return (pred - y).T @ X
-
-	def _newton_update(
-		self,
-		coef: NDArray[np.float64],
-		grad: NDArray[np.float64],
-		hessian: NDArray[np.float64],
-		lr: float,
-		active_features: NDArray[np.bool_],
-	) -> NDArray[np.float64]:
-		"""Apply Newton step on active features and freeze inactive/ill-conditioned ones."""
-		updated = coef.copy()
-		if not np.any(active_features):
-			return updated
-
-		H_active = hessian[np.ix_(active_features, active_features)]
-		if H_active.size == 0:
-			return updated
-
-		# Small damping improves stability for near-singular Hessian blocks.
-		H_active = H_active + np.eye(H_active.shape[0], dtype=np.float64) * self._NEWTON_EPS
-
-		for out_idx in range(updated.shape[0]):
-			g_active = grad[out_idx, active_features]
-			try:
-				delta_active = np.linalg.solve(H_active, g_active)
-			except np.linalg.LinAlgError:
-				delta_active = np.linalg.pinv(H_active) @ g_active
-			updated[out_idx, active_features] = (
-				updated[out_idx, active_features] - lr * delta_active
-			)
-
-		return updated
-
-	def initialize(self, data: NDArray[np.float64], lags: Optional[int] = None, **kwargs: Any) -> None:
-		self._validate_components()
-
-		X = np.asarray(data, dtype=np.float64)
-		y_raw = kwargs.get("targets")
-		if y_raw is None:
-			raise TrainingError(
-				"initialize requires precomputed targets via targets=<ndarray>. "
-				"Lagged features should be prepared by LagEngine."
-			)
-
-		y = np.asarray(y_raw, dtype=np.float64)
-		if X.ndim != 2:
-			raise TrainingError("Expected 2D lagged feature matrix")
-		if y.ndim == 1:
-			y = y[:, np.newaxis]
-		if y.ndim != 2:
-			raise TrainingError("targets must be 1D or 2D array")
-		if X.shape[0] != y.shape[0]:
-			raise TrainingError("Lagged features and targets must have the same number of rows")
-
-		self._n_features = X.shape[1]
-		self._n_outputs = y.shape[1]
-		self._variable_control_layer = _VariableControlLayer(self._n_features)
-		self._variable_mask = self._variable_control_layer.mask
-		self.coef_ = np.zeros(
-			(self._n_outputs, self._n_features),
-			dtype=np.float64,
-		)
-		self.intercept_ = np.zeros(
-			self._n_outputs,
-			dtype=np.float64,
-		)
-		self._X_train = X
-		self._y_train = y
-		self._loss_history = []
-		self._optimizer_proxy = _OptimizerProxy(self.learning_rate)
-		self._fitted = False
-
-	def fit(
-		self,
-		X: Optional[NDArray[np.float64]] = None,
-		y: Optional[NDArray[np.float64]] = None,
-		**kwargs: Any,
-	) -> Dict[str, Any]:
-		"""Train using gradient descent and return BaseGrangerModel-compatible result."""
-		if X is not None or y is not None:
-			if X is None or y is None:
-				raise TrainingError("Both X and y must be provided when using sklearn-style fit")
-			lags = int(kwargs.get("lags", 1))
-			self.initialize(X, lags=lags, targets=y)
-
-		if self._X_train is None or self._y_train is None:
-			raise ModelNotFittedError("Model is not initialized. Call initialize(...) first.")
-
-		X_train = self._X_train
-		if self._variable_control_layer is not None:
-			X_train = self._variable_control_layer.transform(X_train)
-
-		y_train = self._y_train
-		X_proc, y_proc, X_offset, y_offset, X_scale, _ = _preprocess_data(
-			X_train,
-			y_train,
-			fit_intercept=self.fit_intercept,
-			copy=True,
-		)
-
-		n_samples, n_features = X_proc.shape
-		n_outputs = y_proc.shape[1]
-
-		if n_samples == 0:
-			raise TrainingError("Cannot train on an empty dataset.")
-
-		coef = np.array(self.coef_, dtype=np.float64, copy=True)
-		if coef.shape != (n_outputs, n_features):
-			raise TrainingError(
-				"Current coefficients do not match the training data."
-			)
-
-		self._fitted = False
-		self.coef_ = coef.copy()
-		self._update_analytic_intercept(X_offset, y_offset)
-
-		# Reset training-loop learning rate, separately from callback reset.
-		self._optimizer_proxy = _OptimizerProxy(self.learning_rate)
-
-		self._loss_history = []
-		callback_state: Dict[str, Any] = {
-			"model": self,
-			"optimizer": self._optimizer_proxy,
-			"stop_training": False,
-			"stop_reason": None,
-			"loss_history": self._loss_history,
-		}
-		self._run_callback_hook("on_train_beginning", callback_state)
-
-		for epoch in range(self.max_iter):
-			callback_state["epoch"] = epoch
-			if not self._run_callback_hook("on_epoch_beginning", callback_state):
-				break
-
-			lr = float(self._optimizer_proxy.param_groups[0]["lr"])
-			if self.batch_size is None:
-				batch_ranges = [(0, n_samples)]
-			else:
-				batch_ranges = [
-					(start, min(start + self.batch_size, n_samples))
-					for start in range(0, n_samples, self.batch_size)
-				]
-
-			for start, end in batch_ranges:
-				Xb = X_proc[start:end, :]
-				yb = y_proc[start:end, :]
-				grad = self._calculate_gradient(Xb, coef, yb)
-				hessian = self._calculate_hessian(Xb)
-
-				h_diag = np.diag(hessian)
-				mask_vec = (
-					self._variable_control_layer.mask
-					if self._variable_control_layer is not None
-					else np.ones(n_features, dtype=np.float64)
-				)
-				# omit_variables zeroes feature columns, which zeroes corresponding Hessian
-				# rows/cols; we freeze those coefficients using active_features mask.
-				active_features = (mask_vec > 0.0) & (np.abs(h_diag) > self._NEWTON_EPS)
-
-				_, reg_grad = self._evaluate_regularizer(coef)
-				grad = grad + reg_grad
-				coef = self._newton_update(coef, grad, hessian, lr, active_features)
-				coef = self._apply_constraint(coef)
-
-			self.coef_ = coef.copy()
-			self._update_analytic_intercept(X_offset, y_offset)
-
-			pred_full = X_proc @ self.coef_.T
-			mse = float(np.mean((pred_full - y_proc) ** 2))
-			reg_penalty, _ = self._evaluate_regularizer(coef)
-			epoch_loss = float(mse + reg_penalty)
-			self._loss_history.append(epoch_loss)
-
-			callback_state["epoch_loss"] = epoch_loss
-			callback_state["loss_history"] = self._loss_history
-			if not self._run_callback_hook("on_epoch_end", callback_state):
-				break
-
-			if self.verbose:
-				print(f"Epoch {epoch + 1}/{self.max_iter} - Loss: {epoch_loss:.8f}")
-
-			if callback_state.get("stop_training"):
-				break
-
-			if len(self._loss_history) >= 2:
-				if abs(self._loss_history[-2] - self._loss_history[-1]) <= self.tol:
-					callback_state["stop_reason"] = callback_state.get("stop_reason") or "tolerance"
-					break
-
-		self.coef_ = coef
-		self._run_callback_hook("on_train_end", callback_state)
-
-		# Do not overwrite weights restored by an end-of-epoch callback.
-		self._update_analytic_intercept(X_offset, y_offset)
-		self._fitted = True
-
-		self._run_callback_hook("on_train_end", callback_state)
-
-		# Callbacks may restore a previous kernel.
-		# In this backend the intercept is derived analytically from that kernel.
-		self._update_analytic_intercept(X_offset, y_offset)
-
-		forecasts = self.predict(self._X_train)
-
-		reg_penalty, _ = self._evaluate_regularizer(self.coef_)
-		final_loss = float(
-			np.mean((forecasts - self._y_train) ** 2) + reg_penalty
-		)
-		return {
-			"test_statistic": final_loss,
-			"p_value": np.nan,
-			"weights": self.get_weights(),
-			"forecasts": forecasts,
-			"history": {
-				"loss": self._loss_history,
-				"stop_reason": callback_state.get("stop_reason"),
-			},
-		}
-
-	def predict(self, X: NDArray[np.float64]) -> NDArray[np.float64]:
-		if not self._fitted or not hasattr(self, "coef_"):
-			raise ModelNotFittedError("Model is not fitted. Call fit(...) first.")
-
-		x_arr = np.asarray(X, dtype=np.float64)
-		if x_arr.ndim != 2:
-			raise TrainingError("X must be a 2D array")
-		if self._variable_control_layer is not None:
-			x_arr = self._variable_control_layer.transform(x_arr)
-
-		return x_arr @ self.coef_.T + self.intercept_
-
-	def set_weights(
-		self,
-		weights: List[NDArray[np.float64]],
-	) -> None:
-		"""Assign coefficients without changing the input-control mask."""
-		if self._n_features is None or self._n_outputs is None:
-			raise ModelNotFittedError(
-				"Model is not initialized. Call initialize(...) first."
-			)
-
-		if not isinstance(weights, list) or len(weights) != 2:
-			raise TrainingError(
-				"This linear model requires [kernel, bias]."
-			)
-
-		kernel = np.array(weights[0], dtype=np.float64, copy=True)
-		bias = np.array(weights[1], dtype=np.float64, copy=True)
-
-		expected_kernel = (self._n_features, self._n_outputs)
-		expected_bias = (self._n_outputs,)
-
-		if kernel.shape != expected_kernel:
-			raise TrainingError(
-				f"Kernel shape is {kernel.shape}, "
-				f"expected {expected_kernel}."
-			)
-		if bias.shape != expected_bias:
-			raise TrainingError(
-				f"Bias shape is {bias.shape}, expected {expected_bias}."
-			)
-		if not np.all(np.isfinite(kernel)) or not np.all(np.isfinite(bias)):
-			raise TrainingError("Weights must contain finite values.")
-		if not self.fit_intercept and np.any(bias != 0.0):
-			raise TrainingError(
-				"Non-zero bias is not allowed with fit_intercept=False."
-			)
-
-		self.coef_ = kernel.T.copy()
-		self.intercept_ = bias.copy()
-
-	def get_weights(self) -> List[NDArray[np.float64]]:
-		"""Return coefficient copies: [kernel, bias].
-
-		kernel: (n_features, n_outputs)
-		bias:   (n_outputs,)
-		Input-control state is excluded.
-		"""
-		if (
-			self._n_features is None
-			or self._n_outputs is None
-			or not hasattr(self, "coef_")
-			or not hasattr(self, "intercept_")
-		):
-			raise ModelNotFittedError(
-				"Model is not initialized. Call initialize(...) first."
-			)
-
-		kernel = np.array(
-			self.coef_.T,
-			dtype=np.float64,
-			copy=True,
-		)
-		bias = np.array(
-			self.intercept_,
-			dtype=np.float64,
-			copy=True,
-		).reshape(self._n_outputs)
-
-		return [kernel, bias]
-
-	def omit_variables(self, variable_indices: List[int]) -> None:
-		if self._n_features is None:
-			raise ModelNotFittedError("Model is not initialized. Call initialize(...) first.")
-		if self._variable_control_layer is None:
-			raise ModelNotFittedError("Model is not initialized. Call initialize(...) first.")
-
-		# Match PyTorch behavior: each call starts from fully enabled variables.
-		self._variable_control_layer.reset()
-		self._variable_control_layer.omit(variable_indices)
-		self._variable_mask = self._variable_control_layer.mask
-
-	def set_regularizer(self, regularizer: Any) -> None:
-		self._validate_components()
-		self.regularizer = regularizer
-
-	def set_constraint(self, constraint: Any) -> None:
-		self._validate_components()
-		self.constraint = constraint
-	
-	def reset_callbacks(
-		self,
-		run_name: str,
-		callback_updates: Optional[
-			Mapping[Union[int, str, type], Mapping[str, Any]]
-		] = None,
-	) -> None:
-		fresh_callbacks = reset_callback_list(
-			self.callbacks,
-			run_name,
-			callback_updates,
-			expected_type=Callback,
-			clone_callback=clone_custom_callback,
-		)
-		self.callbacks = fresh_callbacks
-
-	def _update_analytic_intercept(
-		self,
-		X_offset: NDArray[np.float64],
-		y_offset: NDArray[np.float64],
-	) -> None:
-		"""Update the intercept for current coefficients and masked inputs."""
-		if self.fit_intercept:
-			bias = (
-				np.asarray(y_offset, dtype=np.float64)
-				- np.asarray(X_offset, dtype=np.float64) @ self.coef_.T
-			)
-			self.intercept_ = np.asarray(
-				bias, dtype=np.float64
-			).reshape(self._n_outputs).copy()
-		else:
-			self.intercept_ = np.zeros(
-				self._n_outputs,
-				dtype=np.float64,
-			)
+
+class _StepSizeControl:
+    """Compatibility bridge for existing callbacks, not an optimizer.
+
+    'lr' is a relaxation factor for a curvature-scaled update.
+    """
+
+    def __init__(self, learning_rate: float) -> None:
+        self.param_groups = [{"lr": float(learning_rate)}]
+
+
+class _ArrayView:
+    """Compatibility bridge for the existing histogram callback."""
+
+    def __init__(self, value: np.ndarray) -> None:
+        self._value = value.copy()
+
+    def detach(self) -> _ArrayView:
+        return self
+
+    def cpu(self) -> np.ndarray:
+        return self._value.copy()
+
+
+class _CoefficientView:
+    def __init__(self, adapter: ScikitConditionalAdapter) -> None:
+        self._adapter = adapter
+
+    @property
+    def weight(self) -> _ArrayView:
+        network = self._adapter._require_model()
+        return _ArrayView(network.coefficient_layer.weight)
+
+
+@register_model("conditional", "conditional_linear")
+class ScikitConditionalAdapter:
+    """Granger protocol adapter around a separate NumPy architecture.
+
+    The data objective is MSE averaged over samples and outputs.
+
+    Built-in L1 regularizers use exact proximal steps. Custom regularizers
+    without a prox() method use a gradient/subgradient fallback and may
+    require a smaller learning_rate.
+
+    Constraints are applied after each update. Arbitrary nonconvex
+    constraints do not imply convergence to a global optimum.
+    """
+
+    def __init__(
+        self,
+        *,
+        input_spec: ModelInputSpec,
+        regularizer: BaseScikitRegularizer | None = None,
+        constraint: BaseScikitConstraint | None = None,
+        callbacks: Sequence[Callback] | None = None,
+        epochs: int | None = None,
+        batch_size: int | None = None,
+        verbose: int = 0,
+        use_bias: bool | None = None,
+        learning_rate: float = 1.0,
+        tol: float = 1e-8,
+        seed: int | None = None,
+        max_iter: int | None = None,
+        fit_intercept: bool | None = None,
+    ) -> None:
+        if not isinstance(input_spec, ModelInputSpec):
+            raise TypeError("input_spec must be a ModelInputSpec.")
+
+        if epochs is not None and max_iter is not None:
+            raise ValueError(
+                "Specify epochs or its legacy alias max_iter, not both."
+            )
+
+        if use_bias is not None and fit_intercept is not None:
+            raise ValueError(
+                "Specify use_bias or its legacy alias "
+                "fit_intercept, not both."
+            )
+
+        if regularizer is not None and not isinstance(
+            regularizer, BaseScikitRegularizer
+        ):
+            raise TypeError(
+                "regularizer must be a BaseScikitRegularizer or None."
+            )
+
+        if constraint is not None and not isinstance(
+            constraint, BaseScikitConstraint
+        ):
+            raise TypeError(
+                "constraint must be a BaseScikitConstraint or None."
+            )
+
+        self._input_spec = input_spec
+        self._n_features = input_spec.n_features
+        self._n_outputs = input_spec.n_outputs
+
+        self.epochs = (
+            epochs
+            if epochs is not None
+            else (1000 if max_iter is None else max_iter)
+        )
+        self.use_bias = (
+            use_bias
+            if use_bias is not None
+            else (True if fit_intercept is None else fit_intercept)
+        )
+
+        self.batch_size = batch_size
+        self.verbose = verbose
+        self.learning_rate = learning_rate
+        self.tol = tol
+
+        # Configuration templates. Runtime copies belong to the network.
+        self.regularizer = regularizer
+        self.constraint = constraint
+
+        self.callbacks = (
+            list(callbacks) if callbacks is not None else []
+        )
+        if any(
+            not isinstance(callback, Callback)
+            for callback in self.callbacks
+        ):
+            raise TypeError(
+                "All callbacks must inherit from scikit Callback."
+            )
+
+        self.model: LinearGrangerNetwork | None = None
+        self._fitted = False
+        self._run_counter = 0
+        self._loss_history: list[float] = []
+        self._coefficient_view = _CoefficientView(self)
+
+        self._validate_training_config()
+        self.rebuild(seed=seed)
+
+    @property
+    def backend(self) -> str:
+        return "sklearn"
+
+    @property
+    def input_spec(self) -> ModelInputSpec:
+        return self._input_spec
+
+    @property
+    def is_fitted(self) -> bool:
+        return self._fitted
+
+    @property
+    def max_iter(self) -> int:
+        return self.epochs
+
+    @max_iter.setter
+    def max_iter(self, value: int) -> None:
+        self.epochs = value
+
+    @property
+    def fit_intercept(self) -> bool:
+        return self.use_bias
+
+    @property
+    def coef_(self) -> np.ndarray:
+        return self._require_model().coefficient_layer.weight.copy()
+
+    @property
+    def intercept_(self) -> np.ndarray:
+        bias = self._require_model().coefficient_layer.bias
+
+        if bias is None:
+            return np.zeros(self._n_outputs, dtype=np.float64)
+
+        return bias.copy()
+
+    @property
+    def _coefficient_layer(self) -> _CoefficientView:
+        return self._coefficient_view
+
+    @property
+    def _variable_control_layer(self):
+        return self._require_model().variable_control_layer
+
+    @staticmethod
+    def _real_scalar(value: Any, name: str) -> float:
+        raw = np.asarray(value)
+
+        if raw.shape != () or raw.dtype.kind not in "fiu":
+            raise TypeError(
+                f"{name} must be a real numeric scalar."
+            )
+
+        result = float(raw)
+
+        if not np.isfinite(result):
+            raise ValueError(f"{name} must be finite.")
+
+        return result
+
+    def _validate_training_config(self) -> None:
+        positive_int(self.epochs, "epochs")
+
+        if self.batch_size is not None:
+            positive_int(self.batch_size, "batch_size")
+
+        if not isinstance(self.use_bias, bool):
+            raise TypeError("use_bias must be a bool.")
+
+        if (
+            isinstance(self.verbose, (bool, np.bool_))
+            or not isinstance(self.verbose, (int, np.integer))
+            or self.verbose not in (0, 1, 2)
+        ):
+            raise ValueError("verbose must be 0, 1 or 2.")
+
+        learning_rate = self._real_scalar(
+            self.learning_rate, "learning_rate"
+        )
+        if not 0 < learning_rate <= 1:
+            raise ValueError("learning_rate must be in (0, 1].")
+
+        if self._real_scalar(self.tol, "tol") < 0:
+            raise ValueError("tol must be non-negative.")
+
+        if (
+            self.model is not None
+            and self.model.use_bias != self.use_bias
+        ):
+            raise ValueError(
+                "Changing use_bias requires a new adapter."
+            )
+
+    def _require_model(self) -> LinearGrangerNetwork:
+        if self.model is None:
+            raise RuntimeError(
+                "Predictor construction did not complete."
+            )
+        return self.model
+
+    def rebuild(self, *, seed: int | None = None) -> None:
+        self._validate_training_config()
+
+        if seed is not None and (
+            isinstance(seed, (bool, np.bool_))
+            or not isinstance(seed, (int, np.integer))
+            or seed < 0
+        ):
+            raise ValueError(
+                "seed must be a non-negative integer or None."
+            )
+
+        # Zero initialization is deterministic; no global RNG changes.
+        regularizer = None
+        if self.regularizer is not None:
+            regularizer = type(self.regularizer).from_config(
+                self.regularizer.get_config()
+            )
+
+        constraint = None
+        if self.constraint is not None:
+            constraint = type(self.constraint).from_config(
+                self.constraint.get_config()
+            )
+
+        if regularizer is not None:
+            layout = regularizer.data.layout
+
+            if (
+                tuple(layout.output_names) != self.input_spec.effects
+                or dict(layout.cause_slices)
+                != dict(self.input_spec.cause_slices)
+                or tuple(layout.feature_lags)
+                != self.input_spec.feature_lags
+            ):
+                raise ValueError(
+                    "Regularizer layout does not match input_spec."
+                )
+
+        if (
+            constraint is not None
+            and tuple(constraint.prepared_data.output_names)
+            != self.input_spec.effects
+        ):
+            raise ValueError(
+                "Constraint output order does not match input_spec."
+            )
+
+        network = LinearGrangerNetwork(
+            n_features=self._n_features,
+            n_outputs=self._n_outputs,
+            constraint=constraint,
+            regularizer=regularizer,
+            use_bias=self.use_bias,
+        )
+
+        self.model = network
+        self._step_control = _StepSizeControl(
+            float(self.learning_rate)
+        )
+        self._loss_history = []
+        self._fitted = False
+
+    def reset_components(
+        self,
+        *,
+        reset_optimizer: bool = True,
+        reset_callbacks: bool = True,
+        run_name: str | None = None,
+        callback_updates: CallbackUpdates | None = None,
+    ) -> None:
+        self._require_model()
+
+        if (
+            not isinstance(reset_optimizer, bool)
+            or not isinstance(reset_callbacks, bool)
+        ):
+            raise TypeError(
+                "reset_optimizer and reset_callbacks must be bools."
+            )
+
+        if not reset_callbacks and (
+            run_name is not None or callback_updates is not None
+        ):
+            raise ValueError(
+                "run_name and callback_updates require "
+                "reset_callbacks=True."
+            )
+
+        next_counter = self._run_counter + 1
+        name = (
+            run_name
+            if run_name is not None
+            else f"run_{next_counter:04d}"
+        )
+
+        fresh_callbacks = None
+
+        if reset_callbacks:
+            fresh_callbacks = reset_callbacks_for_run(
+                self.callbacks,
+                run_name=name,
+                callback_updates=callback_updates,
+            )
+
+        if reset_optimizer:
+            # Uniform protocol flag: reset loop control, not an optimizer.
+            rate = self._real_scalar(
+                self.learning_rate, "learning_rate"
+            )
+            if not 0 < rate <= 1:
+                raise ValueError(
+                    "learning_rate must be in (0, 1]."
+                )
+            self._step_control = _StepSizeControl(rate)
+
+        if fresh_callbacks is not None:
+            self.callbacks = fresh_callbacks
+            self._run_counter = next_counter
+
+    def reset_callbacks(
+        self,
+        run_name: str,
+        callback_updates: CallbackUpdates | None = None,
+    ) -> None:
+        self.reset_components(
+            reset_optimizer=False,
+            reset_callbacks=True,
+            run_name=run_name,
+            callback_updates=callback_updates,
+        )
+
+    def _run_callback_hook(
+        self,
+        name: str,
+        state: dict[str, Any],
+    ) -> None:
+        for callback in self.callbacks:
+            response = getattr(callback, name)(state)
+
+            if response is False:
+                state["stop_training"] = True
+
+                if state.get("stop_reason") is None:
+                    state["stop_reason"] = (
+                        f"{type(callback).__name__}:{name}"
+                    )
+
+        # All callbacks receive the hook, including after a stop request.
+
+    def _training_arrays(
+        self,
+        X: Any,
+        y: Any,
+    ) -> tuple[np.ndarray, np.ndarray]:
+        x_array = real_array(X, "X")
+        y_array = real_array(y, "y")
+
+        if x_array.ndim != 2 or y_array.ndim != 2:
+            raise ValueError(
+                "X and y must be two-dimensional arrays."
+            )
+
+        if (
+            x_array.shape[0] == 0
+            or x_array.shape[0] != y_array.shape[0]
+        ):
+            raise ValueError(
+                "X and y must have equal, non-zero sample counts."
+            )
+
+        if (
+            x_array.shape[1] != self._n_features
+            or y_array.shape[1] != self._n_outputs
+        ):
+            raise ValueError(
+                "X/y feature and output dimensions must "
+                "match input_spec."
+            )
+
+        return x_array, y_array
+
+    def _objective(
+        self,
+        X: np.ndarray,
+        y: np.ndarray,
+    ) -> tuple[float, float, float]:
+        network = self._require_model()
+
+        with np.errstate(over="ignore", invalid="ignore"):
+            mse = float(np.mean((network(X) - y) ** 2))
+            penalty = network.regularization_loss()
+            loss = mse + penalty
+
+        if not np.isfinite([mse, penalty, loss]).all():
+            raise ValueError(
+                "Training objective is non-finite."
+            )
+
+        return loss, mse, penalty
+
+    @staticmethod
+    def _update_bias(
+        network: LinearGrangerNetwork,
+        x_mean: np.ndarray,
+        y_mean: np.ndarray,
+    ) -> None:
+        layer = network.coefficient_layer
+
+        if layer.bias is not None:
+            bias = y_mean - x_mean @ layer.weight.T
+
+            if not np.isfinite(bias).all():
+                raise ValueError("Analytic bias is non-finite.")
+
+            layer.bias[...] = bias
+
+    def _coefficient_step(
+        self,
+        data_gradient: np.ndarray,
+        step_size: float,
+    ) -> None:
+        network = self._require_model()
+        layer = network.coefficient_layer
+        regularizer = network.regularizer
+
+        prox = (
+            None
+            if regularizer is None
+            else getattr(regularizer, "prox", None)
+        )
+
+        if callable(prox):
+            candidate = prox(
+                layer.weight - step_size * data_gradient,
+                step_size,
+            )
+        else:
+            _, penalty_gradient = (
+                network.regularization_value_and_grad()
+            )
+            candidate = layer.weight - step_size * (
+                data_gradient + penalty_gradient
+            )
+
+        # Validation and constraint enforcement precede assignment.
+        layer.weight[...] = network.constrain(candidate)
+
+    def fit(
+        self,
+        X: FloatArray,
+        y: FloatArray,
+        *,
+        collect_history: bool = False,
+        reset_components: bool = True,
+        run_name: str | None = None,
+        callback_updates: CallbackUpdates | None = None,
+    ) -> TrainingResult:
+        network = self._require_model()
+        self._validate_training_config()
+
+        if (
+            not isinstance(collect_history, bool)
+            or not isinstance(reset_components, bool)
+        ):
+            raise TypeError(
+                "collect_history and reset_components must be bools."
+            )
+
+        if not reset_components and (
+            run_name is not None or callback_updates is not None
+        ):
+            raise ValueError(
+                "run_name and callback_updates require "
+                "reset_components=True."
+            )
+
+        x_array, y_array = self._training_arrays(X, y)
+        batch_size = (
+            len(x_array)
+            if self.batch_size is None
+            else int(self.batch_size)
+        )
+
+        self._fitted = False
+        self._loss_history = []
+        iterations = 0
+
+        state: dict[str, Any] = {
+            "model": self,
+            "stop_training": False,
+            "stop_reason": None,
+            "loss_history": self._loss_history,
+        }
+
+        try:
+            if reset_components:
+                self.reset_components(
+                    run_name=run_name,
+                    callback_updates=callback_updates,
+                )
+
+            # Compatibility key, not a prepared/native optimizer.
+            state["optimizer"] = self._step_control
+            self._run_callback_hook("on_train_beginning", state)
+
+            initial_mask = network.variable_control_layer.mask
+            x_masked = network.variable_control_layer(x_array)
+
+            if self.use_bias:
+                x_mean = x_masked.mean(axis=0)
+                y_mean = y_array.mean(axis=0)
+            else:
+                x_mean = np.zeros(self._n_features)
+                y_mean = np.zeros(self._n_outputs)
+
+            x_centered = x_masked - x_mean
+            y_centered = y_array - y_mean
+
+            # Observations and curvature information remain local.
+            batches = []
+
+            for start in range(0, len(x_array), batch_size):
+                end = min(start + batch_size, len(x_array))
+                xb = x_centered[start:end]
+
+                norm = float(np.linalg.norm(xb, ord=2))
+                curvature = (
+                    2.0
+                    * norm ** 2
+                    / ((end - start) * self._n_outputs)
+                )
+
+                if not np.isfinite(curvature):
+                    raise ValueError(
+                        "Data curvature is non-finite."
+                    )
+
+                # Zero curvature means the data term has no W gradient.
+                curvature = curvature if curvature > 0 else 1.0
+                batches.append((start, end, curvature))
+
+            previous_loss = None
+
+            for epoch in range(int(self.epochs)):
+                if state["stop_training"]:
+                    break
+
+                state["epoch"] = epoch
+                self._run_callback_hook(
+                    "on_epoch_beginning", state
+                )
+
+                if state["stop_training"]:
+                    break
+
+                if not np.array_equal(
+                    network.variable_control_layer.mask,
+                    initial_mask,
+                ):
+                    raise ValueError(
+                        "Change input omission between fit() calls, "
+                        "not inside callbacks."
+                    )
+
+                relaxation = self._real_scalar(
+                    self._step_control.param_groups[0]["lr"],
+                    "callback learning rate",
+                )
+
+                if not 0 <= relaxation <= 1:
+                    raise ValueError(
+                        "Callback learning rate must lie in [0, 1]."
+                    )
+
+                for start, end, curvature in batches:
+                    xb = x_centered[start:end]
+                    yb = y_centered[start:end]
+                    weights = network.coefficient_layer.weight
+
+                    gradient = (
+                        2.0
+                        * (xb @ weights.T - yb).T
+                        @ xb
+                        / ((end - start) * self._n_outputs)
+                    )
+
+                    step_size = relaxation / curvature
+
+                    if not np.isfinite(step_size):
+                        raise ValueError(
+                            "Coefficient step size is non-finite."
+                        )
+
+                    self._coefficient_step(
+                        gradient, step_size
+                    )
+                    self._update_bias(
+                        network, x_mean, y_mean
+                    )
+
+                loss, mse, penalty = self._objective(
+                    x_array, y_array
+                )
+                self._loss_history.append(loss)
+                iterations += 1
+
+                state.update(
+                    epoch_loss=loss,
+                    loss=loss,
+                    mse=mse,
+                    regularization_loss=penalty,
+                )
+
+                self._run_callback_hook("on_epoch_end", state)
+
+                if not np.array_equal(
+                    network.variable_control_layer.mask,
+                    initial_mask,
+                ):
+                    raise ValueError(
+                        "Change input omission between fit() calls, "
+                        "not inside callbacks."
+                    )
+
+                if self.verbose:
+                    print(
+                        f"Epoch {epoch + 1}/{self.epochs}"
+                        f" - loss: {loss:.8f}"
+                    )
+
+                if state["stop_training"]:
+                    break
+
+                if (
+                    previous_loss is not None
+                    and abs(previous_loss - loss) <= float(self.tol)
+                ):
+                    state["stop_training"] = True
+                    state["stop_reason"] = "tolerance"
+                    break
+
+                previous_loss = loss
+
+            # Exactly once. Preserve callback-restored kernel AND bias.
+            self._run_callback_hook("on_train_end", state)
+
+            final_loss, final_mse, final_penalty = self._objective(
+                x_array, y_array
+            )
+
+        except Exception as exc:
+            self._fitted = False
+            raise TrainingError(
+                f"Scikit model training failed: {exc}"
+            ) from exc
+
+        self._fitted = iterations > 0
+
+        if not collect_history:
+            return TrainingResult()
+
+        return TrainingResult(
+            history={"loss": list(self._loss_history)},
+            metrics={
+                "loss": final_loss,
+                "mse": final_mse,
+                "regularization_loss": final_penalty,
+            },
+            n_iterations=iterations,
+            stop_reason=state.get("stop_reason") or (
+                "stopped_before_max_epochs"
+                if iterations < int(self.epochs)
+                else "max_epochs_reached"
+            ),
+        )
+
+    def predict(self, X: FloatArray) -> FloatArray:
+        network = self._require_model()
+
+        if not self._fitted:
+            raise ModelNotFittedError(
+                "Model is not fitted. Call fit() first."
+            )
+
+        array = real_array(X, "X")
+
+        if array.ndim != 2 or array.shape[1] != self._n_features:
+            raise ValueError(
+                f"Expected X with shape "
+                f"(n_samples, {self._n_features})."
+            )
+
+        result = network(array)
+
+        if not np.isfinite(result).all():
+            raise ValueError("Predictions are non-finite.")
+
+        return np.array(result, dtype=np.float64, copy=True)
+
+    def get_weights(self) -> ModelWeights:
+        return self._require_model().get_predictor_weights()
+
+    def set_weights(self, weights: ModelWeights) -> None:
+        self._require_model().set_predictor_weights(weights)
+        self._fitted = False
+
+    def omit_variables(
+        self,
+        variable_indices: Sequence[int],
+    ) -> None:
+        indices = list(variable_indices)
+
+        if any(
+            isinstance(index, (bool, np.bool_))
+            or not isinstance(index, (int, np.integer))
+            for index in indices
+        ):
+            raise TypeError(
+                "Feature indices must be integers, not booleans."
+            )
+
+        if any(
+            index < 0 or index >= self._n_features
+            for index in indices
+        ):
+            raise ValueError("Feature index is out of range.")
+
+        mask = np.ones(self._n_features, dtype=np.float64)
+
+        if indices:
+            mask[np.asarray(indices, dtype=np.intp)] = 0.0
+
+        self._require_model().variable_control_layer.set_mask(mask)
+
+
+# Import compatibility only; no sklearn estimator contract is promised.
+ScikitConstrainedGrangerModel = ScikitConditionalAdapter

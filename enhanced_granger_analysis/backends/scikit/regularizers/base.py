@@ -107,7 +107,7 @@ class BaseScikitRegularizer(ABC):
         )
 
     @abstractmethod
-    def value_and_grad(
+    def _value_and_grad(
         self,
         weights: np.ndarray,
     ) -> tuple[float, np.ndarray]:
