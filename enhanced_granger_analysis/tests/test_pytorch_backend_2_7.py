@@ -1,496 +1,497 @@
-"""Tests for loading and instantiating PyTorch backend objects.
+"""Dependency-isolated PyTorch strategy tests; prepared, not executed.
 
-Target location: tests/test_pytorch_backend.py.
-Context: `backends_construction_update` branch, following the integration of the model adapter described in previous responses. This is not intended for the `version_2.3` variant.
+Reference: backends_construction_update @ 04631788582f240c2bedfb94c1743b8e1d4a5eab.
+Replace the old test_pytorch_backend_2_7.py rather than collecting both versions.
 
-Scope: imports, backend availability, factory, resolvers, and constructors.
-Excludes `initialize()`, `fit()`, `predict()`, optimizer steps, and GPU requirements.
-Import errors originating from the project code itself are NOT treated as skips. If the optional `torch` package is missing, tests requiring actual components will be skipped.
-
-Code prepared via source code review; tests have not been executed.
+The actual strategy, common builder, ModelInputSpec and model registry are used.
+Native component bases/resolvers are test doubles. The model registry is loaded
+from its real source without running models/__init__.py (which imports torch).
+Normal model-package registration is tested in test_pytorch_backend_native.py.
+No training data, fit/predict calls, optimizer steps or dependency installation.
 """
-
 from __future__ import annotations
-import sys
 
-from pathlib import Path
-sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 import builtins
-import importlib
-from types import SimpleNamespace
-from unittest.mock import Mock
+import importlib.util
+from pathlib import Path
+import sys
+from types import MappingProxyType, ModuleType, SimpleNamespace
+from unittest.mock import Mock, call
 
-import numpy as np
 import pytest
 
+from enhanced_granger_analysis.backends.pytorch import pytorch_backend as strategy_module
+from enhanced_granger_analysis.backends.pytorch.pytorch_backend import PyTorchBackendStrategy
+from enhanced_granger_analysis.core.exceptions import BackendNotAvailableError, UnknownComponentError
+from enhanced_granger_analysis.core.models.input_spec import ModelInputSpec
+from enhanced_granger_analysis.core.models.model_registry import ModelClassRegistry
 
-ROOT = "enhanced_granger_analysis"
-TORCH_BACKEND = f"{ROOT}.backends.pytorch"
-
-
-@pytest.fixture(scope="module")
-def backend_module():
-    # Nie przechwytujemy ImportError z projektu: uszkodzony import ma być błędem.
-    return importlib.import_module(f"{TORCH_BACKEND}.pytorch_backend")
-
-
-@pytest.fixture(scope="module")
-def api(backend_module):
-    # Pomijamy tylko rzeczywisty brak torch. Nie maskujemy uszkodzonej instalacji
-    # torch ani jej brakujących zależności przez szeroki except ImportError.
-    try:
-        torch = importlib.import_module("torch")
-    except ModuleNotFoundError as exc:
-        if exc.name != "torch":
-            raise
-        pytest.skip("Testy konstrukcji komponentów wymagają pakietu torch.")
-
-    def module(path):
-        return importlib.import_module(f"{ROOT}.{path}")
-
-    callbacks = module("backends.pytorch.callbacks")
-    regularizers = module("backends.pytorch.regularizers.implementations")
-    constraints = module("backends.pytorch.constraints.implementations")
-    models = module("backends.pytorch.models.registry")
-    regularizer_spec = module("core.components.regularizer_spec")
-
-    return SimpleNamespace(
-        torch=torch,
-        Strategy=backend_module.PyTorchBackendStrategy,
-        Factory=module("backends.backend_factory").BackendFactory,
-        OptimizerAdapter=module("backends.pytorch.optimizers.adapter").PyTorchOptimizerAdapter,
-        EarlyStopping=callbacks.EarlyStopping,
-        ReduceLearningRate=callbacks.ReduceLearningRate,
-        ConvergenceCheck=callbacks.ConvergenceCheck,
-        L1Regularizer=regularizers.L1Regularizer,
-        LagL1Regularizer=regularizers.LagDependentL1Regularizer,
-        MaskConstraint=constraints.MaskConstraint,
-        MaskAndMinAbsSumConstraint=constraints.MaskAndMinAbsSumConstraint,
-        PreparedRegularizerData=regularizer_spec.PreparedRegularizerData,
-        RegularizationLayout=regularizer_spec.RegularizationLayout,
-        PreparedConstraintData=module("core.components.constraint_spec").PreparedConstraintData,
-        errors=module("core.exceptions"),
-        models=models,
-    )
+ROOT = "enhanced_granger_analysis.backends.pytorch"
+COMPONENT_NAMES = ("optimizer", "loss", "callbacks", "regularizer", "constraint")
 
 
 @pytest.fixture
-def backend(api):
-    return api.Strategy()
-
-
-@pytest.fixture
-def regularizer_data(api):
-    # Wyłącznie metadane konstrukcyjne, nie dane treningowe.
-    layout = api.RegularizationLayout(
+def input_spec():
+    return ModelInputSpec(
+        n_features=4, n_outputs=2,
+        causes=("x", "z"), effects=("y1", "y2"),
         cause_slices={"x": slice(0, 2), "z": slice(2, 4)},
-        output_names=("y1", "y2"),
-        feature_lags=np.array([1, 2, 1, 2], dtype=np.int64),
-        base_mask=np.ones((2, 4), dtype=bool),
-    )
-    return api.PreparedRegularizerData(layout=layout, params={"l1": 0.025})
-
-
-@pytest.fixture
-def constraint_data(api):
-    return api.PreparedConstraintData(
-        output_names=("y1", "y2"),
-        n_features=4,
-        mask=np.array([[True, False, True, True], [True, True, False, True]]),
-        rules=(),
+        feature_lags=(1, 2, 1, 2),
     )
 
 
 @pytest.fixture
-def components(backend):
-    return {
-        "optimizer": backend.build_optimizer({"type": "adam", "params": {"lr": 0.002}}),
-        "loss": backend.build_loss("mse"),
-        "callbacks": backend.build_callbacks(None),
-    }
+def strategy(monkeypatch):
+    instance = PyTorchBackendStrategy()
+    monkeypatch.setattr(instance, "_require_torch", Mock(return_value=ModuleType("torch")))
+    return instance
 
 
-class TestBackendLoading:
-    def test_import_exposes_strategy(self, backend_module):
-        assert isinstance(backend_module.PyTorchBackendStrategy, type)
-        assert backend_module.PyTorchBackendStrategy.name == "pytorch"
+@pytest.fixture
+def dependencies(monkeypatch):
+    """Install controlled lazy dependencies, restoring sys.modules on teardown."""
+    def install(suffix, *, package=False, **members):
+        fullname = f"{ROOT}.{suffix}"
+        module = ModuleType(fullname)
+        if package:
+            module.__path__ = []
+        module.__dict__.update(members)
+        monkeypatch.setitem(sys.modules, fullname, module)
+        parent_name, _, attr = fullname.rpartition(".")
+        monkeypatch.setattr(sys.modules[parent_name], attr, module, raising=False)
+        return module
 
-    def test_available_with_importable_torch(self, backend):
-        assert backend.is_available() is True
+    class Callback:
+        pass
 
-    def test_unavailable_when_torch_cannot_be_found(self, backend_module, monkeypatch):
-        original = backend_module.importlib.util.find_spec
+    class Regularizer:
+        pass
 
-        def find_spec(name, *args, **kwargs):
-            if name == "torch":
-                return None
-            return original(name, *args, **kwargs)
+    class Constraint:
+        pass
 
-        monkeypatch.setattr(backend_module.importlib.util, "find_spec", find_spec)
-        assert backend_module.PyTorchBackendStrategy().is_available() is False
+    result = SimpleNamespace(
+        optimizer=Mock(), loss=Mock(), callback=Mock(),
+        regularizer=Mock(), constraint=Mock(),
+        Callback=Callback, Regularizer=Regularizer, Constraint=Constraint,
+    )
+    install("optimizers", package=True, resolve_optimizer=result.optimizer)
+    install("losses", package=True)
+    install("losses.resolver", resolve_loss=result.loss)
+    install("callbacks", package=True)
+    install("callbacks.base", Callback=Callback)
+    install("callbacks.registry", resolve_callback_spec=result.callback)
+    install("regularizers", package=True, resolve_regularizer_spec=result.regularizer)
+    install("regularizers.base", BasePyTorchRegularizer=Regularizer)
+    install("constraints", package=True, resolve_constraint_spec=result.constraint)
+    install("constraints.base", BasePyTorchConstraint=Constraint)
+    return result
 
-    def test_import_failure_becomes_domain_error(self, backend_module, monkeypatch):
-        errors = importlib.import_module(f"{ROOT}.core.exceptions")
+
+@pytest.fixture
+def model_registry(monkeypatch):
+    """Real registry source in an isolated package shell; no native adapter import."""
+    folder = Path(strategy_module.__file__).resolve().parent / "models"
+    package = ModuleType(f"{ROOT}.models")
+    package.__path__ = [str(folder)]
+    monkeypatch.setitem(sys.modules, package.__name__, package)
+    monkeypatch.setattr(sys.modules[ROOT], "models", package, raising=False)
+    name = f"{ROOT}.models.registry"
+    spec = importlib.util.spec_from_file_location(name, folder / "registry.py")
+    assert spec is not None and spec.loader is not None
+    module = importlib.util.module_from_spec(spec)
+    monkeypatch.setitem(sys.modules, name, module)
+    monkeypatch.setattr(package, "registry", module, raising=False)
+    spec.loader.exec_module(module)
+    module._MODELS = ModelClassRegistry(label="test PyTorch model")
+
+    class RecordingAdapter:
+        constructions = []
+        backend = "pytorch"
+
+        def __init__(
+            self, *, input_spec, optimizer, loss, callbacks=None,
+            regularizer=None, constraint=None, epochs=3, batch_size=4,
+            device="cpu", use_bias=True, seed=None, gradient_accumulation_steps=1,
+        ):
+            self.input_spec = input_spec
+            self.optimizer = optimizer
+            self.loss = loss
+            self.callbacks = callbacks
+            self.regularizer = regularizer
+            self.constraint = constraint
+            self.epochs = epochs
+            self.batch_size = batch_size
+            self.device = device
+            self.use_bias = use_bias
+            self.gradient_accumulation_steps = gradient_accumulation_steps
+            self.is_fitted = False
+            self.rebuild_calls = []
+            type(self).constructions.append(self)
+            self.rebuild(seed=seed)
+
+        def rebuild(self, *, seed=None):
+            self.rebuild_calls.append(seed)
+            self.is_fitted = False
+
+        def fit(self, X, y, **kwargs):
+            raise AssertionError("Strategy must not fit a model")
+
+        def predict(self, X):
+            raise AssertionError("Strategy must not predict")
+
+        def get_weights(self):
+            raise AssertionError("Strategy must not read weights")
+
+        def set_weights(self, weights):
+            raise AssertionError("Strategy must not assign weights")
+
+        def omit_variables(self, variable_indices):
+            raise AssertionError("Strategy must not mask inputs")
+
+        def reset_components(self, **kwargs):
+            raise AssertionError("Strategy must not reset prepared components")
+
+    module.register_model("conditional", "conditional_linear")(RecordingAdapter)
+    return SimpleNamespace(module=module, Adapter=RecordingAdapter)
+
+
+@pytest.fixture
+def components():
+    return {name: object() for name in COMPONENT_NAMES}
+
+
+class TestAvailability:
+    def test_name(self):
+        assert PyTorchBackendStrategy.name == "pytorch"
+
+    def test_missing_distribution(self, monkeypatch):
+        lookup = Mock(return_value=None)
+        monkeypatch.setattr(strategy_module.importlib.util, "find_spec", lookup)
+        assert PyTorchBackendStrategy().is_available() is False
+        lookup.assert_called_once_with("torch")
+
+    def test_successful_import(self, monkeypatch):
+        module = ModuleType("torch")
+        monkeypatch.setattr(strategy_module.importlib.util, "find_spec", Mock(return_value=object()))
+        monkeypatch.setitem(sys.modules, "torch", module)
+        instance = PyTorchBackendStrategy()
+        assert instance.is_available() is True
+        assert instance._require_torch() is module
+
+    @pytest.mark.parametrize("error_type", [ImportError, ModuleNotFoundError])
+    def test_import_failures_preserve_cause(self, monkeypatch, error_type):
         original = builtins.__import__
-        error = ImportError("torch deliberately unavailable")
+        cause = error_type("missing torch dependency")
 
-        def import_without_torch(name, *args, **kwargs):
+        def guarded_import(name, *args, **kwargs):
             if name == "torch":
-                raise error
+                raise cause
             return original(name, *args, **kwargs)
 
-        strategy = backend_module.PyTorchBackendStrategy()
-        # Patch obejmuje wyłącznie kontrolowane wywołanie strażnika importu.
-        with monkeypatch.context() as patch:
-            patch.setattr(builtins, "__import__", import_without_torch)
-            with pytest.raises(errors.BackendNotAvailableError) as caught:
-                strategy._require_torch()
-        assert caught.value.__cause__ is error
+        monkeypatch.setattr(strategy_module.importlib.util, "find_spec", Mock(return_value=object()))
+        monkeypatch.setattr(builtins, "__import__", guarded_import)
+        instance = PyTorchBackendStrategy()
+        assert instance.is_available() is False
+        with pytest.raises(BackendNotAvailableError, match="PyTorch is unavailable") as error:
+            instance._require_torch()
+        assert error.value.__cause__ is cause
 
-    @pytest.mark.parametrize("name", ["pytorch", "torch", " PyTorch "])
-    def test_factory_resolves_aliases(self, api, monkeypatch, name):
-        monkeypatch.setattr(api.Factory, "_STRATEGY_CACHE", {})
-        assert isinstance(api.Factory.get_strategy(name), api.Strategy)
-
-    def test_factory_reuses_canonical_backend(self, api, monkeypatch):
-        monkeypatch.setattr(api.Factory, "_STRATEGY_CACHE", {})
-        first = api.Factory.get_strategy("pytorch")
-        assert api.Factory.get_strategy("torch") is first
+    def test_unexpected_errors_are_not_hidden(self, monkeypatch):
+        monkeypatch.setattr(strategy_module.importlib.util, "find_spec", Mock(side_effect=RuntimeError("bad runtime")))
+        with pytest.raises(RuntimeError, match="bad runtime"):
+            PyTorchBackendStrategy().is_available()
 
 
-class TestOptimizerConstruction:
-    @pytest.mark.parametrize("name", [None, "adam", "Adam", " Adam "])
-    def test_adam_is_prepared_but_not_bound(self, backend, api, name):
-        adapter = backend.build_optimizer(name)
-        assert isinstance(adapter, api.OptimizerAdapter)
-        assert adapter.optimizer_class is api.torch.optim.Adam
-        assert adapter.is_initialized is False
-        with pytest.raises(RuntimeError, match="not initialized"):
-            _ = adapter.native
+class TestOptimizerAndLoss:
+    @pytest.mark.parametrize("spec", [None, "adam", {"type": "sgd", "params": {"lr": 0.01}}, object()])
+    def test_optimizer_is_delegated_once(self, strategy, dependencies, spec):
+        ready = object()
+        dependencies.optimizer.return_value = ready
+        assert strategy.build_optimizer(spec) is ready
+        dependencies.optimizer.assert_called_once_with(spec)
+        strategy._require_torch.assert_called_once_with()
 
-    def test_accepts_optimizer_class(self, backend, api):
-        adapter = backend.build_optimizer(api.torch.optim.SGD)
-        assert adapter.optimizer_class is api.torch.optim.SGD
-        assert adapter.is_initialized is False
+    def test_optimizer_rejects_context_before_loading(self, strategy, dependencies):
+        with pytest.raises(TypeError, match="does not accept context: aaa, zzz"):
+            strategy.build_optimizer("adam", zzz=2, aaa=1)
+        strategy._require_torch.assert_not_called()
+        dependencies.optimizer.assert_not_called()
 
-    def test_config_options_are_copied(self, backend, api):
-        spec = {"type": "sgd", "params": {"lr": 0.03, "momentum": 0.8}}
-        adapter = backend.build_optimizer(spec)
-        assert adapter.optimizer_class is api.torch.optim.SGD
-        assert adapter.options == {"lr": 0.03, "momentum": 0.8}
-        spec["params"]["lr"] = 9.0
-        options = adapter.options
-        options["momentum"] = 0.0
-        assert adapter.options == {"lr": 0.03, "momentum": 0.8}
-
-    def test_each_call_returns_fresh_adapter(self, backend):
-        assert backend.build_optimizer("adam") is not backend.build_optimizer("adam")
-
-    def test_rejects_context(self, backend):
-        with pytest.raises(TypeError, match="context"):
-            backend.build_optimizer("adam", unsupported_context=True)
-
-    @pytest.mark.parametrize("spec,error", [
-        ("not_a_real_optimizer", ValueError),
-        ({"name": "adam"}, ValueError),
-        ({"params": {}}, ValueError),
-        ({"type": "adam", "params": []}, TypeError),
-        ({"type": "adam", "params": {"gradient_accumulation_steps": 2}}, ValueError),
-        (42, TypeError),
-    ])
-    def test_rejects_invalid_specs(self, backend, spec, error):
-        with pytest.raises(error):
-            backend.build_optimizer(spec)
-
-    def test_rejects_prepared_adapter_as_raw_spec(self, backend):
-        adapter = backend.build_optimizer("adam")
-        with pytest.raises(TypeError):
-            backend.build_optimizer(adapter)
-
-    def test_rejects_native_optimizer_as_raw_spec(self, backend, api):
-        # Tworzymy obiekty, ale nie wykonujemy initialize/step/backward.
-        parameter = api.torch.nn.Parameter(api.torch.zeros(1))
-        native = api.torch.optim.Adam([parameter])
-        with pytest.raises(TypeError):
-            backend.build_optimizer(native)
-
-
-class TestLossConstruction:
-    @pytest.mark.parametrize("name,class_name", [
-        (None, "MSELoss"), ("mse", "MSELoss"),
-        ("mean_squared_error", "MSELoss"), ("mae", "L1Loss"),
-        ("huber", "HuberLoss"), ("smooth_l1", "SmoothL1Loss"),
-    ])
-    def test_resolves_names(self, backend, api, name, class_name):
-        assert isinstance(backend.build_loss(name), getattr(api.torch.nn, class_name))
-
-    def test_accepts_class(self, backend, api):
-        assert isinstance(backend.build_loss(api.torch.nn.MSELoss), api.torch.nn.MSELoss)
-
-    def test_applies_constructor_options(self, backend, api):
-        loss = backend.build_loss({"type": "huber", "params": {"delta": 0.25, "reduction": "sum"}})
-        assert isinstance(loss, api.torch.nn.HuberLoss)
-        assert loss.delta == pytest.approx(0.25)
-        assert loss.reduction == "sum"
-
-    def test_preserves_ready_instance(self, backend, api):
-        loss = api.torch.nn.MSELoss(reduction="sum")
-        assert backend.build_loss(loss) is loss
-
-    def test_preserves_callable_without_invoking_it(self, backend):
-        loss = Mock(side_effect=AssertionError("Loss must not run during construction"))
-        assert backend.build_loss(loss) is loss
+    @pytest.mark.parametrize("spec", [None, "mae", {"type": "HuberLoss", "params": {"delta": 2.0}}])
+    def test_loss_delegation_and_default_mse(self, strategy, dependencies, spec):
+        loss = Mock()
+        dependencies.loss.return_value = loss
+        assert strategy.build_loss(spec) is loss
+        dependencies.loss.assert_called_once_with("mse" if spec is None else spec)
         loss.assert_not_called()
 
-    @pytest.mark.parametrize("spec,error", [
-        ("not_a_real_loss", ValueError),
-        ({"name": "mse"}, ValueError),
-        ({"type": "mse", "params": []}, TypeError),
-        (42, TypeError),
-    ])
-    def test_rejects_invalid_specs(self, backend, spec, error):
-        with pytest.raises(error):
-            backend.build_loss(spec)
+    @pytest.mark.parametrize("invalid", [None, object(), 3, dict])
+    def test_invalid_resolved_loss(self, strategy, dependencies, invalid):
+        dependencies.loss.return_value = invalid
+        with pytest.raises(TypeError, match="Loss resolver must return"):
+            strategy.build_loss("mse")
 
 
-class TestCallbackConstruction:
-    def test_none_returns_independent_empty_lists(self, backend):
-        first = backend.build_callbacks(None)
-        second = backend.build_callbacks(None)
+class TestCallbacks:
+    def test_none_short_circuits_dependency_loading(self, strategy):
+        first, second = strategy.build_callbacks(), strategy.build_callbacks()
         assert first == second == []
         assert first is not second
+        strategy._require_torch.assert_not_called()
 
-    @pytest.mark.parametrize("name,class_attr", [
-        ("early_stopping", "EarlyStopping"),
-        ("reduce_lr", "ReduceLearningRate"),
-        ("convergence_check", "ConvergenceCheck"),
-    ])
-    def test_resolves_single_name(self, backend, api, name, class_attr):
-        callbacks = backend.build_callbacks(name)
-        assert len(callbacks) == 1
-        assert isinstance(callbacks[0], getattr(api, class_attr))
+    @pytest.mark.parametrize("kind", ["single", "tuple", "list"])
+    def test_callback_constructor_receives_params(self, strategy, dependencies, kind):
+        ready = dependencies.Callback()
+        constructor = Mock(return_value=ready)
+        dependencies.callback.return_value = (constructor, {"patience": 9})
+        spec = {"single": "early_stopping", "tuple": ("early_stopping",), "list": ["early_stopping"]}[kind]
+        assert strategy.build_callbacks(spec) == [ready]
+        dependencies.callback.assert_called_once_with("early_stopping")
+        constructor.assert_called_once_with(patience=9)
 
-    def test_mapping_passes_options(self, backend, api):
-        callback, = backend.build_callbacks({
-            "type": "early_stopping", "params": {"patience": 7, "min_delta": 0.01},
-        })
-        assert isinstance(callback, api.EarlyStopping)
-        assert callback.patience == 7
-        assert callback.min_delta == pytest.approx(0.01)
+    def test_mapping_is_one_spec_not_an_iterable_of_keys(self, strategy, dependencies):
+        declaration = {"type": "early_stopping", "params": {"patience": 4}}
+        ready = dependencies.Callback()
+        dependencies.callback.return_value = ready
+        assert strategy.build_callbacks(declaration) == [ready]
+        dependencies.callback.assert_called_once_with(declaration)
 
-    def test_class_and_ready_instance(self, backend, api):
-        instance = api.EarlyStopping(patience=3)
-        assert backend.build_callbacks(instance)[0] is instance
-        assert isinstance(backend.build_callbacks(api.EarlyStopping)[0], api.EarlyStopping)
+    def test_mixed_resolutions_preserve_order_and_identity(self, strategy, dependencies):
+        first, second = dependencies.Callback(), dependencies.Callback()
+        constructor = Mock(return_value=second)
+        dependencies.callback.side_effect = [None, first, (constructor, {})]
+        declarations = ["disabled", first, "early_stopping"]
+        assert strategy.build_callbacks(declarations) == [first, second]
+        assert dependencies.callback.call_args_list == [call(item) for item in declarations]
+        constructor.assert_called_once_with()
 
-    def test_sequence_preserves_order_and_omits_none(self, backend, api):
-        callbacks = backend.build_callbacks((None, "reduce_lr", "early_stopping", None))
-        assert [type(item) for item in callbacks] == [api.ReduceLearningRate, api.EarlyStopping]
+    def test_ready_callback_is_not_called_as_factory(self, strategy, dependencies):
+        ready = dependencies.Callback()
+        dependencies.callback.return_value = ready
+        assert strategy.build_callbacks(ready)[0] is ready
 
-    def test_repeated_spec_creates_independent_instances(self, backend):
-        first, second = backend.build_callbacks(["early_stopping", "early_stopping"])
-        assert first is not second
+    def test_invalid_constructed_callback(self, strategy, dependencies):
+        dependencies.callback.return_value = (Mock(return_value=object()), {})
+        with pytest.raises(TypeError, match="invalid object"):
+            strategy.build_callbacks("bad")
 
-    @pytest.mark.parametrize("spec,error", [
-        ({"name": "early_stopping"}, ValueError),
-        ({"type": "early_stopping", "params": []}, TypeError),
-        (42, TypeError),
-    ])
-    def test_rejects_invalid_specs(self, backend, spec, error):
-        with pytest.raises(error):
-            backend.build_callbacks(spec)
-
-    def test_unknown_name(self, backend, api):
-        with pytest.raises(api.errors.UnknownComponentError):
-            backend.build_callbacks("not_a_real_callback")
+    def test_empty_sequence_returns_empty_list(self, strategy, dependencies):
+        assert strategy.build_callbacks([]) == []
+        dependencies.callback.assert_not_called()
+        strategy._require_torch.assert_called_once_with()
 
 
-class TestRegularizerAndConstraintConstruction:
-    def test_none_disables_optional_components(self, backend):
-        assert backend.build_regularizer(None) is None
-        assert backend.build_constraint(None) is None
+class TestRegularizersAndConstraints:
+    @pytest.mark.parametrize("kind", ["regularizer", "constraint"])
+    def test_none_short_circuits_import(self, strategy, kind):
+        assert getattr(strategy, f"build_{kind}")(None) is None
+        strategy._require_torch.assert_not_called()
 
-    @pytest.mark.parametrize("name,class_attr", [
-        ("l1", "L1Regularizer"), ("lag_dependent_l1", "LagL1Regularizer"),
-    ])
-    def test_regularizer_uses_prepared_data(self, backend, api, regularizer_data, name, class_attr):
-        regularizer = backend.build_regularizer(name, data=regularizer_data)
-        assert isinstance(regularizer, getattr(api, class_attr))
-        assert regularizer.l1 == pytest.approx(0.025)
-        assert regularizer.data.layout.coefficient_shape == (2, 4)
+    @pytest.mark.parametrize("kind", ["regularizer", "constraint"])
+    def test_ready_component_identity(self, strategy, dependencies, kind):
+        ready = getattr(dependencies, kind.capitalize())()
+        assert getattr(strategy, f"build_{kind}")(ready) is ready
+        getattr(dependencies, kind).assert_not_called()
 
-    def test_prepared_regularizer_data_is_authoritative(self, backend, regularizer_data):
-        regularizer = backend.build_regularizer(
-            {"type": "l1", "params": {"l1": 99.0}}, data=regularizer_data,
-        )
-        # Strategia nie przygotowuje metadanych ponownie z surowego spec.
-        assert regularizer.l1 == pytest.approx(0.025)
+    def test_regularizer_params_come_from_prepared_data(self, strategy, dependencies):
+        data = object()
+        ready = dependencies.Regularizer()
+        constructor = Mock(return_value=ready)
+        dependencies.regularizer.return_value = (constructor, {"l1": 999.0})
+        assert strategy.build_regularizer("l1", data=data) is ready
+        constructor.assert_called_once_with(data=data)
+        dependencies.regularizer.assert_called_once_with("l1")
 
-    def test_ready_regularizer_is_returned_unchanged(self, backend, regularizer_data):
-        regularizer = backend.build_regularizer("l1", data=regularizer_data)
-        assert backend.build_regularizer(regularizer) is regularizer
+    def test_regularizer_resolver_can_disable_component(self, strategy, dependencies):
+        dependencies.regularizer.return_value = None
+        assert strategy.build_regularizer("disabled") is None
 
-    def test_missing_regularizer_data(self, backend):
-        with pytest.raises(ValueError, match="PreparedRegularizerData"):
-            backend.build_regularizer("l1")
+    def test_constraint_algorithm_params_are_forwarded(self, strategy, dependencies):
+        data = object()
+        params = {"eps": 1e-5}
+        ready = dependencies.Constraint()
+        constructor = Mock(return_value=ready)
+        dependencies.constraint.return_value = (constructor, params)
+        assert strategy.build_constraint("mask_and_min_abs_sum", data=data) is ready
+        constructor.assert_called_once_with(data=data, eps=1e-5)
+        assert params == {"eps": 1e-5}
 
-    @pytest.mark.parametrize("name", ["mask", "mask_constraint", "MaskConstraint"])
-    def test_constraint_aliases(self, backend, api, constraint_data, name):
-        constraint = backend.build_constraint(name, data=constraint_data)
-        assert isinstance(constraint, api.MaskConstraint)
-        np.testing.assert_array_equal(constraint.mask, constraint_data.mask)
+    @pytest.mark.parametrize("kind", ["regularizer", "constraint"])
+    def test_project_component_requires_prepared_data(self, strategy, dependencies, kind):
+        constructor = Mock()
+        getattr(dependencies, kind).return_value = (constructor, {})
+        with pytest.raises(ValueError, match="Prepared"):
+            getattr(strategy, f"build_{kind}")("project_component")
+        constructor.assert_not_called()
 
-    def test_constraint_constructor_options(self, backend, api, constraint_data):
-        constraint = backend.build_constraint(
-            {"type": "mask_and_min_abs_sum", "params": {"eps": 1e-5}},
-            data=constraint_data,
-        )
-        assert isinstance(constraint, api.MaskAndMinAbsSumConstraint)
-        assert constraint.eps == pytest.approx(1e-5)
+    @pytest.mark.parametrize("kind", ["regularizer", "constraint"])
+    def test_invalid_constructor_result(self, strategy, dependencies, kind):
+        getattr(dependencies, kind).return_value = (Mock(return_value=object()), {})
+        with pytest.raises(TypeError, match="invalid object"):
+            getattr(strategy, f"build_{kind}")("project_component", data=object())
 
-    def test_ready_constraint_is_returned_unchanged(self, backend, constraint_data):
-        constraint = backend.build_constraint("mask", data=constraint_data)
-        assert backend.build_constraint(constraint) is constraint
 
-    def test_missing_constraint_data(self, backend):
-        with pytest.raises(ValueError, match="PreparedConstraintData"):
-            backend.build_constraint("mask")
+class TestErrorPropagationAndLogging:
+    @pytest.mark.parametrize("kind", COMPONENT_NAMES)
+    def test_resolver_exceptions_are_not_hidden(self, strategy, dependencies, kind):
+        resolver_name = "callback" if kind == "callbacks" else kind
+        getattr(dependencies, resolver_name).side_effect = ValueError("bad spec")
+        kwargs = {"data": object()} if kind in {"regularizer", "constraint"} else {}
+        with pytest.raises(ValueError, match="bad spec"):
+            getattr(strategy, f"build_{kind}")("bad", **kwargs)
 
-    @pytest.mark.parametrize("builder", ["build_regularizer", "build_constraint"])
-    def test_unknown_component_name(self, backend, api, builder):
-        with pytest.raises(api.errors.UnknownComponentError):
-            getattr(backend, builder)("not_a_real_component")
+    def test_verbosity_can_be_toggled(self, strategy, dependencies, capsys):
+        dependencies.optimizer.return_value = "ready"
+        strategy.build_optimizer()
+        assert capsys.readouterr().out == ""
+        strategy.set_loading_verbose(True)
+        strategy.build_optimizer()
+        assert "[Backend:pytorch] optimizer -> 'ready'" in capsys.readouterr().out
+        strategy.set_loading_verbose(False)
+        strategy.build_optimizer()
+        assert capsys.readouterr().out == ""
 
 
 class TestModelConstruction:
-    @pytest.fixture(autouse=True)
-    def forbid_initialization_and_training(self, api, monkeypatch):
-        model_class = api.models.get_model_class("conditional_linear")
-        initialize = Mock(side_effect=AssertionError("build_model must not initialize"))
-        fit = Mock(side_effect=AssertionError("build_model must not train"))
-        monkeypatch.setattr(model_class, "initialize", initialize)
-        monkeypatch.setattr(model_class, "fit", fit)
-        yield
-        initialize.assert_not_called()
-        fit.assert_not_called()
-
-    @pytest.mark.parametrize("spec", [None, "conditional", "conditional_linear"])
-    def test_default_and_registered_names(self, backend, api, components, spec):
-        model = backend.build_model(spec, components=components, config={"device": "cpu"})
-        assert isinstance(model, api.models.get_model_class("conditional_linear"))
-        assert model.backend in {"pytorch", "torch"}
+    @pytest.mark.parametrize("selector", ["default", "name", "alias", "class", "mapping"])
+    def test_selector_and_constructor_contract(self, strategy, model_registry, input_spec, components, selector):
+        selected = {
+            "default": None, "name": "conditional", "alias": "conditional_linear",
+            "class": model_registry.Adapter,
+            "mapping": {"type": "conditional", "params": {"epochs": 5}},
+        }[selector]
+        model = strategy.build_model(selected, components=components, config={"input_spec": input_spec, "seed": 17})
+        assert isinstance(model, model_registry.Adapter)
+        assert model.input_spec is input_spec
+        assert model.rebuild_calls == [17]
         assert model.is_fitted is False
-        assert components["optimizer"].is_initialized is False
+        assert not hasattr(model, "initialize")
+        assert model.epochs == (5 if selector == "mapping" else 3)
+        assert len(model_registry.Adapter.constructions) == 1
+        for name, ready in components.items():
+            assert getattr(model, name) is ready
+        strategy._require_torch.assert_called_once_with()
 
-    def test_accepts_model_class(self, backend, api, components):
-        model_class = api.models.get_model_class("conditional_linear")
-        model = backend.build_model(model_class, components=components, config={"device": "cpu"})
-        assert isinstance(model, model_class)
+    def test_build_never_reprepares_components(self, strategy, model_registry, input_spec, components, monkeypatch):
+        forbidden = Mock(side_effect=AssertionError("Use prepared components"))
+        for name in COMPONENT_NAMES:
+            monkeypatch.setattr(strategy, f"build_{name}", forbidden)
+        strategy.build_model(components=components, config={"input_spec": input_spec})
+        forbidden.assert_not_called()
 
-    def test_combines_spec_parameters_and_config(self, backend, components):
-        model = backend.build_model(
-            {"type": "conditional_linear", "params": {"epochs": 11}},
+    def test_input_spec_can_be_in_model_params(self, strategy, model_registry, input_spec, components):
+        model = strategy.build_model(
+            {"type": "conditional", "params": {"input_spec": input_spec, "epochs": 7}},
             components=components,
-            config={"batch_size": 8, "use_bias": False, "device": "cpu"},
         )
-        assert model.epochs == 11
-        assert model.batch_size == 8
-        assert model.use_bias is False
-        assert model.is_fitted is False
+        assert model.input_spec is input_spec
+        assert model.epochs == 7
 
-    def test_passes_ready_components_without_rebuilding_them(
-        self, backend, components, regularizer_data, constraint_data, monkeypatch,
-    ):
-        regularizer = backend.build_regularizer("l1", data=regularizer_data)
-        constraint = backend.build_constraint("mask", data=constraint_data)
-        callbacks = backend.build_callbacks("early_stopping")
-        components.update(regularizer=regularizer, constraint=constraint, callbacks=callbacks)
-        for name in ("optimizer", "loss", "callbacks", "regularizer", "constraint"):
-            monkeypatch.setattr(
-                backend, f"build_{name}",
-                Mock(side_effect=AssertionError("build_model must not resolve components")),
+    def test_input_spec_required(self, strategy, model_registry, components):
+        with pytest.raises(TypeError, match="input_spec"):
+            strategy.build_model(components=components)
+
+    def test_mapping_inputs_are_not_mutated(self, strategy, model_registry, input_spec, components):
+        params = {"epochs": 7}
+        config = {"input_spec": input_spec, "batch_size": 8}
+        before = components.copy()
+        model = strategy.build_model(
+            {"type": "conditional", "params": MappingProxyType(params)},
+            config=MappingProxyType(config), components=MappingProxyType(components),
+        )
+        assert model.epochs == 7 and model.batch_size == 8
+        assert params == {"epochs": 7}
+        assert config == {"input_spec": input_spec, "batch_size": 8}
+        assert components == before
+
+    @pytest.mark.parametrize("backend_name", ["pytorch", "torch"])
+    def test_both_backend_identifiers_accepted(self, strategy, model_registry, input_spec, components, backend_name):
+        ready = model_registry.Adapter(input_spec=input_spec, **components)
+        ready.backend = backend_name
+        before = list(ready.rebuild_calls)
+        assert strategy.build_model(ready) is ready
+        assert ready.rebuild_calls == before
+
+    @pytest.mark.parametrize("kwargs", [{}, {"components": {}}, {"config": {}}])
+    def test_ready_model_no_rebuild(self, strategy, model_registry, input_spec, components, kwargs):
+        ready = model_registry.Adapter(input_spec=input_spec, **components)
+        before = list(ready.rebuild_calls)
+        assert strategy.build_model(ready, **kwargs) is ready
+        assert ready.rebuild_calls == before
+        assert len(model_registry.Adapter.constructions) == 1
+
+    @pytest.mark.parametrize("kwargs", [{"components": {"optimizer": object()}}, {"config": {"epochs": 2}}])
+    def test_ready_model_rejects_overrides(self, strategy, model_registry, input_spec, components, kwargs):
+        ready = model_registry.Adapter(input_spec=input_spec, **components)
+        with pytest.raises(ValueError, match="ready model cannot be combined"):
+            strategy.build_model(ready, **kwargs)
+
+    def test_wrong_backend_ready_model(self, strategy, model_registry, input_spec, components):
+        ready = model_registry.Adapter(input_spec=input_spec, **components)
+        ready.backend = "keras"
+        with pytest.raises(ValueError, match="Expected a PyTorch model"):
+            strategy.build_model(ready)
+
+    def test_wrong_backend_constructed_model(self, strategy, model_registry, input_spec, components):
+        class WrongBackend(model_registry.Adapter):
+            backend = "keras"
+
+        with pytest.raises(ValueError, match="Expected a PyTorch model"):
+            strategy.build_model(WrongBackend, components=components, config={"input_spec": input_spec})
+
+    @pytest.mark.parametrize("name", COMPONENT_NAMES)
+    @pytest.mark.parametrize("location", ["params", "config"])
+    def test_components_must_use_components_argument(self, strategy, model_registry, name, location):
+        spec = {"type": "conditional", "params": {name: object()}} if location == "params" else None
+        config = {name: object()} if location == "config" else None
+        with pytest.raises(ValueError, match="Pass ready components through 'components'"):
+            strategy.build_model(spec, config=config)
+        assert model_registry.Adapter.constructions == []
+
+    def test_input_spec_is_not_a_component(self, strategy, model_registry, input_spec):
+        with pytest.raises(ValueError, match="Unsupported component names: input_spec"):
+            strategy.build_model(components={"input_spec": input_spec})
+
+    def test_duplicate_input_spec(self, strategy, model_registry, input_spec):
+        with pytest.raises(ValueError, match="supplied more than once: input_spec"):
+            strategy.build_model(
+                {"type": "conditional", "params": {"input_spec": input_spec}},
+                config={"input_spec": input_spec},
             )
-        model = backend.build_model(components=components, config={"device": "cpu"})
-        assert model.loss is components["loss"]
-        assert model.regularizer is regularizer
-        assert model.constraint is constraint
-        assert model.callbacks is not callbacks
-        assert model.callbacks[0] is callbacks[0]
-        for name in ("optimizer", "loss", "callbacks", "regularizer", "constraint"):
-            getattr(backend, f"build_{name}").assert_not_called()
 
-    def test_returns_ready_model_without_reconstruction(self, backend, components):
-        model = backend.build_model(components=components, config={"device": "cpu"})
-        assert backend.build_model(model) is model
+    @pytest.mark.parametrize("location", ["params", "config", "components"])
+    def test_nonstring_argument_names(self, strategy, model_registry, location):
+        spec = {"type": "conditional", "params": {1: object()}} if location == "params" else None
+        kwargs = {location: {1: object()}} if location != "params" else {}
+        with pytest.raises(TypeError, match="must be strings"):
+            strategy.build_model(spec, **kwargs)
 
-    @pytest.mark.parametrize("override", [
-        {"config": {"epochs": 2}}, {"components": {"loss": "mse"}},
+    @pytest.mark.parametrize("spec, error", [
+        ({"type": "conditional", "extra": 1}, ValueError),
+        ({"type": "conditional", "params": []}, TypeError),
+        ({"params": {}}, ValueError), (object(), TypeError),
     ])
-    def test_ready_model_rejects_constructor_overrides(self, backend, components, override):
-        model = backend.build_model(components=components, config={"device": "cpu"})
-        with pytest.raises(ValueError, match="ready model"):
-            backend.build_model(model, **override)
+    def test_invalid_specs(self, strategy, model_registry, spec, error):
+        with pytest.raises(error):
+            strategy.build_model(spec)
 
-    def test_rejects_missing_optimizer(self, backend):
-        with pytest.raises(TypeError):
-            backend.build_model(config={"device": "cpu"})
+    def test_unknown_model_name(self, strategy, model_registry):
+        with pytest.raises(UnknownComponentError):
+            strategy.build_model("not_registered")
 
-    def test_rejects_optimizer_raw_spec(self, backend, components):
-        components["optimizer"] = "adam"
-        with pytest.raises(TypeError):
-            backend.build_model(components=components, config={"device": "cpu"})
+    def test_constructor_errors_propagate(self, strategy, model_registry, input_spec, components):
+        class FailingAdapter(model_registry.Adapter):
+            def __init__(self, **kwargs):
+                raise RuntimeError("constructor failed")
 
-    def test_rejects_unknown_component_key(self, backend, components):
-        components["unknown_component"] = object()
-        with pytest.raises(ValueError, match="Unsupported component"):
-            backend.build_model(components=components)
+        with pytest.raises(RuntimeError, match="constructor failed"):
+            strategy.build_model(FailingAdapter, components=components, config={"input_spec": input_spec})
 
-    def test_rejects_component_in_config(self, backend, components):
-        with pytest.raises(ValueError, match="components"):
-            backend.build_model(components=components, config={"loss": "mse"})
-
-    def test_rejects_duplicate_constructor_option(self, backend, components):
-        with pytest.raises(ValueError, match="more than once"):
-            backend.build_model(
-                {"type": "conditional_linear", "params": {"epochs": 5}},
-                components=components, config={"epochs": 10},
-            )
-
-    def test_rejects_non_string_argument_key(self, backend, components):
-        with pytest.raises(TypeError, match="names must be strings"):
-            backend.build_model(components=components, config={1: "invalid"})
-
-    def test_rejects_unknown_model(self, backend, api, components):
-        with pytest.raises(api.errors.UnknownComponentError):
-            backend.build_model("not_a_real_model", components=components)
-
-
-class TestConstructorValidation:
-    def test_invalid_callback_options_propagate_domain_error(self, backend, api):
-        with pytest.raises(api.errors.TrainingConfigurationError):
-            backend.build_callbacks({"type": "early_stopping", "params": {"patience": 0}})
-
-    def test_invalid_regularizer_options_propagate_domain_error(self, backend, api, regularizer_data):
-        invalid_data = api.PreparedRegularizerData(
-            layout=regularizer_data.layout, params={"l1": -1.0},
-        )
-        with pytest.raises(api.errors.RegularizerConfigurationError):
-            backend.build_regularizer("l1", data=invalid_data)
-
-    def test_invalid_constraint_options_propagate_domain_error(self, backend, api, constraint_data):
-        with pytest.raises(api.errors.ConstraintConfigurationError):
-            backend.build_constraint(
-                {"type": "mask_and_min_abs_sum", "params": {"eps": 0.0}},
-                data=constraint_data,
-            )
-
-    def test_component_creation_is_silent_by_default(self, backend, capsys):
-        capsys.readouterr()
-        backend.build_loss("mse")
-        assert capsys.readouterr().out == ""
-
-    def test_verbose_loading_reports_component(self, api, capsys):
-        backend = api.Strategy(loading_verbose=True)
-        capsys.readouterr()
-        backend.build_loss("mse")
-        assert "[Backend:pytorch] loss" in capsys.readouterr().out
+    def test_unavailable_torch_stops_before_registry_resolution(self, strategy, model_registry, monkeypatch):
+        monkeypatch.setattr(strategy, "_require_torch", Mock(side_effect=BackendNotAvailableError("not installed")))
+        resolver = Mock(side_effect=AssertionError("Should not resolve model"))
+        monkeypatch.setattr(model_registry.module, "resolve_model_spec", resolver)
+        with pytest.raises(BackendNotAvailableError, match="not installed"):
+            strategy.build_model()
+        resolver.assert_not_called()
