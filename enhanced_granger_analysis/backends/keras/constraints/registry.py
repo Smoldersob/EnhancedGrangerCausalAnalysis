@@ -39,5 +39,9 @@ def available_constraints(
 
 def resolve_constraint_spec(
     spec: Any,
-) -> tuple[type[BaseKerasConstraint], dict[str, Any]]:
+) -> (
+    tuple[type[BaseKerasConstraint], dict[str, Any]]
+    | BaseKerasConstraint
+    | None
+):
     return _CONSTRAINTS.resolve_spec(spec)

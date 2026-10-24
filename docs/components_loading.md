@@ -13,19 +13,66 @@ paths for constraints and regularizers.
 
 ## Component families
 
-| Component | Configuration entry point | Resolution mechanism |
+| Component | Resolution/preparation | Strategy construction |
 | --- | --- | --- |
-| Relations | `relations` / `.relations(...)` | Shared relation parser |
-| Constraint implementation | `constraint_spec` / `.constraint(...)` | Backend constraint class registry |
-| Regularizer | `regularizer_spec` / `.regularization(...)` | Shared parser and backend regularizer class registry |
-| Callbacks | `callbacks` / `.callbacks(...)` | Backend object loader |
-| Optimizer | `model_config.optimizer` | Backend optimizer loader |
-| Initializer | `initializer` / `.initializer(...)` | Initializer registry |
+| Model | Backend-local model registry | `build_model(spec, components=..., config=...)` |
+| Callbacks | Backend-local resolver/registry | `build_callbacks(specs)` |
+| Optimizer | Backend optimizer resolver | `build_optimizer(spec)` |
+| Loss | Backend loss resolver | `build_loss(spec)` |
+| Constraint | Relation parser, layout preparation, backend registry | `build_constraint(spec, data=...)` |
+| Regularizer | Shared parser, layout preparation, backend registry | `build_regularizer(selector, data=...)` |
 
-Do not apply callback or optimizer compatibility rules to constraint and
-regularizer specifications. In particular, support for flattened
-parameters or `name`/`kind` aliases in one loader does not make them valid
-for the new component parsers.
+Registry resolution and object construction are separate stages.
+
+## Regularizer specification
+
+The shared parser accepts:
+
+- `None`.
+- A registered name.
+- A concrete regularizer class.
+- A normalized `RegularizerSpec`.
+- A mapping containing `type` and optional `params`.
+
+Ready regularizer instances and factory functions are not accepted by the
+shared parser.
+
+Strategy-level construction is a separate API and may accept an already
+compatible backend regularizer instance. Do not infer parser acceptance from
+strategy-level behavior.
+
+Built-in names are `l1` and `lag_dependent_l1`. Their default strength is `0.0`,
+so selecting a regularizer by name alone does not introduce a nonzero penalty.
+
+## Component bases
+
+| Backend | Constraint base | Regularizer base |
+| --- | --- | --- |
+| NumPy | `BaseNumpyConstraint` | `BaseNumpyRegularizer` |
+| Native PyTorch | `BasePyTorchConstraint` | `BasePyTorchRegularizer` |
+| Keras | `BaseKerasConstraint` | `BaseKerasRegularizer` |
+
+NumPy and PyTorch use native coefficient matrices of shape
+`(n_outputs, n_features)`. Keras Dense kernels use
+`(n_features, n_outputs)`.
+
+Prepared layout data remains canonical. Backend implementations handle native
+orientation; built-in linear-model parameter export uses
+`(n_features, n_outputs)`.
+
+## Callback lifecycle
+
+NumPy and PyTorch have separate callback classes and registries.
+Similar hook names do not make callback objects interchangeable across backends.
+
+Custom native-loop callbacks implement `clone_for_run()` to preserve
+configuration while discarding previous runtime state.
+
+Shared lifecycle utilities live in `core.components.callback_lifecycle`.
+Keras callback construction and reset handling remain backend-specific.
+
+Resetting callbacks must not restore predictor weights, alter input omission,
+or reset optimizer state.
 
 ## Constraint configuration
 

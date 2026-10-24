@@ -72,11 +72,31 @@ Constraint and regularizer specifications are no longer resolved by
 the object loaders. Their dedicated registries select classes, and
 strategies construct instances from prepared component data.
 
-### core
+### backends
+
+Backend selection, registered model construction, and backend-native components:
+
+- `backend_factory.py`: strategy selection and backend aliases.
+- `base_backend.py`: shared strategy construction interface.
+- `keras/`, `pytorch/`, `numpy/`: backend-specific strategies and components.
+- `models/conditional.py` within each backend: training/lifecycle adapter.
+- `models/network_parts.py` within each backend: predictor architecture.
+- Backend-local `callbacks/`, `optimizers/`, and `losses/`: component resolution.
+- Backend-local `constraints/` and `regularizers/`: implementations and registries.
+
+The former shared `backends/models/`, `backends/object_loaders/`, and
+`backends/scikit/` packages are removed.
+
+### core models
 
 Shared contracts, configuration objects, registries, and exceptions.
 
-`components/` contains backend-independent component infrastructure:
+`core/models/` defines structural input metadata, model protocols,
+model-class registry infrastructure, training diagnostics, and shared array
+validation.
+
+`core/components/` additionally contains shared callback registry and lifecycle
+utilities alongside constraint and regularizer infrastructure.
 
 - `constraint_spec.py`: named relation rules and prepared constraint data;
 - `constraint_parsing.py`: canonical relation parsing;

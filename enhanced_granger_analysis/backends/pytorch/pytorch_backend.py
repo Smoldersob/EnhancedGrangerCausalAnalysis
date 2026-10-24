@@ -1,197 +1,231 @@
 from __future__ import annotations
 
-from typing import Any, Dict, Optional
+import importlib.util
+from collections.abc import Mapping, Sequence
+from typing import TYPE_CHECKING, Any
 
 from ..base_backend import BackendStrategy
-from ..object_loaders.torch_object_loader import TorchObjectLoader
 from ...core.components.constraint_spec import PreparedConstraintData
-from ...core.exceptions import ConstraintConfigurationError
 from ...core.components.regularizer_spec import PreparedRegularizerData
+from ...core.exceptions import BackendNotAvailableError
+from ...core.models.protocol import GrangerModelProtocol
+
+if TYPE_CHECKING:
+    from .optimizers.adapter import PyTorchOptimizerAdapter
 
 
 class PyTorchBackendStrategy(BackendStrategy):
-	"""Strategy for PyTorch backend."""
+    """Construct prepared PyTorch components and model adapters."""
 
-	@staticmethod
-	def _extract_gradient_accumulation_steps(config: Dict[str, Any], optimizer_spec: Any) -> int:
-		"""Extract training-level gradient accumulation setting from config/optimizer spec."""
-		value = config.get("gradient_accumulation_steps", None)
-		if value is None and isinstance(optimizer_spec, dict):
-			optimizer_params = optimizer_spec.get("params")
-			if isinstance(optimizer_params, dict):
-				value = optimizer_params.get("gradient_accumulation_steps", None)
-				if value is None:
-					value = optimizer_params.get("gradient_accumulation", None)
-				if value is None:
-					value = optimizer_params.get("accumulation_steps", None)
+    name = "pytorch"
 
-			if value is None:
-				value = optimizer_spec.get("gradient_accumulation_steps", None)
-			if value is None:
-				value = optimizer_spec.get("gradient_accumulation", None)
-			if value is None:
-				value = optimizer_spec.get("accumulation_steps", None)
+    _component_names = frozenset({
+        "optimizer",
+        "loss",
+        "callbacks",
+        "regularizer",
+        "constraint",
+    })
 
-		if value is None:
-			return 1
-		return int(value)
+    def is_available(self) -> bool:
+        try:
+            if importlib.util.find_spec("torch") is None:
+                return False
 
-	@staticmethod
-	def _resolve_optimizer_spec(config: Dict[str, Any]) -> Any:
-		"""Normalize optimizer configuration while preserving backward compatibility.
+            import torch  # noqa: F401
 
-		Supported patterns:
-		- "adam"
-		- {"type": "adam", "learning_rate": 1e-3}
-		- {"type": "adam", "params": {"lr": 1e-3}}
-		- legacy top-level "learning_rate" alongside optimizer config
-		"""
-		optimizer_cfg = config.get("optimizer")
-		learning_rate = config.get("learning_rate")
-		if optimizer_cfg is None:
-			if learning_rate is None:
-				return "adam"
-			return {"type": "adam", "learning_rate": learning_rate}
+        except ImportError:
+            return False
 
-		if isinstance(optimizer_cfg, dict):
-			merged = dict(optimizer_cfg)
-			params = merged.get("params")
-			if learning_rate is not None:
-				if isinstance(params, dict):
-					params = dict(params)
-					params.setdefault("lr", learning_rate)
-					merged["params"] = params
-				else:
-					merged.setdefault("learning_rate", learning_rate)
-			return merged
+        return True
 
-		if isinstance(optimizer_cfg, str) and learning_rate is not None:
-			name = optimizer_cfg.strip().lower()
-			if name:
-				return {"type": name, "learning_rate": learning_rate}
+    def _require_torch(self) -> Any:
+        try:
+            import torch
+        except ImportError as exc:
+            raise BackendNotAvailableError(
+                "PyTorch is unavailable."
+            ) from exc
 
-		return optimizer_cfg
+        return torch
 
-	def __init__(self, loading_verbose: bool = False):
-		super().__init__(loading_verbose=loading_verbose)
-		self._torch = None
-		self._object_loader: Optional[TorchObjectLoader] = None
-		if self.is_available():
-			import torch
-			self._torch = torch
-			self._object_loader = TorchObjectLoader(torch, loading_verbose=loading_verbose)
+    def build_optimizer(
+        self,
+        spec: Any = None,
+        **context: Any,
+    ) -> PyTorchOptimizerAdapter:
+        if context:
+            raise TypeError(
+                "PyTorch optimizer preparation does not accept context: "
+                + ", ".join(sorted(context))
+            )
 
-	def is_available(self) -> bool:
-		try:
-			import torch  # noqa: F401
-			return True
-		except ImportError:
-			return False
+        self._require_torch()
 
-	def build_model(
-		self,
-		n_features: int,
-		n_outputs: int,
-		regularizer: Optional[Any] = None,
-		constraint: Optional[Any] = None,
-		seed: Optional[int] = None,
-		**config,
-	):
-		if seed is not None:
-			import numpy as np
-			import random
-			np.random.seed(seed)
-			random.seed(seed)
+        from .optimizers import resolve_optimizer
 
-			try:
-				import torch
-				torch.manual_seed(seed)
-				if torch.cuda.is_available():
-					torch.cuda.manual_seed_all(seed)
-			except ImportError:
-				pass
-		from ..models.pytorch_model import PyTorchGrangerModel
-		config = self._consume_loading_verbose(config)
-		if self._object_loader is not None:
-			self._object_loader.set_loading_verbose(self._loading_verbose)
+        adapter = resolve_optimizer(spec)
+        self._log_component("optimizer", adapter)
+        return adapter
 
-		model_cfg = config.get("model_config") or config.get("config") or {}
-		if not isinstance(model_cfg, dict):
-			model_cfg = {}
-		model_name = config.get("model_name") or config.get("model") or config.get("model_type")
-		model_cls = self._object_loader.resolve_model(model_name, PyTorchGrangerModel)
+    def build_loss(self, spec: Any = None) -> Any:
+        self._require_torch()
 
-		optimizer_spec = self._resolve_optimizer_spec(config)
-		gradient_accumulation_steps = self._extract_gradient_accumulation_steps(config, optimizer_spec)
-		optimizer_resolved = self.resolve_optimizer(optimizer_spec)
+        from .losses.resolver import resolve_loss
 
-		kwargs = dict(model_cfg)
-		if "constraint" in kwargs or "constraint_spec" in kwargs:
-			raise ConstraintConfigurationError(
-				"Do not configure constraints inside model_config. "
-				"Use the builder's constraint_spec setting."
-			)
+        loss = resolve_loss(
+            "mse" if spec is None else spec
+        )
 
-		kwargs["constraint"] = constraint
-		kwargs["regularizer"] = regularizer
-		
-		kwargs.setdefault("backend", "pytorch")
-		kwargs.setdefault("optimizer", optimizer_resolved)
-		kwargs.setdefault("loss", config.get("loss", None))
-		kwargs.setdefault("learning_rate", config.get("learning_rate", 0.001))
-		kwargs.setdefault("gradient_accumulation_steps", gradient_accumulation_steps)
-		kwargs.setdefault("epochs", config.get("epochs", 100))
-		kwargs.setdefault("batch_size", config.get("batch_size", 32))
-		kwargs.setdefault("verbose", config.get("verbose", 0))
-		kwargs.setdefault("device", config.get("device", None))
-		
-		return model_cls(**kwargs)
+        if loss is None or isinstance(loss, type) or not callable(loss):
+            raise TypeError(
+                "Loss resolver must return a loss instance or function."
+            )
 
-	def resolve_callbacks(self, callbacks: Optional[list]) -> Optional[list]:
-		if self._object_loader is None:
-			return callbacks
-		self._object_loader.set_loading_verbose(self._loading_verbose)
-		return self._object_loader.resolve_callbacks(callbacks)
+        self._log_component("loss", loss)
+        return loss
 
-	def resolve_optimizer(self, optimizer: Any) -> Any:
-		if self._object_loader is None:
-			return optimizer
-		self._object_loader.set_loading_verbose(self._loading_verbose)
-		return self._object_loader.resolve_optimizer(optimizer)
+    def build_callbacks(self, specs: Any = None) -> list[Any]:
+        if specs is None:
+            return []
 
-	def build_regularizer(
-		self,
-		regularizer_type: str | type | None,
-		*,
-		data: Optional[PreparedRegularizerData] = None,
-	) -> Any:
-		if regularizer_type is None:
-			return None
+        self._require_torch()
 
-		from .regularizers import resolve_regularizer_spec
+        from . import callbacks as _callbacks  # noqa: F401
+        from .callbacks.base import Callback
+        from .callbacks.registry import resolve_callback_spec
 
-		regularizer_class, _ = resolve_regularizer_spec(
-			regularizer_type
-		)
+        if isinstance(specs, Sequence) and not isinstance(
+            specs, (str, bytes)
+        ):
+            items = list(specs)
+        else:
+            items = [specs]
 
-		return regularizer_class(data=data)
+        callbacks = []
 
-	def build_constraint(
-		self,
-		constraint_spec: Any,
-		*,
-		data: PreparedConstraintData,
-	) -> Any:
-		from .constraints import resolve_constraint_spec
+        for spec in items:
+            resolved = resolve_callback_spec(spec)
 
-		constraint_class, params = resolve_constraint_spec(
-			constraint_spec
-		)
+            if resolved is None:
+                continue
 
-		constraint = constraint_class(
-			data=data,
-			**params,
-		)
+            if isinstance(resolved, Callback):
+                callback = resolved
+            else:
+                callback_class, params = resolved
+                callback = callback_class(**params)
 
-		self._log_loaded_component("constraint", constraint)
-		return constraint
+            if not isinstance(callback, Callback):
+                raise TypeError(
+                    "Callback construction returned an invalid object."
+                )
+
+            callbacks.append(callback)
+
+        self._log_component("callbacks", callbacks)
+        return callbacks
+
+    def build_regularizer(
+        self,
+        spec: Any = None,
+        *,
+        data: PreparedRegularizerData | None = None,
+    ) -> Any:
+        if spec is None:
+            return None
+
+        self._require_torch()
+
+        from .regularizers.base import BasePyTorchRegularizer
+
+        if isinstance(spec, BasePyTorchRegularizer):
+            self._log_component("regularizer", spec)
+            return spec
+
+        from .regularizers import resolve_regularizer_spec
+
+        resolved = resolve_regularizer_spec(spec)
+        if resolved is None:
+            return None
+
+        regularizer_class, _ = resolved
+
+        if data is None:
+            raise ValueError(
+                "Creating a project regularizer requires "
+                "PreparedRegularizerData."
+            )
+
+        regularizer = regularizer_class(data=data)
+
+        if not isinstance(regularizer, BasePyTorchRegularizer):
+            raise TypeError(
+                "Regularizer construction returned an invalid object."
+            )
+
+        self._log_component("regularizer", regularizer)
+        return regularizer
+
+    def build_constraint(
+        self,
+        spec: Any = None,
+        *,
+        data: PreparedConstraintData | None = None,
+    ) -> Any:
+        if spec is None:
+            return None
+
+        self._require_torch()
+
+        from .constraints.base import BasePyTorchConstraint
+
+        if isinstance(spec, BasePyTorchConstraint):
+            self._log_component("constraint", spec)
+            return spec
+
+        from .constraints import resolve_constraint_spec
+
+        constraint_class, params = resolve_constraint_spec(spec)
+
+        if data is None:
+            raise ValueError(
+                "Creating a project constraint requires "
+                "PreparedConstraintData."
+            )
+
+        constraint = constraint_class(
+            data=data,
+            **params,
+        )
+
+        if not isinstance(constraint, BasePyTorchConstraint):
+            raise TypeError(
+                "Constraint construction returned an invalid object."
+            )
+
+        self._log_component("constraint", constraint)
+        return constraint
+
+    def build_model(
+        self,
+        spec: Any = None,
+        *,
+        components: Mapping[str, Any] | None = None,
+        config: Mapping[str, Any] | None = None,
+    ) -> GrangerModelProtocol:
+        self._require_torch()
+
+        from .models.registry import (
+            resolve_model_spec,
+            validate_model_instance,
+        )
+
+        return self._build_registered_model(
+            spec,
+            resolve_spec=resolve_model_spec,
+            validate_instance=validate_model_instance,
+            components=components,
+            config=config,
+            supported_components=self._component_names,
+        )

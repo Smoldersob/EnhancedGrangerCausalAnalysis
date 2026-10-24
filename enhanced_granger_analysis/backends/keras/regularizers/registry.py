@@ -44,6 +44,10 @@ def available_regularizers(
 
 def resolve_regularizer_spec(
     spec: Any,
-) -> tuple[type[BaseKerasRegularizer], dict[str, Any]] | None:
+) -> (
+    tuple[type[BaseKerasRegularizer], dict[str, Any]]
+    | BaseKerasRegularizer
+    | None
+):    
     """Resolve a raw or parsed specification; None disables regularization."""
     return _REGULARIZERS.resolve_spec(spec)

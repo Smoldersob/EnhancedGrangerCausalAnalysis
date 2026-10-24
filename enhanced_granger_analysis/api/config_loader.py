@@ -21,9 +21,10 @@ _BACKEND_ALIASES = {
 	"keras": "tensorflow",
 	"pytorch": "pytorch",
 	"torch": "pytorch",
-	"sklearn": "sklearn",
-	"scikit": "sklearn",
-	"scikit-learn": "sklearn",
+	"sklearn": "numpy",
+	"scikit": "numpy",
+	"scikit-learn": "numpy",
+	"numpy": "numpy",
 }
 
 
@@ -119,9 +120,9 @@ def _normalize_backend(raw_backend: Any) -> Tuple[Optional[str], Dict[str, Any]]
 
 	backend_type, backend_params = _extract_typed_spec(raw_backend, context="backend")
 	canonical = _BACKEND_ALIASES.get(backend_type, backend_type)
-	if canonical not in {"tensorflow", "pytorch", "sklearn"}:
+	if canonical not in {"tensorflow", "pytorch", "numpy"}:
 		raise DataValidationError(
-			"Unsupported backend type. Supported: tensorflow, pytorch, sklearn"
+			"Unsupported backend type. Supported: tensorflow, pytorch, numpy"
 		)
 
 	return canonical, dict(backend_params)
@@ -306,7 +307,7 @@ class BuilderConfigLoader:
 		if "compute_device" in out or "device" in out:
 			device_spec = out.pop("compute_device", out.pop("device", None))
 			device_config = _normalize_compute_device(device_spec, backend_name)
-			if device_config and backend_name != "sklearn":
+			if device_config and backend_name != "numpy":
 				model_cfg_raw = out.get("model_config")
 				if model_cfg_raw is None:
 					model_cfg: Dict[str, Any] = {}
