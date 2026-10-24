@@ -221,10 +221,18 @@ class PyTorchConditionalAdapter:
 				self.regularizer.get_config()
 			)
 
+		constraint = None
+		if self.constraint is not None:
+			constraint = type(self.constraint).from_config(self.constraint.get_config())
+			data = constraint.prepared_data
+			if (tuple(data.output_names) != self.input_spec.effects
+					or data.n_features != self.input_spec.n_features):
+				raise ValueError("Constraint layout does not match input_spec.")
+
 		network = LinearGrangerNetwork(
 			n_features=self.input_spec.n_features,
 			n_outputs=self.input_spec.n_outputs,
-			constraint=deepcopy(self.constraint),
+			constraint=constraint,
 			regularizer=regularizer,
 			use_bias=self.use_bias,
 		).to(self.device)

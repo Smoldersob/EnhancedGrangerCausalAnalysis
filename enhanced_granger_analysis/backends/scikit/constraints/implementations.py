@@ -34,10 +34,9 @@ class MaskConstraint(BaseScikitConstraint):
 		return w * self.mask
 
 	def is_satisfied(self, params: NDArray[np.float64]) -> bool:
-		w = np.asarray(params, dtype=np.float64)
-		if w.shape != self.mask.shape:
-			return False
-		return bool(np.allclose(w * (1.0 - self.mask), 0.0))
+		values = np.asarray(params, dtype=np.float64)
+		return bool(values.shape == self.mask.shape and np.isfinite(values).all()
+			and np.allclose(values * (1.0 - self.mask), 0.0, atol=1e-8, rtol=0.0))
 
 @register_constraint("MaskAndMinAbsSumConstraint","mask_and_min_abs_sum_constraint","mask_and_min_abs_sum")
 class MaskAndMinAbsSumConstraint(BaseScikitConstraint):
@@ -94,18 +93,12 @@ class MaskAndMinAbsSumConstraint(BaseScikitConstraint):
 		return constrained
 
 	def is_satisfied(self, params: NDArray[np.float64]) -> bool:
-		w = np.asarray(params, dtype=np.float64)
-		if w.shape != self.mask.shape:
+		values = np.asarray(params, dtype=np.float64)
+		if values.shape != self.mask.shape or not np.isfinite(values).all():
 			return False
-		if not np.allclose(w * (1.0 - self.mask), 0.0):
+		if not np.allclose(values * (1.0 - self.mask), 0.0, atol=self.eps, rtol=0.0):
 			return False
-
-		for rule in self.rules:
-			out_idx = int(rule.output_index)
-			feat_idx = np.asarray(rule.feature_indices, dtype=np.int64)
-			if feat_idx.size == 0:
-				continue
-			sum_abs = float(np.sum(np.abs(w[out_idx, feat_idx])))
-			if sum_abs + self.eps < float(rule.min_abs_sum):
-				return False
-		return True
+		return all(
+			np.sum(np.abs(values[rule.output_index, list(rule.feature_indices)])) + self.eps
+			>= rule.min_abs_sum for rule in self.rules
+		)

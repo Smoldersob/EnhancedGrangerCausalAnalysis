@@ -190,7 +190,7 @@ class MaskAndMinAbsSumConstraint(BaseKerasConstraint):
     def enforce(self, w: Any) -> Any:
         shape = tuple(w.shape)
 
-        if w.shape.rank != 2 or any(dim is None for dim in shape):
+        if len(shape) != 2 or any(dim is None for dim in shape):
             raise ConstraintConfigurationError(
                 f"Expected a rank-2 kernel with static shape; got {shape}."
             )
@@ -257,67 +257,15 @@ class MaskAndMinAbsSumConstraint(BaseKerasConstraint):
         return constrained * mask_t
 
     def is_satisfied(self, params):
-        values = np.asarray(
-            keras.ops.convert_to_numpy(params)
+        values = np.asarray(keras.ops.convert_to_numpy(params))
+        if values.shape != self._kernel_shape or not np.isfinite(values).all():
+            return False
+        if not np.allclose(values * (1.0 - self.mask.T), 0.0, atol=self.eps, rtol=0.0):
+            return False
+        return all(
+            np.sum(np.abs(values[list(rule.feature_indices), rule.output_index])) + self.eps
+            >= rule.min_abs_sum for rule in self.rules
         )
 
-        if values.shape != self._kernel_shape:
-            return False
-
-        if not np.all(np.isfinite(values)):
-            return False
-
-        if not np.allclose(
-            values * (1.0 - self.mask.T),
-            0.0,
-            atol=self.eps,
-            rtol=0.0,
-        ):
-            return False
-
-        for rule in self.rules:
-            selected = values[
-                list(rule.feature_indices),
-                rule.output_index,
-            ]
-
-            if (
-                np.sum(np.abs(selected)) + self.eps
-                < rule.min_abs_sum
-            ):
-                return False
-
-        return True
-
-    def is_satisfied(self, params):
-        values = np.asarray(
-            keras.ops.convert_to_numpy(params)
-        )
-
-        if values.shape != self._kernel_shape:
-            return False
-
-        if not np.all(np.isfinite(values)):
-            return False
-
-        if not np.allclose(
-            values * (1.0 - self.mask.T),
-            0.0,
-            atol=self.eps,
-            rtol=0.0,
-        ):
-            return False
-
-        for rule in self.rules:
-            selected = values[
-                list(rule.feature_indices),
-                rule.output_index,
-            ]
-
-            if (
-                np.sum(np.abs(selected)) + self.eps
-                < rule.min_abs_sum
-            ):
-                return False
-
-        return True
+    def get_config(self):
+        return {**super().get_config(), "eps": self.eps}

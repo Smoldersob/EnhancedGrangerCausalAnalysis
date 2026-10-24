@@ -12,6 +12,47 @@ from .constraint_spec import (
 from ..exceptions import ConstraintConfigurationError
 
 
+
+def validate_prepared_constraint_data(data: PreparedConstraintData) -> None:
+    # Disjoint groups are the contract already required by Keras.
+    from numbers import Integral, Real
+    def integer(value):
+        return isinstance(value, Integral) and not isinstance(value, (bool, np.bool_))
+    def fail(message):
+        raise ConstraintConfigurationError(message)
+    if not integer(data.n_features) or data.n_features <= 0:
+        fail('n_features must be a positive integer.')
+    names = data.output_names
+    if not names or any(not isinstance(n, str) or not n.strip() for n in names):
+        fail('output_names must contain non-empty strings.')
+    if len(set(names)) != len(names):
+        fail('output_names must be unique.')
+    if data.mask.shape != (len(names), data.n_features):
+        fail('Invalid canonical constraint mask shape.')
+    seen = set()
+    for i, rule in enumerate(data.rules):
+        if not isinstance(rule, PreparedMinAbsSumRule):
+            fail(f'Rule {i} must be a PreparedMinAbsSumRule.')
+        output, features, minimum = rule.output_index, rule.feature_indices, rule.min_abs_sum
+        if not integer(output) or not 0 <= output < len(names):
+            fail(f'Rule {i}: invalid output_index.')
+        if not features or any(not integer(f) or not 0 <= f < data.n_features for f in features):
+            fail(f'Rule {i}: invalid feature_indices.')
+        if len(set(features)) != len(features):
+            fail(f'Rule {i}: repeated feature_indices.')
+        if isinstance(minimum, (bool, np.bool_)) or not isinstance(minimum, Real):
+            fail(f'Rule {i}: min_abs_sum must be real, not boolean.')
+        if not np.isfinite(minimum) or minimum < 0:
+            fail(f'Rule {i}: min_abs_sum must be finite and non-negative.')
+        for feature in features:
+            pair = (int(output), int(feature))
+            if not data.mask[output, feature]:
+                fail(f'Rule {i}: coefficient {pair} is hard-masked.')
+            if pair in seen:
+                fail(f'Rule {i}: overlapping min_abs_sum groups are not supported.')
+            seen.add(pair)
+
+
 def copy_constraint_data(
     data: PreparedConstraintData,
 ) -> PreparedConstraintData:
@@ -19,6 +60,8 @@ def copy_constraint_data(
         raise TypeError(
             "data must be a PreparedConstraintData instance."
         )
+
+    validate_prepared_constraint_data(data)
 
     return PreparedConstraintData(
         output_names=data.output_names,

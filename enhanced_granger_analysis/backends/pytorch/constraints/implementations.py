@@ -38,9 +38,10 @@ class MaskConstraint(BasePyTorchConstraint):
 	def is_satisfied(self, params: Any) -> bool:
 		if not torch.is_tensor(params) or tuple(params.shape) != tuple(self.mask.shape):
 			return False
-		mask_t = torch.as_tensor(self.mask, dtype=params.dtype, device=params.device)
-		viol = torch.abs(params * (1.0 - mask_t))
-		return bool(torch.all(viol <= 1e-12).item())
+		if not bool(torch.isfinite(params).all().item()):
+			return False
+		mask = torch.as_tensor(self.mask, dtype=params.dtype, device=params.device)
+		return bool(torch.all(torch.abs(params * (1.0 - mask)) <= 1e-8).item())
 
 
 @register_constraint("MaskAndMinAbsSumConstraint", "mask_and_min_abs_sum_constraint", "mask_and_min_abs_sum")
@@ -61,11 +62,8 @@ class MaskAndMinAbsSumConstraint(BasePyTorchConstraint):
 
 		self.eps = float(eps)
 		
-	def get_config(self):
-			return {
-				**super().get_config(),
-				"eps": self.eps,
-			}
+	def get_config(self) -> Dict[str, Any]:
+		return {**super().get_config(), "eps": self.eps}
 
 	def enforce(self, params: Any) -> Any:
 		if not torch.is_tensor(params):
@@ -106,34 +104,16 @@ class MaskAndMinAbsSumConstraint(BasePyTorchConstraint):
 	def is_satisfied(self, params: Any) -> bool:
 		if not torch.is_tensor(params) or tuple(params.shape) != tuple(self.mask.shape):
 			return False
-
-		mask_t = torch.as_tensor(self.mask, dtype=params.dtype, device=params.device)
-		viol = torch.abs(params * (1.0 - mask_t))
-		if not bool(torch.all(viol <= self.eps).item()):
+		if not bool(torch.isfinite(params).all().item()):
 			return False
-
+		mask = torch.as_tensor(self.mask, dtype=params.dtype, device=params.device)
+		if not bool(torch.all(torch.abs(params * (1.0 - mask)) <= self.eps).item()):
+			return False
 		for rule in self.rules:
-			out_idx = int(rule.output_index)
-			feat_idx = list(rule.feature_indices)
-			if len(feat_idx) == 0:
-				continue
-			idx_t = torch.as_tensor(feat_idx, dtype=torch.long, device=params.device)
-			sum_abs = torch.sum(torch.abs(params[out_idx, idx_t]))
-			if float(sum_abs.item()) + self.eps < float(rule.min_abs_sum):
+			indices = torch.as_tensor(rule.feature_indices, dtype=torch.long, device=params.device)
+			total = torch.sum(torch.abs(params[rule.output_index, indices]))
+			if float(total.item()) + self.eps < rule.min_abs_sum:
 				return False
 		return True
 
-	def get_config(self) -> Dict[str, Any]:
-		return {
-			"mask": self.mask.tolist(),
-			"rules": [
-				{
-					"output_index": int(rule.output_index),
-					"feature_indices": list(rule.feature_indices),
-					"min_abs_sum": float(rule.min_abs_sum),
-				}
-				for rule in self.rules
-			],
-			"eps": self.eps,
-		}
 
