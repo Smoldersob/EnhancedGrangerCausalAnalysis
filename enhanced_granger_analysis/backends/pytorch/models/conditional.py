@@ -1,598 +1,473 @@
-
 from __future__ import annotations
 
-import torch
-
-from torch import nn
-from torch.utils.data import DataLoader, TensorDataset
-
-from typing import Any, Dict, List, Mapping, Optional, Type, Union
+from collections.abc import Sequence
+from copy import deepcopy
+from typing import Any
 
 import numpy as np
-from numpy.typing import NDArray
+import torch
+from torch import nn
 
-from .registry import register_model
-from .network_parts import TorchFeatureMask
-
-from ..callbacks.base import Callback
-from ....core.components.callback_lifecycle import (
-    clone_custom_callback,
-    reset_callback_list,
-)
 from ....core.exceptions import (
-	BackendNotAvailableError,
-	ConstraintConfigurationError,
-	RegularizerConfigurationError,
-	BackendCompatibilityError,
-	ModelNotFittedError,
-	TrainingError,
+    BackendNotAvailableError,
+    ModelNotFittedError,
+    TrainingError,
 )
-
-
-
-@register_model(
-    "conditional",
-    "conditional_linear",
+from ....core.models.protocol import (
+    CallbackUpdates,
+    FloatArray,
+    ModelWeights,
+    TrainingResult,
 )
-class PyTorchGrangerModel:
-	"""PyTorch implementation of Granger model with variable masking and linear coefficients."""
-
-	def __init__(
-		self,
-		backend: str = "pytorch",
-		regularizer: Optional[Any] = None,
-		constraint: Optional[Any] = None,
-		optimizer: Optional[Any] = None,
-		loss: Optional[Any] = None,
-		callbacks: List[Callback] = None,
-		learning_rate: float = 1e-3,
-		gradient_accumulation_steps: int = 1,
-		loss_fn: Optional[Any] = None,
-		epochs: int = 100,
-		batch_size: Optional[int] = 32,
-		verbose: int = 0,
-		device: Optional[str] = None,
-		**kwargs: Any
-	):
-		super().__init__(
-			backend=backend,
-			regularizer=regularizer,
-			constraint=constraint,
-			needs_reinit=False,
-		)
-
-		if torch is None:
-			raise BackendNotAvailableError(
-				"PyTorch is required to use PyTorchGrangerModel. Install torch first."
-			)
-
-		self.learning_rate = learning_rate
-		self.gradient_accumulation_steps = int(gradient_accumulation_steps)
-		if self.gradient_accumulation_steps < 1:
-			raise ConstraintConfigurationError("gradient_accumulation_steps must be >= 1")
-		self.epochs = epochs
-		self.batch_size = batch_size
-		self.verbose = verbose
-		
-		self._optimizer_spec = optimizer
-		self._loss_spec = loss if loss is not None else loss_fn
-		self.callbacks = callbacks or []
-
-		self.optimizer_cls = self._resolve_optimizer(self._optimizer_spec)
-		self.loss_fn = self._resolve_loss(self._loss_spec)
-		self.device = self._resolve_device(device)
-
-		self.model: Optional[Any] = None
-		self._variable_control_layer: Optional[Any] = None
-		self._coefficient_layer: Optional[Any] = None
-		self._optimizer: Optional[Any] = None
-
-		self._n_features: Optional[int] = None
-		self._n_outputs: Optional[int] = None
-		self._variable_mask: Optional[NDArray[np.float64]] = None
-		self._X_train: Optional[NDArray[np.float64]] = None
-		self._y_train: Optional[NDArray[np.float64]] = None
-		self._loss_history: List[float] = []
-
-		self._validate_torch_components()
-		self._validate_callbacks()
-
-	def _resolve_device(self, device: Optional[str]) -> Any:
-		"""Normalize requested device alias and enforce CPU/GPU selection."""
-		if device is None or str(device).strip().lower() in {"", "auto"}:
-			return torch.device("cuda" if torch.cuda.is_available() else "cpu")
-
-		normalized = str(device).strip().lower()
-		if normalized in {"cpu", "cpu-only"}:
-			return torch.device("cpu")
-		if normalized in {"gpu", "cuda"}:
-			if not torch.cuda.is_available():
-				raise BackendNotAvailableError(
-					"CUDA was requested for PyTorch but no CUDA device is available."
-				)
-			return torch.device("cuda")
-		if normalized.startswith("cuda"):
-			if not torch.cuda.is_available():
-				raise BackendNotAvailableError(
-					f"Requested CUDA device '{normalized}' is unavailable on this machine."
-				)
-			return torch.device(normalized)
-		return torch.device(normalized)
-
-	def _resolve_optimizer(self, optimizer: Optional[Union[str, Type[Any], Any]]) -> Any:
-		"""Resolve optimizer spec to optimizer class."""
-		if optimizer is None:
-			return torch.optim.Adam
-
-		if isinstance(optimizer, str):
-			optimizers = {
-				"adam": torch.optim.Adam,
-				"sgd": torch.optim.SGD,
-				"rmsprop": torch.optim.RMSprop,
-			}
-			resolved = optimizers.get(optimizer.lower())
-			if resolved is None:
-				raise BackendCompatibilityError(
-					f"Unsupported optimizer '{optimizer}'. Use one of: {sorted(optimizers.keys())}"
-				)
-			return resolved
-
-		if isinstance(optimizer, type):
-			if issubclass(optimizer, torch.optim.Optimizer):
-				return optimizer
-			raise BackendCompatibilityError(
-				"optimizer class must inherit from torch.optim.Optimizer"
-			)
-
-		if callable(optimizer):
-			return optimizer
-
-		raise ConstraintConfigurationError(
-			"optimizer must be string, optimizer class, or callable"
-		)
-
-	def _build_optimizer(self) -> Any:
-		"""Create a fresh optimizer instance (state reset)."""
-		if self._coefficient_layer is None:
-			raise ModelNotFittedError(
-				"Model layers are not initialized. Call initialize(...) first."
-			)
-
-		params = self._coefficient_layer.parameters()
-		provider = self.optimizer_cls
-
-		if isinstance(provider, type) and issubclass(provider, torch.optim.Optimizer):
-			return provider(params, lr=self.learning_rate)
-
-		if callable(provider):
-			try:
-				opt = provider(params, lr=self.learning_rate)
-			except TypeError:
-				opt = provider(params)
-
-			if isinstance(opt, torch.optim.Optimizer):
-				return opt
-
-			raise ConstraintConfigurationError(
-				"optimizer callable must return torch.optim.Optimizer"
-			)
-
-		raise ConstraintConfigurationError(
-			"Unable to build optimizer from provided optimizer specification"
-		)
-
-	def _resolve_loss(self, loss: Any) -> Any:
-		"""Resolve loss spec to callable loss function."""
-		if loss is None:
-			return nn.MSELoss()
-
-		if isinstance(loss, str):
-			losses = {
-				"mse": nn.MSELoss,
-				"mae": nn.L1Loss,
-				"l1": nn.L1Loss,
-				"huber": nn.SmoothL1Loss,
-			}
-			loss_cls = losses.get(loss.lower())
-			if loss_cls is None:
-				raise ConstraintConfigurationError(
-					f"Unsupported loss '{loss}'. Use one of: {sorted(losses.keys())}"
-				)
-			return loss_cls()
-
-		if isinstance(loss, nn.Module) or callable(loss):
-			return loss
-
-		raise ConstraintConfigurationError(
-			"loss must be string, torch.nn.Module, or callable"
-		)
-
-	def _validate_callbacks(self) -> None:
-		"""Validate callback list passed to model initializer."""
-		if not isinstance(self.callbacks, list):
-			raise ConstraintConfigurationError("callbacks must be a list of Callback objects")
-
-		for cb in self.callbacks:
-			if not isinstance(cb, Callback):
-				raise ConstraintConfigurationError(
-					"All PyTorch callbacks must inherit from callbacks.base_callback.Callback"
-				)
-
-	def _run_callback_hook(self, hook_name: str, state: Dict[str, Any]) -> bool:
-		"""Run hook across callbacks and return whether training should continue."""
-		for callback in self.callbacks:
-			hook = getattr(callback, hook_name)
-			response = hook(state)
-			if response is False:
-				state["stop_training"] = True
-				if not state.get("stop_reason"):
-					state["stop_reason"] = callback.__class__.__name__ + ':' + hook_name
-				return False
-		return True
-
-	def _validate_torch_components(self) -> None:
-		"""Validate optional regularizer/constraint for PyTorch backend."""
-		if self.regularizer is not None:
-			from ..regularizers.base import BasePyTorchRegularizer
-			
-			if not isinstance(self.regularizer, BasePyTorchRegularizer):
-				raise RegularizerConfigurationError(
-					"regularizer must be None or an instance of "
-					"BasePyTorchRegularizer."
-				)
-
-		if self.constraint is not None and not callable(self.constraint):
-			raise ConstraintConfigurationError(
-				"constraint must be callable for PyTorchGrangerModel"
-			)
-
-	def initialize(
-		self,
-		data: NDArray[np.float64],
-		lags: Optional[int] = None,
-		**kwargs: Any,
-	) -> None:
-		"""Initialize model using lagged features prepared externally (e.g. LagEngine)."""
-		self._validate_torch_components()
-
-		x = np.asarray(data, dtype=np.float64)
-		y_raw = kwargs.get("targets")
-		if y_raw is None:
-			raise TrainingError(
-				"initialize requires precomputed targets via targets=<ndarray>. "
-				"Lagged features should be prepared by LagEngine."
-			)
-
-		y = np.asarray(y_raw, dtype=np.float64)
-		if x.ndim != 2:
-			raise TrainingError("Expected 2D lagged feature matrix with shape (n_samples, n_lagged_features)")
-		if y.ndim == 1:
-			y = y[:, np.newaxis]
-		if y.ndim != 2:
-			raise TrainingError("targets must be 1D or 2D array")
-		if x.shape[0] != y.shape[0]:
-			raise TrainingError("Lagged features and targets must have the same number of rows")
-
-		n_features = x.shape[1]
-		n_outputs = y.shape[1]
-
-		variable_control_layer = TorchFeatureMask(n_features)
-
-		coefficient_layer = nn.Linear(n_features, n_outputs, bias=True)
-
-		self.model = nn.Sequential(variable_control_layer, coefficient_layer).to(self.device)
-		self._variable_control_layer = variable_control_layer
-		self._coefficient_layer = coefficient_layer
-		try:
-			self._optimizer = self._build_optimizer()
-		except Exception as exc:
-			raise TrainingError(f"Failed to initialize optimizer: {exc}") from exc
-
-		self._n_features = n_features
-		self._n_outputs = n_outputs
-		self._variable_mask = np.ones(n_features, dtype=np.float64)
-		self._X_train = x
-		self._y_train = y
-		self._loss_history = []
-		self._fitted = False
-
-	def _regularization_penalty(self) -> Any:
-		"""Compute optional regularization penalty for coefficient weights."""
-		if self.regularizer is None or self._coefficient_layer is None:
-			return torch.tensor(0.0, device=self.device)
-
-		weights = self._coefficient_layer.weight
-		penalty = self.regularizer(weights)
-		if not torch.is_tensor(penalty):
-			penalty = torch.tensor(float(penalty), device=self.device)
-		return penalty
-
-	def _apply_constraint(self) -> None:
-		"""Apply optional post-step constraint on coefficient weights."""
-		if self.constraint is None or self._coefficient_layer is None:
-			return
-
-		with torch.no_grad():
-			constrained = self.constraint(self._coefficient_layer.weight.data)
-			if not torch.is_tensor(constrained):
-				raise TrainingError("constraint must return torch.Tensor")
-			if constrained.shape != self._coefficient_layer.weight.data.shape:
-				raise TrainingError("constraint returned tensor with invalid shape")
-			self._coefficient_layer.weight.data.copy_(constrained)
-
-	def fit(self) -> Dict[str, Any]:
-		"""Fit model using a PyTorch training loop and return standardized results."""
-		if self.model is None or self._X_train is None or self._y_train is None:
-			raise ModelNotFittedError("Model is not initialized. Call initialize(...) first.")
-		if self._coefficient_layer is None:
-			raise ModelNotFittedError("Layers are not initialized. Call initialize(...) first.")
-
-		# Always recreate optimizer to reset internal moments/state for each new fit.
-		self._optimizer = self._build_optimizer()
-
-		x_tensor = torch.tensor(self._X_train, dtype=torch.float32, device=self.device)
-		y_tensor = torch.tensor(self._y_train, dtype=torch.float32, device=self.device)
-
-		if self.batch_size is None:
-			loader = [(x_tensor, y_tensor)]
-		else:
-			dataset = TensorDataset(x_tensor, y_tensor)
-			loader = DataLoader(dataset, batch_size=self.batch_size, shuffle=True)
-
-		self.model.train()
-		self._loss_history = []
-		callback_state: Dict[str, Any] = {
-			"model": self,
-			"optimizer": self._optimizer,
-			"stop_training": False,
-			"stop_reason": None,
-			"loss_history": self._loss_history,
-		}
-		self._run_callback_hook("on_train_beginning", callback_state)
-
-		uses_closure = isinstance(self._optimizer, torch.optim.LBFGS)
-		if uses_closure and self.gradient_accumulation_steps > 1:
-			raise ConstraintConfigurationError(
-				"gradient_accumulation_steps > 1 is not supported with closure-based optimizer stepping"
-			)
-
-		for epoch in range(self.epochs):
-			callback_state["epoch"] = epoch
-			if not self._run_callback_hook("on_epoch_beginning", callback_state):
-				break
-
-			epoch_losses: List[float] = []
-			self._optimizer.zero_grad()
-			for batch_idx, (xb, yb) in enumerate(loader):
-				if uses_closure:
-					def _default_closure() -> Any:
-						self._optimizer.zero_grad()
-						pred_local = self.model(xb)
-						loss_local = self.loss_fn(pred_local, yb)
-						loss_local = loss_local + self._regularization_penalty()
-						loss_local.backward()
-						return loss_local
-
-					closure_fn = _default_closure
-
-					step_result = self._optimizer.step(closure_fn)
-					self._apply_constraint()
-
-					if torch.is_tensor(step_result):
-						epoch_losses.append(float(step_result.detach().cpu().item()))
-					else:
-						with torch.no_grad():
-							loss_value = self.loss_fn(self.model(xb), yb) + self._regularization_penalty()
-						epoch_losses.append(float(loss_value.detach().cpu().item()))
-					continue
-				else:
-					pred = self.model(xb)
-					loss = self.loss_fn(pred, yb)
-					loss = loss + self._regularization_penalty()
-					loss = loss / self.gradient_accumulation_steps
-					loss.backward()
-
-					if (batch_idx + 1) % self.gradient_accumulation_steps == 0 or batch_idx == len(loader) - 1:
-						self._optimizer.step()
-						self._optimizer.zero_grad()
-						self._apply_constraint()
-						epoch_losses.append(float(loss.detach().cpu().item() * self.gradient_accumulation_steps))
-
-			epoch_loss = float(np.mean(epoch_losses)) if epoch_losses else float("nan")
-			self._loss_history.append(epoch_loss)
-			callback_state["epoch_loss"] = epoch_loss
-			callback_state["loss_history"] = self._loss_history
-			if not self._run_callback_hook("on_epoch_end", callback_state):
-				break
-
-			if self.verbose:
-				print(f"Epoch {epoch + 1}/{self.epochs} - Loss: {epoch_loss:.8f}")
-
-			if callback_state.get("stop_training"):
-				break
-
-		self._run_callback_hook("on_train_end", callback_state)
-
-		self.model.eval()
-		with torch.no_grad():
-			forecasts_t = self.model(x_tensor)
-		forecasts = forecasts_t.detach().cpu().numpy()
-
-		self._fitted = True
-		final_loss = self._loss_history[-1] if self._loss_history else float("nan")
-
-		return {
-			"test_statistic": final_loss,
-			"p_value": np.nan,
-			"weights": self.get_weights(),
-			"forecasts": forecasts,
-			"history": {
-				"loss": self._loss_history,
-				"stop_reason": callback_state.get("stop_reason"),
-			},
-		}
-
-	def predict(self, X: NDArray[np.float64]) -> NDArray[np.float64]:
-		"""Generate predictions from fitted PyTorch model."""
-		if not self._fitted or self.model is None or self._n_features is None:
-			raise ModelNotFittedError("Model is not fitted. Call fit(...) first.")
-
-		x_arr = np.asarray(X, dtype=np.float64)
-		if x_arr.ndim != 2:
-			raise TrainingError("X must be a 2D array")
-		if x_arr.shape[1] != self._n_features:
-			raise TrainingError(
-				f"X has {x_arr.shape[1]} features, expected {self._n_features}"
-			)
-
-		x_tensor = torch.tensor(x_arr, dtype=torch.float32, device=self.device)
-		self.model.eval()
-		with torch.no_grad():
-			pred = self.model(x_tensor)
-		return pred.detach().cpu().numpy().astype(np.float64)
-
-	def set_weights(
-		self,
-		weights: List[NDArray[np.float64]],
-	) -> None:
-		if self._coefficient_layer is None:
-			raise ModelNotFittedError(
-				"Model is not initialized. Call initialize(...) first."
-			)
-
-		layer = self._coefficient_layer
-
-		try:
-			kernel, bias = self._validated_weight_arrays(
-				weights,
-				[
-					(self._n_features, self._n_outputs),
-					(self._n_outputs,),
-				],
-			)
-		except (TypeError, ValueError) as exc:
-			raise TrainingError(str(exc)) from exc
-
-		kernel_tensor = torch.tensor(
-			kernel.T,
-			dtype=layer.weight.dtype,
-			device=layer.weight.device,
-		)
-		bias_tensor = torch.tensor(
-			bias,
-			dtype=layer.bias.dtype,
-			device=layer.bias.device,
-		)
-
-		if (
-			not torch.isfinite(kernel_tensor).all().item()
-			or not torch.isfinite(bias_tensor).all().item()
-		):
-			raise TrainingError(
-				"Weights are not finite in the model's numeric dtype."
-			)
-
-		with torch.no_grad():
-			layer.weight.copy_(kernel_tensor)
-			layer.bias.copy_(bias_tensor)
-
-	def get_weights(self) -> List[NDArray[np.float64]]:
-		if self._coefficient_layer is None:
-			raise ModelNotFittedError(
-				"Model is not initialized. Call initialize(...) first."
-			)
-
-		layer = self._coefficient_layer
-
-		kernel = np.array(
-			layer.weight.detach().cpu().numpy().T,
-			dtype=np.float64,
-			copy=True,
-		)
-		bias = np.array(
-			layer.bias.detach().cpu().numpy(),
-			dtype=np.float64,
-			copy=True,
-		)
-
-		return [kernel, bias]
-	
-	def omit_variables(self, variable_indices: List[int]) -> None:
-		"""Replace omitted input features without changing coefficients."""
-		if (
-			self._variable_control_layer is None
-			or self._n_features is None
-		):
-			raise ModelNotFittedError(
-				"Model is not initialized. Call initialize(...) first."
-			)
-
-		indices = np.asarray(variable_indices)
-
-		if indices.ndim != 1:
-			raise TrainingError(
-				"variable_indices must be a one-dimensional list of integers."
-			)
-
-		if indices.size:
-			if indices.dtype.kind not in {"i", "u"}:
-				raise TrainingError(
-					"Variable indices must be integers, not floats or booleans."
-				)
-
-			if (
-				np.any(indices < 0)
-				or np.any(indices >= self._n_features)
-			):
-				raise TrainingError(
-					f"Variable indices must belong to "
-					f"[0, {self._n_features - 1}]."
-				)
-
-		indices = indices.astype(np.intp, copy=False)
-
-		variable_mask = np.ones(
-			self._n_features,
-			dtype=np.float64,
-		)
-		variable_mask[indices] = 0.0
-
-		mask_buffer = self._variable_control_layer.mask
-
-		with torch.no_grad():
-			mask_buffer.copy_(
-				torch.as_tensor(
-					variable_mask,
-					dtype=mask_buffer.dtype,
-					device=mask_buffer.device,
-				)
-			)
-
-		self._variable_mask = variable_mask
-
-	def set_regularizer(self, regularizer: Any) -> None:
-		"""Set regularizer with PyTorch component validation."""
-		self._validate_torch_components()
-		self.regularizer = regularizer
-		
-
-	def set_constraint(self, constraint: Any) -> None:
-		"""Set constraint with PyTorch component validation."""
-		self._validate_torch_components()
-		self.constraint = constraint
-
-	def reset_callbacks(
-		self,
-		run_name: str,
-		callback_updates: Optional[
-			Mapping[Union[int, str, type], Mapping[str, Any]]
-		] = None,
-	) -> None:
-		fresh_callbacks = reset_callback_list(
-			self.callbacks,
-			run_name,
-			callback_updates,
-			expected_type=Callback,
-			clone_callback=clone_custom_callback,
-		)
-		self.callbacks = fresh_callbacks
+from ..callbacks.base import Callback
+from ..callbacks.reset import reset_callbacks_for_run
+from ..constraints.base import BasePyTorchConstraint
+from ..optimizers.adapter import PyTorchOptimizerAdapter
+from ..regularizers.base import BasePyTorchRegularizer
+from .network_parts import LinearGrangerNetwork
+from .registry import register_model
+
+
+@register_model("conditional", "conditional_linear")
+class PyTorchConditionalAdapter:
+    """Granger protocol adapter for a separate linear nn.Module.
+
+    Mirrors the Keras adapter's lifecycle. initialize() creates a predictor
+    and an independent optimizer. fit() never resets weights or input masks.
+    Callback hooks keep the names used by the existing PyTorch backend.
+    """
+
+    def __init__(
+        self,
+        *,
+        optimizer: PyTorchOptimizerAdapter,
+        loss: Any = None,
+        regularizer: BasePyTorchRegularizer | None = None,
+        constraint: BasePyTorchConstraint | None = None,
+        callbacks: Sequence[Callback] | None = None,
+        epochs: int = 100,
+        batch_size: int | None = 32,
+        verbose: int = 0,
+        device: str | None = None,
+        use_bias: bool = True,
+        gradient_accumulation_steps: int = 1,
+    ) -> None:
+        if not isinstance(optimizer, PyTorchOptimizerAdapter):
+            raise TypeError("optimizer must be a prepared PyTorchOptimizerAdapter.")
+        if loss is None:
+            loss = nn.MSELoss()
+        if isinstance(loss, type) or not callable(loss):
+            raise TypeError("loss must be a ready loss instance or function.")
+        if regularizer is not None and not isinstance(regularizer, BasePyTorchRegularizer):
+            raise TypeError("regularizer must be a BasePyTorchRegularizer or None.")
+        if constraint is not None and not isinstance(constraint, BasePyTorchConstraint):
+            raise TypeError("constraint must be a BasePyTorchConstraint or None.")
+        if not isinstance(use_bias, bool):
+            raise TypeError("use_bias must be a bool.")
+        self.callbacks = list(callbacks) if callbacks is not None else []
+        if any(not isinstance(callback, Callback) for callback in self.callbacks):
+            raise TypeError("All callbacks must inherit from PyTorch Callback.")
+
+        self.loss = loss
+        self.regularizer = regularizer
+        self.constraint = constraint
+        self.epochs = epochs
+        self.batch_size = batch_size
+        self.verbose = verbose
+        self.use_bias = use_bias
+        self.gradient_accumulation_steps = gradient_accumulation_steps
+        self.device = self._resolve_device(device)
+
+        # Keep configuration only, not the caller's active native optimizer.
+        self._optimizer_template = PyTorchOptimizerAdapter(
+            optimizer.optimizer_class, options=optimizer.options,
+        )
+        self._optimizer_adapter: PyTorchOptimizerAdapter | None = None
+        self._runtime_loss: Any = None
+        self.model: LinearGrangerNetwork | None = None
+        self._X_train: torch.Tensor | None = None
+        self._y_train: torch.Tensor | None = None
+        self._n_features: int | None = None
+        self._n_outputs: int | None = None
+        self._fitted = False
+        self._run_counter = 0
+        self._loss_history: list[float] = []
+        self._validate_training_config()
+
+    @property
+    def backend(self) -> str:
+        return "pytorch"
+
+    @property
+    def is_fitted(self) -> bool:
+        return self._fitted
+
+    @property
+    def optimizer(self) -> torch.optim.Optimizer:
+        self._require_model()
+        if self._optimizer_adapter is None:
+            raise TrainingError("Optimizer is unavailable.")
+        return self._optimizer_adapter.native
+
+    # Compatibility views; the active objects have a single owner.
+    @property
+    def _optimizer(self) -> torch.optim.Optimizer:
+        return self.optimizer
+
+    @property
+    def _coefficient_layer(self) -> nn.Linear:
+        return self._require_model().coefficient_layer
+
+    @property
+    def _variable_control_layer(self) -> nn.Module:
+        return self._require_model().variable_control_layer
+
+    @staticmethod
+    def _resolve_device(device: str | None) -> torch.device:
+        if device is not None and not isinstance(device, str):
+            raise TypeError("device must be a string or None.")
+        value = "auto" if device is None else device.strip().lower()
+        if value in {"", "auto"}:
+            return torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
+        if value in {"cpu", "cpu-only", "/cpu:0"}:
+            return torch.device("cpu")
+        if value in {"gpu", "cuda", "/gpu:0", "/cuda:0"}:
+            value = "cuda:0"
+        elif value.startswith(("gpu:", "/gpu:", "/cuda:")):
+            value = "cuda:" + value.rsplit(":", 1)[-1]
+        if value.startswith("cuda:"):
+            index = value.split(":", 1)[1]
+            if not index.isdigit():
+                raise ValueError("CUDA device index must be a non-negative integer.")
+            if not torch.cuda.is_available() or int(index) >= torch.cuda.device_count():
+                raise BackendNotAvailableError(f"Requested device {value!r} is unavailable.")
+            return torch.device(value)
+        if value == "mps":
+            if not torch.backends.mps.is_available():
+                raise BackendNotAvailableError("Requested MPS device is unavailable.")
+            return torch.device("mps")
+        raise ValueError("Use auto, cpu, gpu, gpu:N, cuda:N or mps.")
+
+    @staticmethod
+    def _positive_int(value: Any, name: str) -> int:
+        if (
+            isinstance(value, (bool, np.bool_))
+            or not isinstance(value, (int, np.integer))
+            or value <= 0
+        ):
+            raise ValueError(f"{name} must be a positive integer.")
+        return int(value)
+
+    def _validate_training_config(self) -> None:
+        self._positive_int(self.epochs, "epochs")
+        self._positive_int(self.gradient_accumulation_steps, "gradient_accumulation_steps")
+        if self.batch_size is not None:
+            self._positive_int(self.batch_size, "batch_size")
+        if (
+            isinstance(self.verbose, (bool, np.bool_))
+            or not isinstance(self.verbose, (int, np.integer))
+            or self.verbose not in (0, 1, 2)
+        ):
+            raise ValueError("verbose must be 0, 1 or 2.")
+        if self.gradient_accumulation_steps > 1:
+            if issubclass(self._optimizer_template.optimizer_class, torch.optim.LBFGS):
+                raise ValueError("LBFGS requires gradient_accumulation_steps=1.")
+            loss = self._runtime_loss if self._runtime_loss is not None else self.loss
+            if getattr(loss, "reduction", "mean") != "mean":
+                raise ValueError("Gradient accumulation requires a mean-reduced loss.")
+
+    def _require_model(self) -> LinearGrangerNetwork:
+        if self.model is None:
+            raise ModelNotFittedError("Model is not initialized. Call initialize() first.")
+        return self.model
+
+    @staticmethod
+    def _data_array(value: Any, name: str) -> np.ndarray:
+        raw = np.asarray(value)
+        if raw.ndim != 2:
+            raise ValueError(f"{name} must be a two-dimensional array.")
+        if raw.dtype.kind not in "fiu":
+            raise TypeError(f"{name} must contain real numeric values.")
+        with np.errstate(over="ignore", invalid="ignore"):
+            array = np.array(raw, dtype=np.float32, copy=True)
+        if not np.isfinite(array).all():
+            raise ValueError(f"{name} must contain finite float32-representable values.")
+        return array
+
+    def initialize(
+        self,
+        X: FloatArray,
+        *,
+        targets: FloatArray,
+        seed: int | None = None,
+    ) -> None:
+        self._validate_training_config()
+        x = self._data_array(X, "X")
+        y = self._data_array(targets, "targets")
+        if x.shape[0] != y.shape[0]:
+            raise ValueError("X and targets must have the same sample count.")
+        if x.shape[0] == 0 or x.shape[1] == 0 or y.shape[1] == 0:
+            raise ValueError("Training data dimensions must be non-zero.")
+        if seed is not None:
+            if (
+                isinstance(seed, (bool, np.bool_))
+                or not isinstance(seed, (int, np.integer))
+                or not 0 <= seed <= np.iinfo(np.uint64).max
+            ):
+                raise ValueError("seed must be an integer in [0, 2**64 - 1] or None.")
+            torch.manual_seed(int(seed))
+
+        # Regularizer data contains immutable mappings; use its own serializer
+        # rather than deepcopy of the complete regularizer object.
+        regularizer = None
+        if self.regularizer is not None:
+            regularizer = type(self.regularizer).from_config(
+                self.regularizer.get_config(),
+            )
+        network = LinearGrangerNetwork(
+            n_features=x.shape[1],
+            n_outputs=y.shape[1],
+            constraint=deepcopy(self.constraint),
+            regularizer=regularizer,
+            use_bias=self.use_bias,
+        ).to(self.device)
+        runtime_loss = deepcopy(self.loss) if isinstance(self.loss, nn.Module) else self.loss
+        if isinstance(runtime_loss, nn.Module):
+            runtime_loss = runtime_loss.to(self.device)
+
+        optimizer_adapter = PyTorchOptimizerAdapter(
+            self._optimizer_template.optimizer_class,
+            options=self._optimizer_template.options,
+        )
+        optimizer_adapter.initialize(network.coefficient_layer.parameters())
+        x_tensor = torch.tensor(x, dtype=torch.float32, device=self.device)
+        y_tensor = torch.tensor(y, dtype=torch.float32, device=self.device)
+
+        # Preserve the previous initialized model if any preceding step fails.
+        self.model = network
+        self._runtime_loss = runtime_loss
+        self._optimizer_adapter = optimizer_adapter
+        self._X_train, self._y_train = x_tensor, y_tensor
+        self._n_features, self._n_outputs = x.shape[1], y.shape[1]
+        self._loss_history = []
+        self._fitted = False
+        # Same as the current Keras adapter: callbacks and run counter are
+        # preserved. Default fit() prepares fresh callbacks for a run.
+
+    def reset_components(
+        self,
+        *,
+        reset_optimizer: bool = True,
+        reset_callbacks: bool = True,
+        run_name: str | None = None,
+        callback_updates: CallbackUpdates | None = None,
+    ) -> None:
+        self._require_model()
+        if not isinstance(reset_optimizer, bool):
+            raise TypeError("reset_optimizer must be a bool.")
+        if not isinstance(reset_callbacks, bool):
+            raise TypeError("reset_callbacks must be a bool.")
+        if not reset_callbacks and callback_updates is not None:
+            raise ValueError("callback_updates requires reset_callbacks=True.")
+        next_counter = self._run_counter + 1
+        name = run_name if run_name is not None else f"run_{next_counter:04d}"
+        fresh_callbacks = None
+        if reset_callbacks:
+            fresh_callbacks = reset_callbacks_for_run(
+                self.callbacks, run_name=name, callback_updates=callback_updates,
+            )
+        if reset_optimizer:
+            if self._optimizer_adapter is None:
+                raise TrainingError("Initial optimizer state is unavailable.")
+            self._optimizer_adapter.reset()
+        if fresh_callbacks is not None:
+            self.callbacks = fresh_callbacks
+            self._run_counter = next_counter
+
+    def reset_callbacks(
+        self,
+        run_name: str,
+        callback_updates: CallbackUpdates | None = None,
+    ) -> None:
+        self.reset_components(
+            reset_optimizer=False, reset_callbacks=True,
+            run_name=run_name, callback_updates=callback_updates,
+        )
+
+    def _run_callback_hook(self, name: str, state: dict[str, Any]) -> None:
+        for callback in self.callbacks:
+            response = getattr(callback, name)(state)
+            if response is False:
+                state["stop_training"] = True
+                if state.get("stop_reason") is None:
+                    state["stop_reason"] = f"{type(callback).__name__}:{name}"
+        # Do not skip later callbacks just because an earlier one requested stop.
+
+    def _objective(self, xb: torch.Tensor, yb: torch.Tensor) -> torch.Tensor:
+        network = self._require_model()
+        loss = self._runtime_loss(network(xb), yb)
+        if not isinstance(loss, torch.Tensor) or loss.ndim != 0:
+            raise ValueError("Loss must return a scalar torch.Tensor.")
+        loss = loss + network.regularization_loss()
+        if not torch.isfinite(loss).item():
+            raise ValueError("Training objective is non-finite.")
+        return loss
+
+    def _train_epoch(self, batch_size: int) -> float:
+        network = self._require_model()
+        optimizer = self.optimizer
+        if self._X_train is None or self._y_train is None:
+            raise TrainingError("Training data is unavailable.")
+        n_samples = int(self._X_train.shape[0])
+        group_size = batch_size * int(self.gradient_accumulation_steps)
+        uses_closure = isinstance(optimizer, torch.optim.LBFGS)
+        weighted_loss = 0.0
+
+        # Sequential slices give the same no-shuffle ordering as Keras.
+        for group_start in range(0, n_samples, group_size):
+            group_end = min(group_start + group_size, n_samples)
+            optimizer.zero_grad(set_to_none=True)
+            for start in range(group_start, group_end, batch_size):
+                end = min(start + batch_size, group_end)
+                xb = self._X_train[start:end]
+                yb = self._y_train[start:end]
+                if uses_closure:
+                    # LBFGS is restricted to one batch per accumulation group.
+                    def closure() -> torch.Tensor:
+                        optimizer.zero_grad(set_to_none=True)
+                        value = self._objective(xb, yb)
+                        value.backward()
+                        return value
+
+                    loss = optimizer.step(closure)
+                    if not isinstance(loss, torch.Tensor) or loss.ndim != 0:
+                        raise TypeError("LBFGS must return a scalar loss Tensor.")
+                else:
+                    loss = self._objective(xb, yb)
+                    # Correct also for a short final batch/group. Assumes a
+                    # mean-reduced data loss; regularizer gets total weight 1.
+                    fraction = (end - start) / (group_end - group_start)
+                    (loss * fraction).backward()
+                weighted_loss += float(loss.detach().cpu().item()) * (end - start)
+            if not uses_closure:
+                optimizer.step()
+            network.apply_constraints()
+            optimizer.zero_grad(set_to_none=True)
+
+        return weighted_loss / n_samples
+
+    def fit(
+        self,
+        *,
+        collect_history: bool = False,
+        reset_components: bool = True,
+        run_name: str | None = None,
+        callback_updates: CallbackUpdates | None = None,
+    ) -> TrainingResult:
+        network = self._require_model()
+        self._validate_training_config()
+        if not isinstance(collect_history, bool):
+            raise TypeError("collect_history must be a bool.")
+        if not isinstance(reset_components, bool):
+            raise TypeError("reset_components must be a bool.")
+        if not reset_components and (run_name is not None or callback_updates is not None):
+            raise ValueError(
+                "run_name and callback_updates require reset_components=True. "
+                "Alternatively, call reset_components() explicitly."
+            )
+        if self._X_train is None or self._y_train is None:
+            raise TrainingError("Training data is unavailable.")
+        batch_size = (
+            int(self._X_train.shape[0]) if self.batch_size is None else int(self.batch_size)
+        )
+        self._fitted = False
+        self._loss_history = []
+        state: dict[str, Any] = {
+            "model": self,
+            "optimizer": self.optimizer,
+            "stop_training": False,
+            "stop_reason": None,
+            "loss_history": self._loss_history,
+        }
+        try:
+            if reset_components:
+                self.reset_components(run_name=run_name, callback_updates=callback_updates)
+            network.train()
+            self._run_callback_hook("on_train_beginning", state)
+            for epoch in range(int(self.epochs)):
+                if state["stop_training"]:
+                    break
+                state["epoch"] = epoch
+                self._run_callback_hook("on_epoch_beginning", state)
+                if state["stop_training"]:
+                    break
+                epoch_loss = self._train_epoch(batch_size)
+                self._loss_history.append(epoch_loss)
+                state["epoch_loss"] = state["loss"] = epoch_loss
+                self._run_callback_hook("on_epoch_end", state)
+                if self.verbose:
+                    print(f"Epoch {epoch + 1}/{self.epochs} - loss: {epoch_loss:.8f}")
+            self._run_callback_hook("on_train_end", state)
+        except Exception as exc:
+            self._fitted = False
+            raise TrainingError(f"PyTorch model training failed: {exc}") from exc
+        finally:
+            network.eval()
+            self.optimizer.zero_grad(set_to_none=True)
+
+        # A callback restoring best weights may have invalidated fitted status.
+        self._fitted = True
+        if not collect_history:
+            return {}
+        iterations = len(self._loss_history)
+        return {
+            "history": {"loss": list(self._loss_history)},
+            "metrics": {"loss": self._loss_history[-1]} if iterations else {},
+            "n_iterations": iterations,
+            "stop_reason": state.get("stop_reason") or (
+                "stopped_before_max_epochs" if iterations < int(self.epochs)
+                else "max_epochs_reached"
+            ),
+        }
+
+    def predict(self, X: FloatArray) -> FloatArray:
+        network = self._require_model()
+        if not self._fitted:
+            raise ModelNotFittedError("Model is not fitted. Call fit() first.")
+        x = self._data_array(X, "X")
+        if x.shape[1] != self._n_features:
+            raise ValueError(f"Expected {self._n_features} features, got {x.shape[1]}.")
+        if x.shape[0] == 0:
+            return np.empty((0, int(self._n_outputs)), dtype=np.float32)
+        # This architecture has no train/eval-dependent forward layers.
+        # Avoid changing model/training state just to make a prediction.
+        with torch.no_grad():
+            result = network(torch.tensor(x, dtype=torch.float32, device=self.device))
+        return np.array(result.detach().cpu().numpy(), dtype=np.float32, copy=True)
+
+    def get_weights(self) -> ModelWeights:
+        return self._require_model().get_predictor_weights()
+
+    def set_weights(self, weights: ModelWeights) -> None:
+        self._require_model().set_predictor_weights(weights)
+        self._fitted = False
+
+    def omit_variables(self, variable_indices: Sequence[int]) -> None:
+        network = self._require_model()
+        indices = list(variable_indices)
+        if any(
+            isinstance(index, (bool, np.bool_))
+            or not isinstance(index, (int, np.integer))
+            for index in indices
+        ):
+            raise TypeError("Feature indices must be integers, not booleans.")
+        if any(index < 0 or index >= int(self._n_features) for index in indices):
+            raise ValueError("Feature index is out of range.")
+        mask = np.ones(int(self._n_features), dtype=np.float32)
+        if indices:
+            mask[np.asarray(indices, dtype=np.intp)] = 0.0
+        network.variable_control_layer.set_mask(mask)
+
+
+# Backwards-compatible name; does not register a second model class.
+PyTorchGrangerModel = PyTorchConditionalAdapter

@@ -40,7 +40,7 @@ class KerasConditionalAdapter:
         self,
         *,
         optimizer: keras.optimizers.Optimizer,
-        loss: Any = "mse",
+        loss: Any,
         regularizer: keras.regularizers.Regularizer | None = None,
         constraint: keras.constraints.Constraint | None = None,
         callbacks: Sequence[keras.callbacks.Callback] | None = None,
@@ -55,6 +55,11 @@ class KerasConditionalAdapter:
         if not isinstance(optimizer, keras.optimizers.Optimizer):
             raise TypeError(
                 "optimizer must be a ready Keras optimizer instance."
+            )
+
+        if isinstance(loss, type) or not callable(loss):
+            raise TypeError(
+                "loss must be a ready loss object or function."
             )
 
         if regularizer is not None and not isinstance(
@@ -195,23 +200,12 @@ class KerasConditionalAdapter:
 
     @staticmethod
     def _data_array(value: Any, name: str) -> np.ndarray:
-        raw = np.asarray(value)
-
-        if raw.ndim != 2:
-            raise ValueError(f"{name} must be a two-dimensional array.")
-
-        if raw.dtype.kind not in "fiu":
-            raise TypeError(f"{name} must contain real numeric values.")
-
-        with np.errstate(over="ignore", invalid="ignore"):
-            array = np.array(raw, dtype=np.float32, copy=True)
-
-        if not np.all(np.isfinite(array)):
-            raise ValueError(
-                f"{name} must contain finite float32-representable values."
-            )
-
-        return array
+        return real_array(
+            value,
+            name=name,
+            dtype=np.float32,
+            ndim=2,
+        )
 
     def initialize(
         self,

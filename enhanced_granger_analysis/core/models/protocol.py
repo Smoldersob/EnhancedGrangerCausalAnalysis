@@ -154,21 +154,21 @@ class GrangerModelProtocol(Protocol):
         """
         ...
 
-        def reset_components(
-            self,
-            *,
-            reset_optimizer: bool = True,
-            reset_callbacks: bool = True,
-            run_name: str | None = None,
-            callback_updates: CallbackUpdates | None = None,
-        ) -> None:
-            """Reset selected training components without changing the predictor.
+    def reset_components(
+        self,
+        *,
+        reset_optimizer: bool = True,
+        reset_callbacks: bool = True,
+        run_name: str | None = None,
+        callback_updates: CallbackUpdates | None = None,
+    ) -> None:
+        """Reset selected training components without changing the predictor.
 
-            Preserve model parameters, input-control state and fitted status.
-            Unsupported components may raise an explicit error.
-            Absent components require no action.
-            """
-            ...
+        Preserve model parameters, input-control state and fitted status.
+        Unsupported components may raise an explicit error.
+        Absent components require no action.
+        """
+        ...
 
 
 class CallbackManagedModelProtocol(GrangerModelProtocol, Protocol):

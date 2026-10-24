@@ -3,7 +3,7 @@ from __future__ import annotations
 from collections.abc import Callable
 from typing import Any, TypeVar
 
-from ....core.components import ModelClassRegistry
+from ....core.models.model_registry import ModelClassRegistry
 from ....core.models.protocol import GrangerModelProtocol
 
 

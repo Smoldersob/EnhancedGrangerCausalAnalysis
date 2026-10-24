@@ -6,10 +6,11 @@ from .registry import (
 )
 
 # Import wykonuje dekorator rejestrujący model.
-from .conditional import PyTorchGrangerModel
+from .conditional import PyTorchConditionalAdapter, PyTorchGrangerModel
 
 
 __all__ = [
+    "PyTorchConditionalAdapter",
     "PyTorchGrangerModel",
     "register_model",
     "get_model_class",

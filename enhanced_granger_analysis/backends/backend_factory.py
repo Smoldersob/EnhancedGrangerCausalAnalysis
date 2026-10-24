@@ -115,7 +115,7 @@ class BackendFactory:
 			# Return first available backend in preference order
 			backend_name = cls._get_preferred_available_backend()
 
-		backend_name_lower = backend_name.lower()
+		backend_name_lower = backend_name.lower().strip()
 		canonical_name = cls._CANONICAL_ALIASES.get(backend_name_lower, backend_name_lower)
 		if canonical_name not in cls._BACKEND_REGISTRY:
 			available = cls.list_available_backends()
