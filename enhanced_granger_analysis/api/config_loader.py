@@ -6,14 +6,11 @@ from pathlib import Path
 from typing import Any, Dict, List, Mapping, Optional, Sequence, Tuple
 
 from ..core.exceptions import DataValidationError
-from ..core.lag_config import LagConfiguration
 from ..core.components.constraint_parsing import (
     RelationsInput,
     parse_relations_spec,
 )
 from ..core.components.constraint_spec import RelationConstraintsSpec
-from ..preprocessing.lag.lag_selectors import CVLagSelector, ICLagSelector, VARLagSelector
-
 
 _BACKEND_ALIASES = {
 	"tensorflow": "tensorflow",
@@ -55,34 +52,6 @@ def _extract_typed_spec(raw_spec: Any, *, context: str) -> Tuple[str, Dict[str, 
 	return type_name.strip().lower(), params
 
 
-def _build_lag_selector_from_spec(
-	raw_selector: Any,
-	*,
-	lag_config: Optional[LagConfiguration],
-) -> Any:
-	"""Instantiate supported built-in lag selectors from config spec."""
-	type_name, params = _extract_typed_spec(raw_selector, context="lag_selector")
-
-	if "max_lag" not in params:
-		params["max_lag"] = lag_config.max_lag if lag_config is not None else 12
-	if "use_lag_zero" not in params:
-		params["use_lag_zero"] = lag_config.use_lag_zero if lag_config is not None else False
-
-	if type_name in {"ic", "iclagselector", "aic", "bic"}:
-		if type_name == "bic":
-			params.setdefault("use_bic", True)
-		return ICLagSelector(**params)
-
-	if type_name in {"cv", "cvlagselector", "cross_validation", "cross-validation"}:
-		return CVLagSelector(**params)
-
-	if type_name in {"var", "varlagselector"}:
-		return VARLagSelector(**params)
-
-	raise DataValidationError(
-		"Unsupported lag_selector type. Supported: ic, cv, var"
-	)
-
 def _normalize_callbacks_for_backend(raw_callbacks: Any, backend_name: Optional[str]) -> List[Any]:
 	"""Normalize callback specs and delegate object creation to backend strategies.
 
@@ -92,7 +61,7 @@ def _normalize_callbacks_for_backend(raw_callbacks: Any, backend_name: Optional[
 	if raw_callbacks is None:
 		return []
 
-	# Keep backward compatibility for already-instantiated callback objects.
+	# Keep backward compatibility forormalize_builder_confi already-instantiated callback objects.
 	if isinstance(raw_callbacks, (str, Mapping)):
 		return [raw_callbacks]
 
@@ -279,18 +248,6 @@ class BuilderConfigLoader:
 				# Explicit model_config values should win over backend defaults.
 				model_cfg.setdefault(key, value)
 			out["model_config"] = model_cfg
-
-		lag_cfg = out.get("lag_config")
-		if isinstance(lag_cfg, Mapping):
-			out["lag_config"] = LagConfiguration(**dict(lag_cfg))
-		elif lag_cfg is not None and not isinstance(lag_cfg, LagConfiguration):
-			raise DataValidationError("lag_config must be an object or LagConfiguration instance")
-
-		if "lag_selector" in out and out["lag_selector"] is not None:
-			out["lag_selector"] = _build_lag_selector_from_spec(
-				out["lag_selector"],
-				lag_config=out.get("lag_config") if isinstance(out.get("lag_config"), LagConfiguration) else None,
-			)
 
 		if "relations" in out:
 			out["relations"] = parse_relations_spec(

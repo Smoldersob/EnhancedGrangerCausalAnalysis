@@ -244,11 +244,13 @@ valid.
 
 ## Restoring removed variables
 
-Preprocessing can remove constant or exactly duplicated variables before
-model fitting. A `PreparationContext` preserves the requested roles and
-removal metadata.
+Preparation can remove constant variables, exact duplicates, or inputs
+with no final selected lags.
 
-Metric evaluation restores the requested effect and tested-cause axes by
+A `PreparationContext` preserves requested roles and role-specific removal
+metadata.
+
+Metric evaluation restores requested effect and tested-cause axes by
 default:
 
 ```python
@@ -264,33 +266,56 @@ fitted_only = results.evaluate(
 )
 ```
 
-Restoration follows two rules:
+Restoration follows these rules:
 
 1. Newly introduced entries use the metric's `removed_signal_value`.
-2. Duplicate rows and columns are copied from available computed
-   representatives.
+2. Duplicate effects copy available representative rows.
+3. Tested causes excluded by lag preparation receive a neutral column.
+4. Duplicate tested causes copy an available computed representative
+   column or a representative column restored after lag exclusion.
 
-Duplicate effects can copy representative rows. Duplicate tested causes
-can copy representative columns only when the representative has an
-evaluated tested-cause column.
+A variable removed only as an input retains its computed output row if
+that output role remains effective.
 
-A representative that was only a model input has no tested-cause result
-column to copy.
+A representative that was never requested/evaluated as a tested cause
+has no result column to copy.
 
-Typical fill values are:
-
-| Metric category | Fill value for newly restored entries |
+| Metric category | Neutral restoration value |
 | --- | --- |
 | F, Wald, and likelihood-ratio statistics | `0` |
 | Their p-value metrics | `1` |
 | Sign | `0` |
-| Metrics without an explicit fill value | `NaN` |
+| Metrics without an explicit restoration value | `NaN` |
 
-These values are restoration conventions, not results of additional fitted
-models or independently executed statistical tests.
+The reason `"no_selected_lags"` means that the final configured model has
+no feature for that input in any effective output equation.
 
-Restoration is applied to the returned matrix. The cached metric remains
-the matrix calculated for effective fitted variables.
+A restored p-value of `1` is a reporting convention for this structural
+exclusion. It is not a p-value obtained from fitting an additional
+restricted model, nor proof that the underlying process has no causal
+relationship.
+
+Restoration changes the returned matrix. Cached metric values remain
+associated with effective fitted variables.
+
+Report selection settings and removal metadata when interpreting or
+benchmarking restored results.
+
+### Selection and numerical diagnostics are different
+
+`"no_selected_lags"` means that no lag remains for a predictor in any
+effective output equation after aggregation and overrides.
+
+It does not mean that the predictor was proven irrelevant, that its
+coefficients were identifiable, or that an independent Granger test
+accepted a null hypothesis.
+
+Rank-deficient auxiliary fitting does not itself create a removal record.
+A completely unsuccessful selection raises an error rather than
+restoring neutral values for every requested cause.
+
+For selection semantics and diagnostic limitations, see
+[Lag Selection](lag_selection.md).
 
 ## Convenience properties
 

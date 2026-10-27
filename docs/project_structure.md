@@ -125,19 +125,44 @@ Utilities for building model state before training:
 
 Staged data preparation and the contract passed to model execution:
 
-- `prepare_data.py`: the convenience entry point and preparation data models,
-  including `PreparedData`, `VariableRoles`, and `RemovedVariable`.
-- `pipeline.py`: `DataPreparer` and `DataPreparationConfig`.
-- `missing/`: optional missing-value imputation.
-- `stationarity/`: stationarity tests and transformations.
-- `lag/`: lag selection, feature construction, and target alignment.
-- `scaling/`: input and target scaling, including block-wise scaling.
+- `prepare_data.py`: convenience entry point and preparation data models,
+  including `PreparedData`, `VariableRoles`, and `RemovedVariable`;
+- `pipeline.py`: `DataPreparer`, preparation configuration, stage execution,
+  and resolution of lag components;
+- `missing/`: optional missing-value imputation;
+- `stationarity/`: stationarity testing and transformation;
+- `lag/`: selection interfaces, selector registration, configuration
+  resolution, lag aggregation, feature construction, and target alignment;
+- `scaling/`: input and target scaling, including block-wise scaling;
 - `sampling.py`: workload-reduction strategies.
 
-Prepared data separates requested roles from effective roles and maps inputs
-to feature blocks through named `cause_slices`.
+The lag subsystem separates:
 
-For stage order and defaults, see [Data Preprocessing](data_preprocessing.md).
+- `BaseLagSelector`: public selection interface;
+- `BaseIncrementalLagSelector`: cumulative per-pair expansion and pruning;
+- `ICLagSelector` and `CVLagSelector`: per-pair auxiliary scoring methods;
+- `BaseCommonOrderLagSelector`: search over complete common lag ranges;
+- `CommonOrderICLagSelector` and `CommonOrderCVLagSelector`: common-order
+  scoring methods;
+- `NaiveVARLagSelector`: historical four-criterion VAR procedure, with
+  `VARLagSelector` retained as an alias;
+- selector registry utilities: registration, discovery, and resolution;
+- engine configuration resolution;
+- `LagEngine`: dataset-level execution, aggregation, overrides, validation,
+  and final feature preparation.
+
+`core/lag_config.py` contains `LagSpec`, `LagEngineConfig`,
+`LagPreparationResult`, and `LagSegmentInfo`.
+
+Feature-layout fields are stored directly in `LagPreparationResult`.
+There is no separate `LagFeatureLayout` contract.
+
+Auxiliary fitting permits redundant columns where the scoring method can
+still evaluate the candidate. It does not automatically remove signals
+or establish the identifiability of the final model.
+
+See [Lag Selection](lag_selection.md) for algorithm definitions and their
+interpretation as preprocessing heuristics.
 
 ### results
 
@@ -156,6 +181,15 @@ Restoration is applied when returning evaluated matrices.
 
 Signed results combine restored metric and sign matrices.
 Coefficient blocks are selected through named cause slices.
+
+Restoration distinguishes predictor-role exclusion from output removal.
+
+A requested tested cause excluded by final lag preparation is restored
+using the evaluated metric's neutral removal value. Its output row, if
+still effective, remains a computed row.
+
+Neutral restoration indicates structural exclusion by the selected model,
+not an additional hypothesis test establishing no causality.
 
 For the public result contract, see [Results and Metrics](results_and_metrics.md).
 

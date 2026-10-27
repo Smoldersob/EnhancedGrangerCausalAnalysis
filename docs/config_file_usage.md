@@ -32,7 +32,8 @@ their accepted formats differ from callback and optimizer loader formats.
 
 It can:
 - load JSON or YAML files,
-- normalize `lag_config` into `LagConfiguration`,
+- preserve lag-engine and lag-selector specifications for resolution
+  during preprocessing,
 - normalize relation constraints,
 - validate and normalize backend aliases,
 - preserve backend-specific callback specs for later resolution,
@@ -43,6 +44,10 @@ It can:
 component preparation and backend construction stages.
 
 The loader also accepts `relations` as a file path when you want to keep constraint rules in a separate JSON/YAML file.
+
+Lag configuration is not instantiated by the loader or builder.
+`DataPreparer.lag()` resolves the engine configuration and constructs the
+selector through its registry immediately before lag preparation.
 
 # How to write different components
 
@@ -102,6 +107,369 @@ In this case:
 - The model uses 5 input variables: `u`, `f1`, `f2`, `x1`, `x2`.
 - It predicts 2 outputs: `x3`, `x4`.
 - Causality is tested only for `f1→x3`, `f1→x4`, `f2→x3`, `f2→x4`, saving time on the reference loop for `u`, `x1`, `x2`.
+
+## Lag preparation
+
+Lag configuration uses four top-level fields:
+
+| Field | Purpose |
+| --- | --- |
+| `lag_config` | Fixed baseline, aggregation policy, lag-0 permission, and overrides |
+| `lag_selector` | Registered selector name or `type`/`params` specification |
+| `lag_selector_params` | Optional constructor parameters supplied separately |
+| `lag_n_jobs` | Parallel selector execution across datasets |
+
+The loader and builder preserve these values. Resolution takes place in
+the preprocessing pipeline.
+
+### Fixed lags
+
+Set `lag_selector` to `null` to disable automatic selection:
+
+```yaml
+lag_selector: null
+
+lag_config:
+  max_lag: 4
+  use_lag_zero: false
+```
+
+This creates positive lags 1 through 4 for every eligible output/predictor
+pair before manual overrides.
+
+With zero lag enabled, cross-variable pairs also include lag 0. Own lag 0
+remains forbidden.
+
+### Automatic selection
+
+Use a registered selector name:
+
+```yaml
+lag_selector: cv
+
+lag_selector_params:
+  max_lag: 12
+  cv_folds: 5
+  cv_metric: mae
+  prune_lags: true
+
+lag_config:
+  use_lag_zero: false
+  aggregation: union
+
+lag_n_jobs: -1
+```
+
+Alternatively, place constructor parameters inside the selector
+specification:
+
+```yaml
+lag_selector:
+  type: cv
+  params:
+    max_lag: 12
+    cv_folds: 5
+    cv_metric: mae
+    prune_lags: true
+    addition_reference: initial
+    pruning_reference: initial
+
+lag_config:
+  use_lag_zero: false
+  aggregation: union
+
+lag_n_jobs: -1
+```
+
+Do not define the same constructor parameter both inside `params` and in
+`lag_selector_params`.
+
+Only `type` and `params` are supported in mapping-form selector
+specifications. Constructor parameters must not be flattened beside `type`.
+
+### Search bounds versus engine settings
+
+When a selector is enabled, its own `max_lag` controls the search bound.
+`lag_config.max_lag` is used for the fixed baseline when no selector is
+configured.
+
+The pipeline does not inject selector settings from `lag_config`.
+
+To evaluate contemporaneous predictors, explicitly enable lag 0 in both
+the selector and the engine:
+
+```yaml
+lag_selector:
+  type: ic
+  params:
+    max_lag: 8
+    use_bic: true
+    use_lag_zero: true
+
+lag_config:
+  use_lag_zero: true
+```
+
+The selector determines which permitted terms it returns. The engine
+validates the final permission policy.
+
+For VAR selection, enabling cross-variable lag 0 adds it by policy;
+the VAR order criterion does not evaluate its inclusion.
+
+### Selector families
+
+| Registered name | Selection procedure |
+| --- | --- |
+| `ic` | Per-pair cumulative search scored by IC |
+| `cv` | Per-pair cumulative search scored by time-series CV |
+| `common_order_ic` | Shared order scored by aggregated IC |
+| `common_order_cv` | Shared order scored by aggregated CV |
+| `naive_var` / `var` | Historical VAR procedure |
+
+These methods share the result format, not the same objective or search
+algorithm.
+
+See [Lag Selection](lag_selection.md) for interpretation.
+
+### Per-pair IC/CV parameters
+
+Shared search settings include:
+
+- `max_lag`;
+- `use_lag_zero`;
+- `min_ar_order`;
+- `prune_lags`;
+- `addition_reference`;
+- `pruning_reference`;
+- `score_atol`, `score_rtol`;
+- `rcond`.
+
+IC additionally supports:
+
+- `use_bic`;
+- `delta_min_ic`;
+- `delta_prune_ic`;
+- `complexity_measure`: `columns` or `rank`;
+- `variance_floor_rel`.
+
+CV additionally supports:
+
+- `cv_folds`;
+- `cv_metric`: `mse` or `mae`;
+- `cv_gap`;
+- `cv_test_size`;
+- `cv_max_train_size`;
+- `delta_min_rel_cv`;
+- `delta_prune_rel_cv`.
+
+### Common-order IC
+
+```yaml
+lag_selector:
+  type: common_order_ic
+  params:
+    max_lag: 6
+    use_bic: true
+    complexity_measure: columns
+    variance_floor_rel: 1.0e-12
+```
+
+Common-order IC also accepts `use_lag_zero`, `output_weights`,
+`score_atol`, `score_rtol`, and `rcond`.
+
+It does not accept per-pair addition/pruning settings.
+
+### Common-order CV
+
+```yaml
+lag_selector:
+  type: common_order_cv
+  params:
+    max_lag: 6
+    cv_folds: 5
+    cv_metric: mse
+    normalize_outputs: true
+    scale_floor: 1.0e-12
+```
+
+Common-order CV also accepts the fold geometry settings,
+`use_lag_zero`, `output_weights`, `score_atol`, `score_rtol`, and `rcond`.
+
+Example output weights:
+
+```yaml
+output_weights:
+  y1: 1.0
+  y2: 2.0
+```
+
+The mapping must contain exactly the requested output names.
+All weights must be finite and positive.
+
+### Historical VAR
+
+```yaml
+lag_selector:
+  type: var
+  params:
+    max_lag: 6
+    min_lag: 1
+    center: true
+    maximum: true
+    use_lag_zero: false
+```
+
+`type: naive_var` selects the same implementation.
+
+`maximum: true` chooses the largest of the orders selected by AIC, BIC,
+HQIC, and FPE. `false` chooses the smallest.
+
+The historical selector does not accept the `criterion` or `trend`
+parameters from the earlier single-criterion replacement proposal.
+It retains four-criterion selection and constant-term fitting.
+
+Provide `max_lag` explicitly when reproducing an experiment. The
+configuration loader no longer copies it from `lag_config`.
+
+### Aggregating independent datasets
+
+```yaml
+lag_config:
+  aggregation: frequency
+  selection_frequency: 0.5
+```
+
+Available methods:
+
+- `union`: selected in at least one dataset;
+- `intersection`: selected in every dataset;
+- `frequency`: selected in at least the configured fraction of datasets.
+
+Frequency uses equal dataset weights and an inclusive comparison.
+
+For example, a threshold of `0.5` requires at least two of three datasets.
+A threshold of `0.67` requires all three because `2 / 3` is less than
+`0.67`.
+
+`lag_n_jobs` controls dataset-level selection tasks. It does not configure
+CV-fold parallelism or the model-training device.
+
+### Manual lag specifications
+
+Use explicit lag lists:
+
+```yaml
+lag_config:
+  use_lag_zero: true
+  aggregation: union
+
+  predictor_overrides:
+    x1:[1][3]
+    x2: []
+
+  pair_overrides:
+    y2:
+      x1:[0][2][4]
+```
+
+Interpretation:
+
+1. Aggregate automatic selections, or create the fixed baseline.
+2. Replace `x1` with lags 1 and 3 across outputs.
+3. Exclude `x2` across outputs.
+4. Replace the more specific `y2`/`x1` pair with lags 0, 2, and 4.
+
+Lists are explicit sets in ascending order, not range endpoints.
+`[1, 3]` does not include lag 2.
+
+Empty lists exclude a predictor. Pair-specific overrides take precedence
+over predictor-wide replacements.
+
+A pair override requesting own lag 0 is invalid. Predictor-wide
+zero-lag specifications omit lag 0 from the same-variable equation.
+
+Manual overrides can include lags above the automatic search bound.
+Datasets must still contain enough history for the final layout.
+
+### Removed tested causes
+
+A predictor with no final lags for any output is omitted from effective
+inputs and recorded with reason `"no_selected_lags"`.
+
+If it was a requested tested cause, it is also omitted from effective
+restricted-model runs. Result restoration preserves the requested column
+using the metric's neutral removal value.
+
+This records exclusion by the configured selection/preparation procedure,
+not a separately evaluated negative causality test.
+
+### Sweeping lag settings
+
+Use canonical nested parameter paths:
+
+```json
+{
+  "base_config": {
+    "lag_selector": {
+      "type": "ic",
+      "params": {
+        "max_lag": 8,
+        "use_bic": true
+      }
+    },
+    "lag_config": {
+      "aggregation": "union",
+      "use_lag_zero": false
+    }
+  },
+  "sweep": {
+    "param_names": [
+      "lag_selector.params.max_lag",
+      "lag_selector.params.use_bic"
+    ],
+    "cases": [
+      [8, false],
+      [8, true],
+      [12, true]
+    ]
+  }
+}
+```
+
+If constructor parameters are supplied separately, use paths such as
+`lag_selector_params.max_lag`.
+
+Sweep `lag_config.max_lag` to change the fixed baseline, not the search
+bound of an enabled selector.
+
+Replace complete lag lists when sweeping overrides. Dotted paths do not
+support list indexing.
+
+### Migration from range-based configuration
+
+Replace:
+
+- `LagConfiguration` with `LagEngineConfig`;
+- `custom_lags` with `predictor_overrides`;
+- `custom_pair_lags` with nested `pair_overrides`;
+- selector names encoding parameters, such as `bic`, with
+  `type: ic` and `params.use_bic: true`.
+
+Expand old range endpoints explicitly. An old range `(1, 3)` becomes
+`[1, 2, 3]`, not `[1, 3]`.
+
+Configuration mappings remain mappings after file loading. They become
+runtime configuration objects only during preprocessing.
+
+The historical `"var"` name remains supported and resolves to
+`NaiveVARLagSelector`. `VARLagSelector` remains its Python alias.
+
+Use `"common_order_ic"` or `"common_order_cv"` only when intentionally
+switching to the new common-order heuristic.
+
+For the historical VAR selector, use `maximum` to combine four criteria.
+For common-order IC, use `use_bic` to choose its equation-wise criterion.
+Do not treat these settings as equivalent.
 
 ## Model selection and construction
 
@@ -424,10 +792,15 @@ Important implementation detail:
 
 You can sweep these fields:
 
-- `lag_selector` and its parameters
-  - Supported: yes.
-  - Examples: `lag_selector.type`, `lag_selector.use_bic`, `lag_selector.max_lag`.
-  - Note: supported selector types are normalized to built-ins (`ic`, `cv`, `var`).
+- `lag_selector` and its constructor parameters
+  - Replace the entire specification, or use canonical mapping paths.
+  - Examples: `lag_selector.type`,
+    `lag_selector.params.max_lag`, and
+    `lag_selector.params.use_bic`.
+  - With separate constructor parameters, use
+    `lag_selector_params.max_lag`.
+  - Registry resolution and construction occur during preprocessing,
+    after sweep expansion.
 
 - `lag_config` parameters
   - Supported: yes.

@@ -576,3 +576,198 @@ across backends are not implied.
   search nor introduces a hyperoptimization regression.
 - Backend-specific optimizer parameters and training diagnostics are not
   interchangeable merely because they share a common construction interface.
+
+## Version Changes 2.8
+
+This update redesigns lag selection and preparation around explicit
+output/predictor lag specifications.
+
+Lag selectors are auxiliary preprocessing heuristics. Their purpose is
+to propose a manageable set of lagged inputs for subsequent modeling,
+not to establish causality or reproduce the assumptions and architecture
+of the final model.
+
+The final model may apply additional constraints, regularization, or a
+different predictive architecture.
+
+### Added
+
+#### Selector interfaces and resolution
+
+- Added registry-based lag-selector registration, discovery, and resolution.
+- Added selector specifications using registered names and canonical
+  `type`/`params` mappings.
+- Added separate forwarding of selector constructor parameters through
+  `lag_selector_params`.
+- Added `resolve_lag_engine_config()` for resolving declarative engine
+  configuration during preprocessing.
+
+#### Selection methods
+
+- Added a shared cumulative-expansion and backward-pruning implementation
+  for `ICLagSelector` and `CVLagSelector`.
+- Added independent `initial` and `current` reference policies for
+  addition and pruning.
+- Added `CommonOrderICLagSelector`, which selects one common order by
+  aggregating auxiliary IC scores across requested outputs.
+- Added `CommonOrderCVLagSelector`, which selects one common order by
+  aggregating time-series validation losses across requested outputs.
+- Added optional output weights for common-order selection.
+- Added training-fold response normalization for common-order CV.
+- Added a NumPy-only forward-chaining splitter with configurable validation
+  size, gap, and maximum training-window length.
+
+#### Preparation results and provenance
+
+- Added union, intersection, and selection-frequency aggregation across
+  independently processed datasets.
+- Added explicit predictor-wide and output/predictor lag overrides.
+- Added `LagPreparationResult` and `LagSegmentInfo` in `core/lag_config.py`.
+- Added direct result fields for feature identities, actual lags,
+  predictor-block boundaries, and the output-by-feature mask.
+- Added `PreparedData.lag_result`.
+- Added active and removed predictor reporting.
+- Added the removal reason `"no_selected_lags"` and metric-dependent
+  restoration of excluded tested causes.
+
+#### Diagnostics
+
+- Added reporting of numerically unsuccessful candidates.
+- Added diagnostics for rank-deficient auxiliary fits and use of the
+  residual-variance floor.
+- Added per-order scores for common-order selectors.
+- Added criterion tables and criterion-specific optimal orders for the
+  historical VAR selector.
+
+### Changed
+
+#### Shared lag contracts
+
+- Changed `BaseLagSelector` into an abstract interface without imposing
+  constructor parameters, a specific search procedure, or mask construction.
+- Changed selector outputs to nested dictionaries of explicit lag tuples.
+- Moved shared lag configuration and result contracts to
+  `core/lag_config.py`.
+- Flattened feature-layout fields into `LagPreparationResult` instead of
+  maintaining a separate `LagFeatureLayout` object.
+
+#### IC/CV selection
+
+- Changed initial selection to evaluate cumulative lag ranges rather than
+  isolated delays.
+- Changed pruning to remove the largest active lag while retaining the
+  remaining selected terms.
+- Changed candidate comparisons to use identical response timestamps.
+- Allowed rank-deficient auxiliary regressions to be fitted using
+  least-squares solutions rather than rejecting them unconditionally.
+- Separated candidate admissibility for IC and CV.
+- Added a choice between column-count and numerical-rank complexity
+  penalties for IC.
+- Added an explicit residual-variance floor for IC scoring.
+- Changed numerically equivalent score comparisons to favor smaller
+  candidate representations.
+- Changed expected candidate-specific numerical failures to reject the
+  candidate rather than immediately abort the complete search.
+- Kept configuration and programming errors distinct from candidate
+  failures.
+
+#### CV scoring
+
+- Changed intercept-only validation to estimate its prediction from
+  training responses within each fold.
+- Removed the fallback from CV loss to information-criterion scoring.
+- Kept validation observations consistent across candidate models.
+- Allowed rank-deficient and underdetermined training regressions when
+  their validation predictions remain computable.
+- Removed the scikit-learn splitter dependency from the CV implementation.
+
+#### Engine and pipeline integration
+
+- Changed parallel selection to operate across independent datasets.
+- Changed feature construction to derive data columns, masks, block
+  boundaries, and lag metadata from the same ordered feature identities.
+- Changed `LagEngine.prepare()` to return a structured result.
+- Moved selector construction and engine-configuration resolution into
+  `DataPreparer.lag()`.
+- Removed selector construction and lag-specific default injection from
+  the configuration loader.
+- Updated effective predictor and tested-cause roles after lag exclusion
+  while preserving requested roles.
+- Preserved output roles for variables excluded only as predictors.
+
+### Historical VAR compatibility
+
+- Retained the historical VAR selection procedure as
+  `NaiveVARLagSelector`.
+- Preserved `VARLagSelector` as a Python alias.
+- Preserved `"var"` as a registered selection name and added `"naive_var"`.
+- Preserved optional centering, separate `VAR.fit(p)` calls, the four
+  AIC/BIC/HQIC/FPE criteria, and the maximum/minimum combination of their
+  selected orders.
+- Changed the return value to the current `LagSpec` contract.
+- Added explicit reporting of failed candidate orders.
+- Rejected non-finite criterion results and the case where no candidate
+  produces four finite criteria.
+- Removed the accidental selection of the first order when all criterion
+  values are invalid.
+
+The historical selector retains its original candidate-dependent sample
+trimming. The new common-order selectors compare orders on a shared
+response window.
+
+### Fixed
+
+- Corrected the mismatch between isolated-delay scoring and cumulative
+  lag interpretation.
+- Prevented unsuccessful predictor screening from automatically including
+  the initialized minimum lag.
+- Corrected pruning so reducing an order removes a feature instead of
+  replacing one isolated delay with another.
+- Prevented rank deficiency alone from aborting IC/CV selection.
+- Prevented unsuccessful candidate evaluations from being mistaken for
+  valid optimal orders.
+- Made self-lag-0 exclusion explicit.
+- Preserved earlier removal metadata when adding lag-exclusion records.
+- Supported neutral restoration of duplicate tested causes whose
+  representatives were subsequently excluded by lag preparation.
+
+### Breaking changes and migration
+
+- Replace `LagConfiguration` with `LagEngineConfig`.
+- Replace `custom_lags` with `predictor_overrides`.
+- Replace tuple-keyed `custom_pair_lags` with nested `pair_overrides`.
+- Treat lag lists and tuples as explicit lag values, not interval endpoints.
+- Replace the old selector result with
+  `fit(data, outputs=...) -> LagSpec`.
+- Replace positional unpacking of `LagEngine.prepare()` with named access
+  to `LagPreparationResult`.
+- Replace `result.layout.*` access with direct result fields.
+- Configure automatic search bounds on the selector. Engine `max_lag`
+  defines the fixed baseline when no selector is enabled.
+- Use `lag_selector.params.*` or `lag_selector_params.*` for selector
+  parameter sweeps.
+- Do not replace the historical `"var"` selection with a common-order
+  selector when reproducing earlier experiments without recording the
+  methodological change.
+
+### Interpretation and limitations
+
+- All selectors are preprocessing heuristics; none guarantees the best
+  lag specification for the final model.
+- Linear auxiliary scoring can overlook terms useful to a different
+  final architecture or in interactions with other predictors.
+- Initial per-pair screening is conditional on the selected AR component,
+  not on all other external predictors.
+- Tail pruning does not remove arbitrary interior lags.
+- Rank-deficient fitting does not make individual coefficients identifiable.
+- Column-count IC penalization is an explicit representation-size
+  heuristic when the design is rank deficient.
+- Common-order IC is an aggregate of equation-wise scores, not the
+  classical joint VAR information criterion.
+- Historical VAR selection may remain unavailable when its residual
+  covariance requirements are not satisfied.
+- Restored neutral results for lag-excluded causes are reporting
+  conventions, not independently calculated hypothesis-test results.
+- Zero-feature designs require compatible scaling and backend handling.
+- Integration tests and numerical regression checks are required before
+  treating these changes as a validated release.

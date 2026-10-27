@@ -4,7 +4,7 @@ EnhancedGrangerCausalAnalysis is a compact framework for advanced Granger-causal
 
 It extends classic pair-wise Granger tests with configurable multitask modeling, backend abstraction, constraint-aware training, and config-driven experiment sweeps.
 
-Current package version: `2.7`
+Current package version: `2.8`
 
 ## Architecture at a glance
 
@@ -84,7 +84,7 @@ Backend-specific component resolution (callbacks, regularizers, constraints) is 
 import pandas as pd
 
 from enhanced_granger_analysis.api import MultiTaskGrangerBuilder
-from enhanced_granger_analysis.core.lag_config import LagConfiguration
+from enhanced_granger_analysis.preprocessing.lag import LagEngineConfig
 
 df = pd.read_csv("example/PID_no_fault.csv", sep=";", index_col=0)
 
@@ -96,7 +96,7 @@ results = (
         effects=["x1", "x2", "u1", "e1"],
         tested_causes=["u", "f1", "f2"],
     )
-    .lag(LagConfiguration(max_lag=12, use_lag_zero=False))
+    .lag(lag_config=LagEngineConfig(max_lag=5,use_lag_zero=False,),)
     .model({
         "epochs": 40,
         "batch_size": 32,

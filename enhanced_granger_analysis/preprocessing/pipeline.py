@@ -6,13 +6,17 @@ import copy
 import warnings
 
 from dataclasses import dataclass, field
-from typing import Any, Optional, Sequence
+from typing import Any, Optional, Sequence, Mapping
 
 import numpy as np
 import pandas as pd
 
 from ..core.exceptions import DataValidationError
-from .lag import BaseLagSelector, LagConfiguration, LagEngine
+from .lag import (
+    LagEngine,
+    resolve_lag_engine_config,
+    resolve_lag_selector,
+)
 from .missing import BaseImputer
 from .prepare_data import PreparedData, RemovedVariable, VariableRoles
 from .sampling import NoSampling, SamplingStrategy
@@ -31,8 +35,12 @@ class DataPreparationConfig:
     random_state: Optional[int] = None
     x_scaler: Any = "standard"
     y_scaler: Any = "standard"
-    lag_config: Optional[LagConfiguration] = None
-    lag_selector: Optional[BaseLagSelector] = None
+    lag_config: Any = None
+    lag_selector: Any = None
+    lag_selector_params: Mapping[str, Any] = field(
+        default_factory=dict
+    )
+    lag_n_jobs: int = 1
     stationarity_transformer: Optional[StationarityTransformer] = None
     missing_value_imputer: Optional[BaseImputer] = None
     sampling_strategy: Optional[SamplingStrategy] = field(
@@ -569,86 +577,216 @@ class DataPreparer:
     def lag(
         self,
         *,
-        lag_config: Optional[LagConfiguration] = None,
-        lag_selector: Optional[BaseLagSelector] = None,
-    ) -> 'DataPreparer':
+        lag_config: Any = _UNSET,
+        lag_selector: Any = _UNSET,
+        lag_selector_params: Any = _UNSET,
+        n_jobs: Any = _UNSET,
+    ) -> "DataPreparer":
+        """Prepare lagged data and update effective predictor roles."""
         if self.data_list is None:
-            raise RuntimeError("set_data() must be called before lag().")
+            raise RuntimeError(
+                "set_data() must be called before lag()."
+            )
+
         if not self._roles_assigned:
-            raise RuntimeError("set_roles() must be called before lag().")
+            raise RuntimeError(
+                "set_roles() must be called before lag()."
+            )
 
         prepared = self.prepared_data_
+
+        if prepared.lag_engine is not None:
+            raise RuntimeError(
+                "lag() has already been applied. "
+                "Start again with set_data() to rebuild preparation."
+            )
+
         roles = prepared.effective_roles
 
-        for role_name in ("effects", "tested_causes", "causes"):
+        # These checks concern roles available before lag selection.
+        # Lag selection may subsequently remove every tested cause.
+        for role_name in ("effects", "causes", "tested_causes"):
             if not getattr(roles, role_name):
-                suffix = (
-                    " After remove_redundant(), this can mean that "
-                    "no variables remain for the requested causal analysis; "
-                    "it is not a statistical conclusion about causality."
-                    if self._redundancy_removed
-                    else ""
-                )
                 raise DataValidationError(
-                    f"No effective {role_name} remain." + suffix
+                    f"No effective {role_name} are available before lagging."
                 )
 
         if not set(roles.tested_causes).issubset(roles.causes):
             raise DataValidationError(
                 "Effective tested_causes must be a subset of causes."
             )
-        
-        engine = LagEngine(
-            config=(
-                lag_config
-                if lag_config is not None
-                else self.config.lag_config or LagConfiguration()
-            ),
-            selector=(
-                lag_selector
-                if lag_selector is not None
-                else self.config.lag_selector
-            ),
-        )
-        
-        X_raw, y_raw, block_boundaries, feature_lags = engine.prepare(
-            self.data_list,
-            causes=list(roles.causes),
-            effects=list(roles.effects),
+
+        # Resolve engine configuration.
+        raw_config = (
+            self.config.lag_config
+            if lag_config is _UNSET
+            else lag_config
         )
 
-        if X_raw.shape[0] == 0 or y_raw.shape[0] == 0:
-                raise DataValidationError(
-                    "No observations remain after lag preparation."
-                )
+        config = resolve_lag_engine_config(raw_config)
+
+        if lag_selector is _UNSET:
+            selector_spec = self.config.lag_selector
+            selector_params = (
+                self.config.lag_selector_params
+                if lag_selector_params is _UNSET
+                else lag_selector_params
+            )
+        else:
+            # Replacing the selector also replaces its separate parameters
+            # unless parameters are explicitly supplied in this call.
+            selector_spec = lag_selector
+            selector_params = (
+                {}
+                if lag_selector_params is _UNSET
+                else lag_selector_params
+            )
+
+        if selector_params is None:
+            selector_params = {}
+
+        if not isinstance(selector_params, Mapping):
+            raise TypeError(
+                "lag_selector_params must be a mapping or None."
+            )
+
+        if not all(
+            isinstance(name, str)
+            for name in selector_params
+        ):
+            raise TypeError(
+                "lag_selector_params keys must be strings."
+            )
+
+        selector = resolve_lag_selector(
+            selector_spec,
+            **dict(selector_params),
+        )
+
+        effective_n_jobs = (
+            self.config.lag_n_jobs
+            if n_jobs is _UNSET
+            else n_jobs
+        )
+
+        engine = LagEngine(
+            config=config,
+            selector=selector,
+            n_jobs=effective_n_jobs,
+        )
+
+        result = engine.prepare(
+            self.data_list,
+            outputs=roles.effects,
+            predictors=roles.causes,
+        )
+
+        if result.X.shape[0] == 0 or result.y.shape[0] == 0:
+            raise DataValidationError(
+                "No observations remain after lag preparation."
+            )
+
+        if result.X.shape[1] == 0 or result.y.shape[1] == 0:
+            raise DataValidationError(
+                "No observations variables remain after lag preparation."
+            )
+
+        active_causes = tuple(result.active_predictors)
+        removed_causes = tuple(result.removed_predictors)
+
+        # Defensive checks at the pipeline/engine integration boundary.
+        original_cause_set = set(roles.causes)
+        active_set = set(active_causes)
+        removed_set = set(removed_causes)
+
+        if (
+            active_set & removed_set
+            or active_set | removed_set != original_cause_set
+        ):
+            raise DataValidationError(
+                "LagEngine returned an inconsistent predictor partition."
+            )
+
+        if result.output_names != roles.effects:
+            raise DataValidationError(
+                "LagEngine changed the requested output order."
+            )
+
+        active_causes = result.active_predictors
+        removed_causes = result.removed_predictors
+
+        boundaries = result.block_boundaries
+
+        if len(boundaries) != len(active_causes) + 1:
+            raise DataValidationError(
+                "LagEngine returned invalid predictor block boundaries."
+            )
 
         cause_slices = {
             name: slice(int(start), int(stop))
             for name, start, stop in zip(
-                roles.causes,
-                block_boundaries[:-1],
-                block_boundaries[1:],
+                active_causes,
+                boundaries[:-1],
+                boundaries[1:],
             )
         }
 
-        self.prepared_data_.lag_engine = engine
-        self.prepared_data_.base_mask = np.asarray(
-            engine.mask_, dtype=np.float64
+        effective_roles = VariableRoles(
+            effects=roles.effects,
+            causes=active_causes,
+            tested_causes=tuple(
+                name
+                for name in roles.tested_causes
+                if name in active_set
+            ),
+        )
+
+        # Preserve constant/duplicate records created earlier.
+        removed_variables = dict(prepared.removed_variables)
+
+        for name in removed_causes:
+            if name in removed_variables:
+                raise DataValidationError(
+                    f"Variable {name!r} already has removal metadata, "
+                    "but was still supplied as an effective predictor."
+                )
+
+            removed_roles = ["cause"]
+
+            if name in roles.tested_causes:
+                removed_roles.append("tested_cause")
+
+            removed_variables[name] = RemovedVariable(
+                name=name,
+                reason="no_selected_lags",
+                removed_roles=tuple(removed_roles),
+                retained_variable=None,
+            )
+
+        # Commit only after engine execution and consistency checks succeed.
+        prepared.lag_engine = engine
+        prepared.lag_result = result
+
+        prepared.effective_roles = effective_roles
+        prepared.removed_variables = removed_variables
+
+        prepared.X_raw = result.X.copy()
+        prepared.y_raw = result.y.copy()
+
+        prepared.base_mask = np.asarray(
+            result.mask,
+            dtype=np.float64,
         ).copy()
 
-        self.prepared_data_.X_raw = X_raw
-        self.prepared_data_.y_raw = y_raw
-        self.prepared_data_.feature_lags = feature_lags.copy()
-        self.prepared_data_.cause_slices = {
-            cause: cause_slices[cause]
-            for cause in self.prepared_data_.effective_roles.causes
-        }
+        prepared.feature_lags = result.feature_lags.copy()
+        prepared.cause_slices = cause_slices
 
-        self.prepared_data_.sample_indices = np.arange(X_raw.shape[0], dtype=int)
-        self.prepared_data_.x_scaler = None
-        self.prepared_data_.y_scaler = None
-        self.prepared_data_.X_scaled = np.empty((0, X_raw.shape[1]), dtype=float)
-        self.prepared_data_.y_scaled = np.empty((0, y_raw.shape[1]), dtype=float)
+        prepared.sample_indices = np.arange(
+            result.X.shape[0],
+            dtype=int,
+        )
+
+
         return self
 
     def fit(
