@@ -771,3 +771,34 @@ response window.
 - Zero-feature designs require compatible scaling and backend handling.
 - Integration tests and numerical regression checks are required before
   treating these changes as a validated release.
+
+## Stationarity preprocessing refactor 2.8.1
+
+### Changed
+
+- Replaced `StationarityTransformer` with independent registry-selected
+  `ADFStationarityEnforcer` and `KPSSStationarityEnforcer` implementations.
+- Added a shared `BaseStationarityEnforcer` interface and reusable
+  differencing workflow.
+- Unified configuration under `stationarity`; the loader and builder
+  preserve selections, and the preparation stage resolves them.
+- Made stationarity processing disabled by default, with explicit
+  `None` support across preparation and public APIs.
+- Renamed fitted-state access to `stationarity_enforcer` in `PreparedData`
+  and `PreparationContext`.
+- Added validation of input schema and finite values, fitted-state
+  isolation, and explicit `exclude` configuration.
+
+### Removed
+
+- Removed the legacy transformer API, `test_name` selection,
+  `fit_stationarity()`, and `prepare_static()`.
+
+### Tests and documentation
+
+- Added unit-test code for enforcers, registry resolution, validation,
+  state isolation, and pipeline handling.
+- Updated preprocessing, API, configuration, component-loading, and
+  project-structure documentation.
+- Tests were not executed as part of this change preparation.
+  Numerical helper search and fallback behavior remain unchanged.

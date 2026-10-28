@@ -6,11 +6,9 @@ from typing import Any, Literal, Mapping, Optional, Sequence
 
 from .lag.lag_engine import LagEngine
 from ..core.lag_config import LagPreparationResult
-from .stationarity import StationarityTransformer
+from .stationarity import BaseStationarityEnforcer
 from .missing import BaseImputer
 from .sampling import NoSampling, SamplingStrategy
-
-_DEFAULT_STATIONARITY = object()
 
 @dataclass(frozen=True)
 class VariableRoles:
@@ -33,7 +31,7 @@ class RemovedVariable:
 
 @dataclass
 class PreparedData:
-	stationarity_transformer: Any = _DEFAULT_STATIONARITY,
+	stationarity_enforcer: Optional[BaseStationarityEnforcer] = None
 	lag_engine: Optional[LagEngine] = None
 	x_scaler: Any = None
 	y_scaler: Any = None
@@ -88,7 +86,7 @@ class PreparedData:
 	def empty(cls) -> "PreparedData":
 		"""Create an empty stage container that can be filled progressively."""
 		return cls(
-			stationarity_transformer=_DEFAULT_STATIONARITY,
+			stationarity_enforcer=None,
 			lag_engine=None,
 			x_scaler=None,
 			y_scaler=None,
@@ -115,7 +113,7 @@ def prepare_data(
 		lag_selector: Any = None,
 		lag_selector_params: Optional[Mapping[str, Any]] = None,
 		lag_n_jobs: int = 1,
-		stationarity_transformer: Optional[StationarityTransformer] = None,
+		stationarity: Any = None,
 		missing_value_imputer: Optional[BaseImputer] = None,
 		schema_policy: str = "error",
 		backend_sample_fraction: float = 1.0,
@@ -145,7 +143,7 @@ def prepare_data(
 			else dict(lag_selector_params)
 		),
 		lag_n_jobs=lag_n_jobs,
-		stationarity_transformer=stationarity_transformer,
+		stationarity=stationarity,
 		missing_value_imputer=missing_value_imputer,
 		sampling_strategy=sampling_strategy,
 	)

@@ -1,8 +1,8 @@
 # Components Loading
-
 Component loading depends on the component family. There is no single
 specification format shared unchanged by callbacks, optimizers,
-constraints, regularizers, and initializers.
+constraints, regularizers, initializers, and preprocessing components
+such as lag selectors, scalers, and stationarity enforcers.
 
 Version 2.6 introduces dedicated parsing, preparation, and class-resolution
 paths for constraints and regularizers.
@@ -13,16 +13,376 @@ paths for constraints and regularizers.
 
 ## Component families
 
-| Component | Resolution/preparation | Strategy construction |
+| Component | Resolution/preparation | Construction entry point |
 | --- | --- | --- |
-| Model | Backend-local model registry | `build_model(spec, components=..., config=...)` |
-| Callbacks | Backend-local resolver/registry | `build_callbacks(specs)` |
-| Optimizer | Backend optimizer resolver | `build_optimizer(spec)` |
-| Loss | Backend loss resolver | `build_loss(spec)` |
-| Constraint | Relation parser, layout preparation, backend registry | `build_constraint(spec, data=...)` |
-| Regularizer | Shared parser, layout preparation, backend registry | `build_regularizer(selector, data=...)` |
+| Stationarity | Shared stationarity registry/resolver | `resolve_stationarity_enforcer(spec)` in the preparation stage |
+| Lag selector | Shared lag-selector registry/resolver | `resolve_lag_selector(...)` in `DataPreparer.lag()` in the preparation stage |
+| Scaler | Shared scaler registry/resolver | `resolve_scaler(...)` in the preparation scaling stages; no backend strategy construction |
+| Initializer | Shared initializer class registry and specification resolver | `resolve_initializer_spec(...)`, followed by construction and execution in `builder.initialize_weights()` |
+| Model | Backend-local model registry | `build_model(spec, components=..., config=...)` in strategy |
+| Callbacks | Backend-local resolver/registry | `build_callbacks(specs)` in strategy |
+| Optimizer | Backend optimizer resolver | `build_optimizer(spec)` in strategy|
+| Loss | Backend loss resolver | `build_loss(spec)` in strategy|
+| Constraint | Relation parser, layout preparation, backend registry | `build_constraint(spec, data=...)` in strategy |
+| Regularizer | Shared parser, layout preparation, backend registry | `build_regularizer(selector, data=...)` in strategy |
 
-Registry resolution and object construction are separate stages.
+## Stationarity configuration
+
+Stationarity is a backend-independent preprocessing component.
+
+Accepted selections:
+
+- `None`: disable processing.
+- Registered name.
+- Mapping containing `type` and optional `params`.
+- Concrete `BaseStationarityEnforcer` subclass.
+- `BaseStationarityEnforcer` instance.
+
+Factories are not supported by the stationarity resolver.
+
+Built-in names:
+
+| Name | Class |
+| --- | --- |
+| `adf` | `ADFStationarityEnforcer` |
+| `kpss` | `KPSSStationarityEnforcer` |
+
+```python
+from enhanced_granger_analysis.preprocessing.stationarity import (
+    resolve_stationarity_enforcer,
+)
+
+enforcer = resolve_stationarity_enforcer({
+    "type": "adf",
+    "params": {
+        "max_differencing_order": 2,
+        "alpha": 0.05,
+    },
+})
+```
+
+The resolver interprets specifications and constructs components.
+The configuration loader and builder only preserve the selection.
+No separate stationarity parser is used.
+
+The underlying `core.registry.Registry` stores classes; it does not
+construct them. The stationarity resolver combines class lookup with
+component construction and instance-copying policy.
+
+## Lag-selector configuration
+
+Lag selectors are backend-independent preprocessing components selected
+through a shared class registry.
+
+The configuration loader and builder preserve the selector specification.
+`DataPreparer.lag()` calls `resolve_lag_selector()` during preparation,
+then supplies the resolved component to `LagEngine`.
+
+Accepted selections include a registered name, a mapping containing
+`type` and optional `params`, a compatible class, a compatible instance,
+a factory, or `None`.
+
+```python
+builder.lag(
+    lag_config={
+        "use_lag_zero": False,
+        "aggregation": "union",
+    },
+    lag_selector={
+        "type": "ic",
+        "params": {
+            "max_lag": 8,
+            "use_bic": True,
+        },
+    },
+)
+```
+
+Constructor parameters may alternatively be supplied through
+`lag_selector_params`. Defining the same parameter both there and inside
+mapping `params` is an error.
+
+`lag_selector=None` disables automatic selection, not lag construction.
+In that case, `lag_config.max_lag` defines the fixed positive-lag baseline
+before manual overrides.
+
+Selector configuration is separate from engine configuration:
+`lag_config` controls aggregation, lag-zero permission, and overrides;
+`lag_n_jobs` controls dataset-level selector execution.
+
+Selectors return lag specifications. The engine handles aggregation,
+overrides, validation, and final feature construction.
+
+For available selector families, algorithms, and interpretation, see
+[Lag Selection](lag_selection.md). For file formats and parameter sweeps,
+see [Configuration File Usage](config_file_usage.md#lag-preparation).
+
+
+### Instance ownership
+
+Resolving a name or class constructs a new component.
+Resolving an instance deep-copies it.
+
+Existing instances cannot be combined with constructor parameters.
+Supplying constructor parameters while processing is disabled is also
+an error.
+
+The low-level resolver accepts separate constructor keyword arguments.
+Defining the same argument both inside mapping `params` and as a separate
+keyword is an error.
+
+The builder uses the single `stationarity` field; mapping `params` is the
+file-based location for constructor settings.
+
+### Registering custom implementations
+
+Implement the abstract interface and register the class before preparation:
+
+```python
+from enhanced_granger_analysis.preprocessing.stationarity import (
+    BaseStationarityEnforcer,
+    register_stationarity_enforcer,
+)
+
+
+class IdentityStationarityEnforcer(BaseStationarityEnforcer):
+    """Example component illustrating the extension contract."""
+
+    def fit(self, data_list):
+        return self
+
+    def transform(self, data_list):
+        return [frame.copy() for frame in data_list]
+
+
+register_stationarity_enforcer(
+    "identity_example",
+    IdentityStationarityEnforcer,
+    aliases=("identity_example_alias",),
+)
+```
+
+The example intentionally performs no stationarity test or differencing.
+It illustrates registration, not a stationarity guarantee.
+
+Select it through the builder:
+
+```python
+builder.stationarity("identity_example")
+```
+
+Registration requires a concrete `BaseStationarityEnforcer` subclass,
+not an instance or factory. Custom components are responsible for their
+own validation and fitted-state behavior.
+
+Registration is application setup. Do not repeatedly register the same
+name inside an experiment loop.
+
+## Scaler configuration
+
+Scalers are backend-independent preprocessing components selected through
+a shared class registry.
+
+The builder stores input and target scaler selections separately:
+
+```python
+builder.scaling(
+    x_scaler="standard",
+    y_scaler="robust",
+)
+```
+
+JSON/YAML configuration uses the corresponding top-level fields:
+
+```json
+{
+  "x_scaler": "standard",
+  "y_scaler": "robust"
+}
+```
+
+The configuration loader and builder do not construct scalers.
+`DataPreparer.scale()` resolves the selections with `resolve_scaler()`,
+copies the resolved objects, and fits independent input and target
+scalers.
+
+Accepted selections are:
+
+- A registered name.
+- A compatible scaler class.
+- A compatible scaler instance.
+- A factory returning a compatible scaler.
+- `None`, which selects the no-op scaler registered as `"none"`.
+
+Scaler objects must provide callable `fit_transform()`, `transform()`,
+and `inverse_transform()` methods.
+
+The scaler resolver does not accept `type`/`params` mapping
+specifications. Python callers can supply a configured instance when
+constructor parameters are needed:
+
+```python
+from enhanced_granger_analysis.preprocessing.scaling import (
+    MinMaxScaler,
+)
+
+builder.scaling(
+    x_scaler=MinMaxScaler(),
+    y_scaler="standard",
+)
+```
+
+The low-level resolver also accepts constructor keyword arguments when
+resolving a name, class, or factory. Constructor parameters cannot be
+combined with an existing scaler instance.
+
+Custom scaler classes are registered using the decorator interface:
+
+```python
+@register_scaler("custom_scaler", "custom_scaler_alias")
+class CustomScaler:
+    ...
+```
+
+The first name is canonical; subsequent names are aliases.
+Registration stores classes, not instances or factories.
+
+Fitted scalers are retained as `PreparedData.x_scaler` and
+`PreparedData.y_scaler`. Block-wise input scaling is available through
+`DataPreparer.block_scale()`.
+
+For built-in implementations, scaling behavior, and block-wise scaling,
+see [Data Preprocessing](data_preprocessing.md#scaling).
+
+
+## Initializer configuration
+
+Initializers provide optional model-weight initialization before base-model
+fitting. They are registered independently of backend-native training
+components, using a shared class registry and decorator-based registration.
+
+The builder stores the selection without constructing an initializer:
+
+```python
+builder.initializer("ols")
+```
+
+Constructor parameters use a mapping specification:
+
+```python
+builder.initializer({
+    "type": "random_normal",
+    "params": {
+        "mean": 0.0,
+        "std": 0.05,
+        "seed": 42,
+    },
+})
+```
+
+The equivalent JSON configuration is:
+
+```json
+{
+  "initializer": {
+    "type": "random_normal",
+    "params": {
+      "mean": 0.0,
+      "std": 0.05,
+      "seed": 42
+    }
+  }
+}
+```
+
+### Accepted selections
+
+- `None`: no additional custom weight initialization.
+- A registered name or alias.
+- A mapping containing `type` and optional `params`.
+- A compatible initializer class, without requiring registration.
+
+Ready instances and factory functions are not accepted.
+In mapping specifications, `type` must be a registered string name.
+Constructor parameters belong inside `params`.
+
+Built-in canonical names are:
+
+| Name | Implementation | Behavior |
+| --- | --- | --- |
+| `zeros` | `ZerosInitializer` | Creates zero-valued arrays matching the current weight templates |
+| `random_normal` | `RandomNormalInitializer` | Samples normally distributed weights matching the current templates |
+| `ols` | `OLSInitializer` | Fits mask-enabled linear coefficients and returns a kernel and bias |
+
+Selecting `None` does not reset weights. It skips custom initialization
+and leaves the model's current weights unchanged.
+
+### Resolution and execution
+
+The configuration loader preserves the specification.
+`builder.initialize_weights()` resolves it using
+`resolve_initializer_spec()`, constructs the selected class, and invokes
+the resulting object with an `InitializationContext`.
+
+The context supplies:
+
+- Prepared scaled inputs and targets.
+- The preprocessing coefficient mask.
+- Current model weight arrays as templates.
+
+Execution data belongs in the context, not in initializer constructor
+parameters.
+
+The initializer returns a list of weight arrays. Assignment and model
+compatibility validation are delegated to the model's weight-setting
+interface.
+
+For explicit staged execution:
+
+```python
+builder.prepare_data()
+builder.prepare_components()
+builder.build_model()
+builder.initialize_weights()
+builder.fit_base()
+```
+
+Initialization is an executable stage, not an operation performed by the
+configuration setter.
+
+The OLS initializer returns exactly two arrays, `[kernel, bias]`; do not
+assume compatibility with arbitrary multilayer weight layouts.
+
+### Custom registration
+
+Register initializer classes using the decorator interface:
+
+```python
+from enhanced_granger_analysis.initializers.registry import (
+    register_initializer,
+)
+
+
+@register_initializer("custom_initializer", "custom_initializer_alias")
+class CustomInitializer:
+    def __call__(self, context):
+        return [
+            weight.copy()
+            for weight in context.weights
+        ]
+```
+
+The example preserves the supplied weight templates and illustrates the
+execution contract.
+
+The first registration name is canonical; subsequent names are aliases.
+Registration stores classes, not instances or factories.
+
+Custom initializers must implement `__call__(context)` and return weight
+arrays compatible with the selected model.
+
+For the complete analysis-stage workflow, see
+[API Usage](api_usage.md#2-multitaskgrangerbuilder).
 
 ## Regularizer specification
 

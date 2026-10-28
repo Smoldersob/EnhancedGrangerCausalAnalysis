@@ -304,6 +304,86 @@ feature construction.
 For one dataset, dataset-level parallelism provides no additional
 selection tasks.
 
+
+### Configuring stationarity
+
+Stationarity processing is disabled by default.
+
+The builder stores a selection without constructing or fitting an
+enforcer:
+
+```python
+builder.stationarity("adf")
+```
+
+Use a mapping to supply constructor parameters:
+
+```python
+builder.stationarity({
+    "type": "kpss",
+    "params": {
+        "max_differencing_order": 2,
+        "alpha": 0.05,
+        "dropna": True,
+    },
+})
+```
+
+Python callers may also supply a concrete enforcer class or instance:
+
+```python
+from enhanced_granger_analysis.preprocessing.stationarity import (
+    ADFStationarityEnforcer,
+)
+
+builder.stationarity(ADFStationarityEnforcer)
+
+builder.stationarity(
+    ADFStationarityEnforcer(
+        max_differencing_order=2,
+    ),
+)
+```
+
+These calls are alternatives: each replaces the stored selection.
+
+`builder.stationarity(None)` and `builder.stationarity()` disable
+processing. Omitting the method preserves the current builder setting.
+
+Configuration dictionaries use the same `stationarity` field:
+
+```python
+builder.from_config({"stationarity": "adf"})
+builder.from_config({"stationarity": None})
+```
+
+An absent field in `from_config()` preserves the current selection;
+an explicit `None` disables it.
+
+The builder does not decode mapping specifications or validate constructor
+parameters. Resolution occurs in `DataPreparer.force_stationarity()` when
+data preparation executes.
+
+After preparation:
+
+```python
+prepared = builder.prepare_data()
+enforcer = prepared.stationarity_enforcer
+
+if enforcer is not None:
+    print(enforcer.fit_result_)
+```
+
+Selecting a new stationarity configuration invalidates dependent
+preparation artifacts. Rebuild preparation before executing later stages.
+
+If externally supplied `PreparedData` is used, its existing fitted
+enforcer and arrays remain authoritative; changing the builder selection
+does not transform those arrays.
+
+See [Data Preprocessing](data_preprocessing.md#stationarity) for
+input requirements, dataset aggregation, and numerical limitations.
+
 ### Selecting a lag-search family
 
 Per-pair selection permits different ranges for different relationships:
@@ -488,9 +568,11 @@ reconstructing components alone does not recreate that container.
 `fit()` and `run()` execute the complete pipeline rather than resume a
 partially completed analysis.
 
-The builder configures a default `StationarityTransformer`.
-Calling `.stationarity()` stores a default transformer;
-`.stationarity(None)` disables the transformation.
+Stationarity processing is enabled with `"adf"` by default.
+Calling `.stationarity("kspp")` or supplying another supported selection
+enables it with other methods of stationarity processiong. Calling `.stationarity()` or `.stationarity(None)` disables it.
+The builder stores the selection; the preparation pipeline resolves and
+fits the component.
 
 Hyperoptimization settings can be stored, but the standard pipeline does
 not currently execute an optimization stage.
@@ -577,6 +659,7 @@ print(output.p_value)
 - resolves relation-file references relative to the configuration file;
 - preserves lag-engine and lag-selector specifications without
   constructing those components;
+- preserves `stationarity` without interpreting its specification or constructing an enforcer;
 - preserves callback specifications for later backend resolution;
 - applies the existing normalization rules for other configuration
   families.
@@ -586,6 +669,11 @@ Lag specifications remain declarative when passed to the builder.
 `DataPreparer.lag()` calls `resolve_lag_engine_config()` and
 `resolve_lag_selector()`, then constructs the lag engine. Neither the
 configuration loader nor the analysis builder constructs lag selectors.
+
+Stationarity resolution follows the same deferred-construction policy.
+The loader preserves the `stationarity` value, the builder stores it, and
+`DataPreparer.force_stationarity()` resolves it during preparation.
+There is no stationarity-specific parsing layer in the loader or builder.
 
 For lag configuration formats, see
 [Configuration File Usage](config_file_usage.md#lag-preparation).
@@ -893,7 +981,7 @@ results = (
         effects=["y"],
         tested_causes=["x"],
     )
-    .from_config({"stationarity_transformer": None})
+    .stationarity(None)
     .lag(lag_config=LagEngineConfig(max_lag=2,use_lag_zero=False,))
     .fit()
 )

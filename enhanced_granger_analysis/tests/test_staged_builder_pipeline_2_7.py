@@ -1,7 +1,5 @@
 from __future__ import annotations
 
-from types import SimpleNamespace
-
 import numpy as np
 import pandas as pd
 import pytest
@@ -10,6 +8,7 @@ import sys
 
 from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
+from enhanced_granger_analysis.api import builder
 from enhanced_granger_analysis.core.models.training_result import TrainingResult
 from enhanced_granger_analysis.api import orchestrator as orchestrator_module
 from enhanced_granger_analysis.api.builder import MultiTaskGrangerBuilder
@@ -192,7 +191,7 @@ def _prepared_data() -> PreparedData:
         },
         feature_lags=np.arange(4, dtype=np.int64),
     )
-    prepared.stationarity_transformer = SimpleNamespace()
+    prepared.stationarity_enforcer = None
     return prepared
 
 
@@ -252,11 +251,20 @@ def test_builder_reuses_one_model_and_restricted_runs_start_from_base_weights(
     assert len(strategy.model_calls) == 1
     assert model.fit_calls == 3
 
-    assert [call[0] for call in model.reset_calls] == [
-        "base_model",
-        "reference_cause_z",
-        "reference_cause_x",
-    ]
+    run_names = [call[0] for call in model.reset_calls]
+
+    assert len(run_names) == 3
+    assert run_names[0] == "base_model"
+
+    restricted_run_names = run_names[1:]
+
+    assert all(
+        isinstance(name, str) and name.startswith("reference_cause_")
+        for name in restricted_run_names
+    )
+    assert len(set(restricted_run_names)) == 2
+
+    assert set(builder.results.reference_snapshots) == {"z", "x"}
 
     assert all(
         call["reset_optimizer"] and call["reset_callbacks"]
@@ -296,18 +304,37 @@ def test_builder_reuses_one_model_and_restricted_runs_start_from_base_weights(
         )
 
 
-def test_restricted_blocks_are_selected_by_cause_name_not_test_order(monkeypatch):
+def test_restricted_blocks_are_selected_by_cause_name_not_test_order(
+    monkeypatch,
+):
     builder, strategy = _configured_builder(monkeypatch)
 
     builder.fit_base()
     builder.fit_restricted_models()
 
-    # tested_causes is [z, x], while x occupies the middle feature block.
-    assert strategy.model.reset_calls[-1][0] == "reference_cause_x"
+    # Tested order is [z, x], but x occupies columns 1 and 2.
     assert strategy.model.omitted == [1, 2]
+
     assert builder.results.effects == ["effect"]
     assert builder.results.causes == ["z", "x"]
+    assert set(builder.results.reference_snapshots) == {"z", "x"}
 
+    # Verify the final restricted prediction actually omits x's block,
+    # rather than inferring correctness from the callback run label.
+    prepared = builder._prepared_data
+    base_weights = builder._base_weights
+
+    masked_X = prepared.X_scaled.copy()
+    masked_X[:, prepared.cause_slices["x"]] = 0.0
+
+    expected = prepared.y_scaler.inverse_transform(
+        masked_X @ base_weights[0] + base_weights[1]
+    )
+
+    np.testing.assert_allclose(
+        builder.results.ref_predictions["x"],
+        expected,
+    )
 
 def test_weights_do_not_change_the_input_mask_and_snapshots_are_independent(
     monkeypatch,

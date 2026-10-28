@@ -36,7 +36,6 @@ from ..backends import BackendFactory
 from ..backends.base_backend import BackendStrategy
 from ..initializers.registry import resolve_initializer_spec
 from ..preprocessing.prepare_data import PreparedData, prepare_data as run_prepare_data
-from ..preprocessing.stationarity import StationarityTransformer
 from ..results.granger_results import GrangerAnalysisResults, PreparationContext
 
 
@@ -98,7 +97,7 @@ class MultiTaskGrangerBuilder:
             "lag_selector": None,
             "lag_selector_params": {},
             "lag_n_jobs": 1,
-            "stationarity_transformer": StationarityTransformer(),
+            "stationarity": "adf",
             "missing_value_imputer": None, 
             "sampling_strategy": None, "backend_sample_fraction": 1.0, "backend_max_samples": None,
             "random_state": None, 
@@ -262,18 +261,23 @@ class MultiTaskGrangerBuilder:
 
         self._invalidate_from("data")
         return self
+    
+    def stationarity(
+        self,
+        spec: Any = None,
+    ) -> "MultiTaskGrangerBuilder":
+        """Store a stationarity selection for later pipeline resolution.
 
-    def stationarity(self, transformer=StationarityTransformer()):
+        None disables stationarity processing.
+
+        Registered names, mapping specifications, classes, and instances
+        are interpreted by the stationarity resolver during preparation.
         """
-        Configure the stationarity transformation for the analysis.
-
-        Args:
-            transformer: The transformer to use for stationarity adjustment
-
-        Returns:
-            Self for method chaining
-        """
-        self._fit_kwargs["stationarity_transformer"] = transformer
+        self._fit_kwargs["stationarity"] = (
+            copy.deepcopy(dict(spec))
+            if isinstance(spec, Mapping)
+            else spec
+        )
         self._invalidate_from("data")
         return self
 
@@ -439,6 +443,7 @@ class MultiTaskGrangerBuilder:
                 "lag_config",
                 "lag_selector",
                 "lag_selector_params",
+                "stationarity",
             }:
                 value = (
                     copy.deepcopy(dict(value))
@@ -573,7 +578,7 @@ class MultiTaskGrangerBuilder:
                 "lag_selector",
                 "lag_selector_params",
                 "lag_n_jobs",
-                "stationarity_transformer",
+                "stationarity",
                 "missing_value_imputer",
                 "schema_policy",
                 "backend_sample_fraction",

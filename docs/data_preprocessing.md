@@ -53,7 +53,7 @@ and transformation-fitting policy explicitly.
 | Setting | `prepare_data()` | `DataPreparationConfig` | Analysis builder |
 | --- | --- | --- | --- |
 | Schema policy | `error` | `error` | `union` |
-| Stationarity transformer | `None` | `None` | Default `StationarityTransformer` |
+| Stationarity selection | `None` | `None` | `adf` |
 | Sampling | `NoSampling` | `NoSampling` | `None`, resolved to `NoSampling` |
 | Input scaler | `standard` | `standard` | `standard` |
 | Target scaler | `standard` | `standard` | `standard` |
@@ -82,29 +82,66 @@ For example:
 from enhanced_granger_analysis.preprocessing.pipeline import (
     DataPreparer,
     DataPreparationConfig,
+)from enhanced_granger_analysis.preprocessing.stationarity import (
+    StationarityTransformer,
 )
 
 preparer = DataPreparer(
-    DataPreparationConfig(
-        stationarity_transformer=None,
+    config=DataPreparationConfig(
+        stationarity={
+            "type": "adf",
+            "params": {
+                "max_differencing_order": 2,
+                "alpha": 0.05,
+            },
+        },
         missing_value_imputer=None,
-    )
+    ),
 )
 ```
 
-The analysis builder stores a default `StationarityTransformer`.
-Calling `.stationarity()` retains an enabled default transformation.
+After assigning data, the stationarity stage supports configuration
+inheritance and explicit overrides:
 
-To disable stationarity explicitly:
+```python
+preparer.set_data(data_list)
+
+preparer.force_stationarity()        # Use configured ADF specification.
+```
+
+Alternatively, start from the original data and override the stage:
+
+```python
+preparer.set_data(data_list).force_stationarity("kpss")
+preparer.set_data(data_list).force_stationarity(None)
+```
+
+Stage operations modify the current preparation data. Disabling a stage
+does not reverse a transformation already applied. Start again with
+`set_data()` when rebuilding from original observations.
+
+Stationarity processing is disabled by default in the preparation
+configuration, convenience function, builder, orchestrator, and simple API.
+
+Enable it explicitly in the builder:
+
+```python
+builder.stationarity("adf")
+```
+
+Disable it explicitly:
 
 ```python
 builder.stationarity(None)
 ```
 
+Calling `builder.stationarity()` also disables processing. Not calling the
+method preserves the builder's current setting.
+
 The equivalent configuration setting is:
 
 ```python
-builder.from_config({"stationarity_transformer": None})
+builder.from_config({"stationarity": None})
 ```
 
 For explicit no-op scaling, use `"identity"`:
@@ -144,7 +181,6 @@ second.loc[5, "context"] = np.nan
 
 config = DataPreparationConfig(
     schema_policy="error",
-    lag_config=LagConfiguration(max_lag=3, use_lag_zero=False),
     lag_config={
         "use_lag_zero": False,
         "aggregation": "union",
@@ -157,12 +193,14 @@ config = DataPreparationConfig(
         },
     },
     lag_n_jobs=-1,
-    stationarity_transformer=StationarityTransformer(
-        max_differencing_order=1,
-        test_name="adf",
-        alpha=0.05,
-        dropna=True,
-    ),
+    stationarity={
+        "type": "adf",
+        "params": {
+            "max_differencing_order": 1,
+            "alpha": 0.05,
+            "dropna": True,
+        },
+    },  
     missing_value_imputer=ConstantImputer(value=0.0),
     x_scaler="standard",
     y_scaler="standard",
@@ -367,35 +405,196 @@ externally supplied `PreparedData` object.
 
 ## Stationarity
 
+The stationarity subsystem separates the component interface, shared
+differencing workflow, numerical order estimation, and registry resolution.
+
 Files:
 
-- `preprocessing/stationarity/transformer.py`
-- `preprocessing/stationarity/tests.py`
+- `preprocessing/stationarity/base.py`: abstract interface and fitted-result
+  summary.
+- `preprocessing/stationarity/enforcers.py`: shared differencing workflow
+  and independent ADF/KPSS implementations.
+- `preprocessing/stationarity/registry.py`: class registration and
+  specification resolution.
+- `preprocessing/stationarity/tests.py`: numerical order-selection and
+  differencing helpers; this is not the unit-test suite.
 
-Main class: `StationarityTransformer`
+### Built-in enforcers
 
-Key capabilities:
+| Registered name | Implementation |
+| --- | --- |
+| `adf` | `ADFStationarityEnforcer` |
+| `kpss` | `KPSSStationarityEnforcer` |
 
-- Per-feature differencing order selection using:
-  - ADF (`test_name="adf"`)
-  - KPSS (`test_name="kpss"`)
-- Search range: `0..max_differencing_order`.
-- Optional exclusion of selected variables from differencing via `non_stationary`.
-- Consistent application of fitted differencing orders across a list of DataFrames.
-- `dropna=True/False` control after differencing.
+Both implementations inherit the shared differencing workflow.
+Algorithm selection is performed through the registry rather than a
+`test_name` branch in one concrete transformer.
 
-API:
+### Configuration
 
-- `fit_stationarity(data_list)`
-- `transform(data_list)`
-- `fit_transform(data_list)`
-- `prepare_static(...)` (backward-compatible path)
+The `stationarity` field accepts:
 
-Helper functions:
+- `None`: disable processing.
+- A registered name.
+- A mapping containing `type` and optional `params`.
+- A concrete `BaseStationarityEnforcer` subclass.
+- A `BaseStationarityEnforcer` instance.
 
-- `static_adfuller_order(...)`
-- `static_kpss_order(...)`
-- `apply_differencing(series, order)`
+JSON/YAML files use registered names or mapping specifications.
+Direct classes and instances are available to Python callers.
+
+```python
+config = DataPreparationConfig(
+    stationarity={
+        "type": "kpss",
+        "params": {
+            "max_differencing_order": 2,
+            "alpha": 0.05,
+            "maxlag": None,
+            "exclude": [],
+            "dropna": True,
+        },
+    },
+)
+```
+
+The configuration loader and builder preserve this selection without
+interpreting its fields or constructing an enforcer.
+`DataPreparer.force_stationarity()` calls
+`resolve_stationarity_enforcer()` immediately before execution.
+
+### Built-in constructor parameters
+
+| Parameter | Default | Meaning |
+| --- | --- | --- |
+| `max_differencing_order` | `5` | Largest differencing order considered |
+| `alpha` | `0.05` | Significance threshold passed to the selected helper |
+| `maxlag` | `None` | ADF `maxlag` or KPSS `nlags`; `None` preserves the helper's automatic selection |
+| `exclude` | `None` | Variables left undifferenced and excluded from order estimation |
+| `dropna` | `True` | Drop rows containing missing values introduced by differencing |
+
+`max_differencing_order` and `maxlag` must be non-negative integers,
+with `maxlag` additionally accepting `None`. `alpha` must be finite and
+strictly between zero and one.
+
+Excluded names must exist when the stationarity stage executes.
+In the standard pipeline, redundant-variable removal occurs first.
+
+### Fitting and transformation
+
+The public component interface is:
+
+```python
+enforcer.fit(data_list)
+enforcer.transform(data_list)
+enforcer.fit_transform(data_list)
+```
+
+Direct usage:
+
+```python
+from enhanced_granger_analysis.preprocessing.stationarity import (
+    resolve_stationarity_enforcer,
+)
+
+enforcer = resolve_stationarity_enforcer({
+    "type": "adf",
+    "params": {
+        "max_differencing_order": 2,
+        "alpha": 0.05,
+    },
+})
+
+stationary_data = enforcer.fit_transform(data_list)
+
+print(enforcer.differencing_orders_)
+print(enforcer.fit_result_)
+```
+
+For each variable, fitting estimates an order separately in every dataset
+and retains the maximum selected order across datasets. The resulting
+per-variable order is applied consistently to every dataset.
+
+Differencing is performed independently within each dataset.
+History never crosses dataset boundaries.
+
+`transform()` reuses fitted orders; it does not estimate them again.
+It requires the same column names and order used during fitting.
+Calling it before fitting raises `StationarityNotFittedError`.
+
+Re-fitting replaces previous fitted state. A failed fit leaves the
+enforcer unfitted rather than exposing stale fitted orders.
+
+### Input requirements
+
+Built-in differencing enforcers require:
+
+- A non-empty sequence of non-empty DataFrames.
+- Identical columns in identical order across datasets.
+- Unique string column names.
+- Values convertible to finite floating-point numbers.
+
+Dataset lengths may differ.
+
+Missing and infinite input values are rejected. Apply missing-value
+imputation before this stage when necessary.
+`dropna=False` retains leading missing values introduced by differencing;
+it does not permit missing input values.
+
+With `dropna=True`, transformation raises `StationarityTestError` if no
+observations remain in a dataset.
+
+### Fitted state and isolation
+
+The preparation result stores the fitted component as:
+
+```python
+prepared.stationarity_enforcer
+```
+
+It is `None` when processing is disabled.
+
+Built-in fitted components expose:
+
+- `feature_names_in_`;
+- `differencing_orders_`;
+- `fit_result_`, containing the method name, selected orders, maximum
+  search order, and significance threshold.
+
+Registered classes are instantiated for each resolution.
+Supplied instances are deep-copied before pipeline fitting, so the
+caller's object is not fitted in place.
+
+After analysis, the same fitted component is accessible through:
+
+```python
+enforcer = results.preparation_context.stationarity_enforcer
+```
+
+### Interpretation and limitations
+
+The numerical helpers search orders from zero through
+`max_differencing_order`.
+
+The ADF helper returns the first order with a p-value at or below
+`alpha`. The KPSS helper returns the first order with a p-value at or
+above `alpha`.
+
+If no candidate satisfies the corresponding criterion, the helpers
+return a best candidate according to their p-value search rule.
+The returned order therefore does not guarantee that stationarity was
+established.
+
+The shared cross-dataset maximum-order rule does not perform an additional
+post-aggregation stationarity check.
+
+This stage fits on the supplied datasets; it does not create a
+training/validation/test split. Applications requiring held-out evaluation
+must define the fitting policy explicitly and use `transform()` on
+held-out data.
+
+Inverse target scaling reverses scaling only. It does not reconstruct
+levels from differenced predictions.
 
 ## Lag processing
 
@@ -577,7 +776,7 @@ This keeps preprocessing consistent across all supported backends (`pytorch`, `t
 - `X_scaled`: model inputs after scaling.
 - `y_scaled`: model targets after scaling.
 - `x_scaler` and `y_scaler`: fitted scaling objects.
-- `stationarity_transformer`: transformer used before lag construction,
+- `stationarity_enforcer`: fitted stationarity component used before lag construction, or `None` when disabled.
   or `None`.
 - `lag_engine`: engine used to prepare the data;
 - `lag_result`: structured lag-preparation result, including the final
@@ -751,7 +950,9 @@ After sampling, use `sample_indices` to map retained observations back
 to those pre-sampling positions.
 ## When to Use Which Component
 
-- `StationarityTransformer`: when data shows trend/non-stationarity and you need stable Granger inference.
+- `ADFStationarityEnforcer` or `KPSSStationarityEnforcer`: optional
+  test-guided differencing before lag preparation; inspect the fitted
+  orders and account for the numerical helpers' fallback behavior.
 - `LagEngine` + selector: when lag order should be data-adaptive.
 - `LagEngine` without selector: when you need deterministic, fixed lag structure.
 - `StandardScaler`: default choice for most workflows.

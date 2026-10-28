@@ -13,7 +13,10 @@ their accepted formats differ from callback and optimizer loader formats.
 - [How to write different components](#how-to-write-different-components)
   - [Supported backend formats](#supported-backend-forms)
   - [Variable selection](#variable-selection-causes-effects-tested_causes)
+  - [Stationarity](#stationarity)
+  - [Lag preparation](#lag-preparation)
   - [Model selection](#model-selection-and-construction)
+  - [Stationarity](#stationarity)
   - [Optimizers and other components](#optimizers-losses-and-other-components)
   - [Constraints](#constraints)
 - [Structural metadata and training observations](#structural-metadata-and-training-observations)
@@ -33,6 +36,8 @@ their accepted formats differ from callback and optimizer loader formats.
 It can:
 - load JSON or YAML files,
 - preserve lag-engine and lag-selector specifications for resolution
+- preserve stationarity selections unchanged for resolution during
+  preprocessing;
   during preprocessing,
 - normalize relation constraints,
 - validate and normalize backend aliases,
@@ -107,6 +112,146 @@ In this case:
 - The model uses 5 input variables: `u`, `f1`, `f2`, `x1`, `x2`.
 - It predicts 2 outputs: `x3`, `x4`.
 - Causality is tested only for `f1→x3`, `f1→x4`, `f2→x3`, `f2→x4`, saving time on the reference loop for `u`, `x1`, `x2`.
+
+## Stationarity
+
+Use the top-level `stationarity` field.
+
+Stationarity processing is disabled by default. The loader and builder
+preserve the supplied value without decoding the specification or
+constructing an enforcer.
+
+`DataPreparer.force_stationarity()` calls
+`resolve_stationarity_enforcer()` during preparation.
+
+### Disable processing
+
+```json
+{
+  "stationarity": null
+}
+```
+
+### Select a registered implementation
+
+```json
+{
+  "stationarity": "adf"
+}
+```
+
+Built-in registered names are `adf` and `kpss`.
+
+### Supply constructor parameters
+
+```json
+{
+  "stationarity": {
+    "type": "kpss",
+    "params": {
+      "max_differencing_order": 2,
+      "alpha": 0.05,
+      "maxlag": null,
+      "exclude": [],
+      "dropna": true
+    }
+  }
+}
+```
+
+Equivalent YAML:
+
+```yaml
+stationarity:
+  type: kpss
+  params:
+    max_differencing_order: 2
+    alpha: 0.05
+    maxlag: null
+    exclude: []
+    dropna: true
+```
+
+Mapping specifications accept only `type` and optional `params`.
+Constructor parameters belong inside `params`, not beside `type`.
+
+Use `stationarity: null` to disable processing rather than
+`type: null` or `params: null`.
+
+Names, specification structure, and constructor parameters are checked
+when the preparation stage resolves the selection. Successful file
+loading alone does not establish that the component configuration is valid.
+
+Python callers can additionally pass concrete enforcer classes and
+instances. JSON/YAML files use registered string names.
+
+### Omitted versus explicit null
+
+On a fresh builder, omitting `stationarity` leaves the disabled default.
+
+When applying a configuration to an already configured builder:
+
+- An absent `stationarity` field preserves the current setting.
+- An explicit `stationarity: null` disables processing.
+- A supplied name or mapping replaces the current selection.
+
+### Parameter sweeps
+
+With a mapping-form base specification, sweep nested fields:
+
+```json
+{
+  "base_config": {
+    "stationarity": {
+      "type": "adf",
+      "params": {
+        "max_differencing_order": 2,
+        "alpha": 0.05
+      }
+    }
+  },
+  "sweep": {
+    "param_names": [
+      "stationarity.type",
+      "stationarity.params.max_differencing_order"
+    ],
+    "cases": [
+      ["adf", 1],
+      ["adf", 2],
+      ["kpss", 2]
+    ]
+  }
+}
+```
+
+To compare disabled and enabled processing, replace the whole field:
+
+```json
+{
+  "base_config": {},
+  "sweep": {
+    "param_names": ["stationarity"],
+    "cases": [
+      [null],
+      ["adf"],
+      [
+        {
+          "type": "kpss",
+          "params": {
+            "max_differencing_order": 2
+          }
+        }
+      ]
+    ]
+  }
+}
+```
+
+Nested updates require mapping-form configuration. Do not attempt a path
+such as `stationarity.params.alpha` underneath a string selection.
+
+For fitting behavior and numerical limitations, see
+[Data Preprocessing](data_preprocessing.md#stationarity).
 
 ## Lag preparation
 
@@ -792,6 +937,14 @@ Important implementation detail:
 
 You can sweep these fields:
 
+- `stationarity`
+  - Replace the whole selection with `null`, a registered name, or a
+    mapping specification.
+  - For mapping-form selections, use paths such as
+    `stationarity.type`, `stationarity.params.alpha`, and
+    `stationarity.params.max_differencing_order`.
+  - Resolution occurs during preprocessing, after sweep expansion.
+
 - `lag_selector` and its constructor parameters
   - Replace the entire specification, or use canonical mapping paths.
   - Examples: `lag_selector.type`,
@@ -820,12 +973,18 @@ You can sweep these fields:
   - `auto` is supported: it leaves backend defaults in place, so PyTorch auto-selects CUDA when available and TensorFlow uses its normal runtime device selection.
 
 - `initializer`
-  - Supported: yes.
-  - String specs are automatically normalized to initializer classes via `BuilderConfigLoader`.
-  - Supported strings (case-insensitive): `"ols"`, `"zeros"`, `"random_normal"` and their aliases (`"olsinitializer"`, `"zero"`, `"zerosinitializer"`, `"randomnormal"`, `"random"`, `"randomnormalinitializer"`).
-  - Examples: `initializer: "ols"`, `initializer: "zeros"`, `initializer: "random_normal"`.
-  - You can also pass an initializer object/class directly from Python code (already resolved).
-  - `null` is accepted and means no custom weight initialization; each backend uses its defaults (PyTorch: Kaiming, TensorFlow: Glorot, scikit-learn: zeros).
+  - Accepts `null`, a registered name, or a `type`/`params` mapping.
+  - Python callers may additionally supply a compatible initializer class;
+    ready instances and factory functions are not supported.
+  - The loader preserves the specification. Resolution, construction, and
+    execution occur in `builder.initialize_weights()`.
+  - Built-in canonical names are `ols`, `zeros`, and `random_normal`.
+  - Sweep the whole selection or mapping paths such as
+    `initializer.type`, `initializer.params.std`, and
+    `initializer.params.seed`.
+  - `null` skips custom initialization; it does not reset model weights.
+  - See [Components Loading](components_loading.md#initializer-configuration)
+    for accepted forms and the execution contract.
 
 - `relations`
   - Replace the complete canonical declaration list per case, or supply

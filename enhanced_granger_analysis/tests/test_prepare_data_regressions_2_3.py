@@ -23,15 +23,15 @@ def _dataframe() -> pd.DataFrame:
     return pd.DataFrame(values, columns=["x", "y"])
 
 
-def test_prepare_data_skips_stationarity_when_transformer_is_none() -> None:
+def test_prepare_data_skips_stationarity_when_selection_is_none() -> None:
     prepared = prepare_data(
         _dataframe(),
         effects=["y"],
         lag_config=None,
-        stationarity_transformer=None,
+        stationarity=None,
     )
 
-    assert prepared.stationarity_transformer is None
+    assert prepared.stationarity_enforcer is None
     assert prepared.X_raw.shape[0] == prepared.y_raw.shape[0]
 
 
@@ -41,7 +41,7 @@ def test_prepare_data_maps_cause_names_to_lagged_feature_blocks() -> None:
         causes=["y", "x"],
         tested_causes=["x"],
         effects=["y"],
-        stationarity_transformer=None,
+        stationarity=None,
     )
 
     assert prepared.causes == ("y", "x")
@@ -55,20 +55,34 @@ def test_prepare_data_rejects_mismatched_segment_schema_by_default() -> None:
     second = first.rename(columns={"y": "target"})
 
     with pytest.raises(DataValidationError, match="expected"):
-        prepare_data([first, second], stationarity_transformer=None)
+        prepare_data([first, second], stationarity=None)
 
 
 def test_union_schema_is_opt_in() -> None:
     first = _dataframe()
     second = first.rename(columns={"y": "target"})
 
-    prepared = prepare_data(
-        [first, second],
-        stationarity_transformer=None,
-        schema_policy="union",
+    preparer = DataPreparer(schema_policy="union")
+    preparer.set_data([first, second]).align()
+
+    aligned_first, aligned_second = preparer.data_list
+
+    assert list(aligned_first.columns) == ["x", "y", "target"]
+    assert list(aligned_second.columns) == ["x", "y", "target"]
+
+    # Existing observations are preserved.
+    pd.testing.assert_frame_equal(
+        aligned_first[["x", "y"]],
+        first,
+    )
+    pd.testing.assert_frame_equal(
+        aligned_second[["x", "target"]],
+        second,
     )
 
-    assert prepared.causes == ("x", "y", "target")
+    # Alignment introduces missing columns; it does not impute them.
+    assert aligned_first["target"].isna().all()
+    assert aligned_second["y"].isna().all()
 
 
 def test_imputers_preserve_segment_boundaries() -> None:
@@ -97,7 +111,7 @@ def test_prepare_data_applies_explicit_imputer_before_preprocessing() -> None:
     prepared = prepare_data(
         data,
         effects=["y"],
-        stationarity_transformer=None,
+        stationarity=None,
         missing_value_imputer=MeanImputer(),
     )
 
@@ -115,7 +129,7 @@ def test_prepare_data_exposes_requested_and_effective_roles() -> None:
         causes=["x", "duplicate", "constant"],
         tested_causes=["x", "duplicate", "constant"],
         effects=["y"],
-        stationarity_transformer=None,
+        stationarity=None,
     )
 
     assert prepared.requested_roles.causes == ("x", "duplicate", "constant")
@@ -135,7 +149,7 @@ def test_prepare_data_rejects_tested_cause_outside_causes() -> None:
             causes=["x"],
             tested_causes=["y"],
             effects=["y"],
-            stationarity_transformer=None,
+            stationarity=None,
         )
 
 
@@ -143,14 +157,14 @@ def test_sampling_is_reproducible_and_preserves_selected_order() -> None:
     first = prepare_data(
         _dataframe(),
         effects=["y"],
-        stationarity_transformer=None,
+        stationarity=None,
         backend_sample_fraction=0.5,
         random_state=17,
     )
     second = prepare_data(
         _dataframe(),
         effects=["y"],
-        stationarity_transformer=None,
+        stationarity=None,
         backend_sample_fraction=0.5,
         random_state=17,
     )
@@ -164,7 +178,7 @@ def test_strided_sampling_and_sampling_parameter_validation() -> None:
     prepared = prepare_data(
         _dataframe(),
         effects=["y"],
-        stationarity_transformer=None,
+        stationarity=None,
         backend_max_samples=4,
         sampling_strategy=StridedSampling(),
     )
@@ -173,7 +187,7 @@ def test_strided_sampling_and_sampling_parameter_validation() -> None:
         prepare_data(
             _dataframe(),
             effects=["y"],
-            stationarity_transformer=None,
+            stationarity=None,
             backend_sample_fraction=0,
         )
 
@@ -191,7 +205,7 @@ def test_scalers_expose_fit_without_breaking_fit_transform() -> None:
 
 def test_data_preparer_supports_staged_pipeline_builder() -> None:
     prepared = (
-        DataPreparer(stationarity_transformer=None)
+        DataPreparer(stationarity=None)
         .set_data(_dataframe())
         .set_roles(causes=["x"], tested_causes=["x"], effects=["y"])
         .align()
@@ -205,3 +219,38 @@ def test_data_preparer_supports_staged_pipeline_builder() -> None:
 
     assert prepared.effective_roles.causes == ("x",)
     assert prepared.effective_roles.effects == ("y",)
+
+def test_union_schema_supports_preparation_with_explicit_imputation() -> None:
+    first = _dataframe()
+    second = first.rename(columns={"y": "target"})
+
+    prepared = prepare_data(
+        [first, second],
+        stationarity=None,
+        schema_policy="union",
+        missing_value_imputer=ConstantImputer(value=0.0),
+    )
+
+    assert prepared.causes == ("x", "y", "target")
+    assert prepared.effects == ("x", "y", "target")
+    assert prepared.stationarity_enforcer is None
+
+    assert prepared.X_raw.shape[0] > 0
+    assert prepared.X_raw.shape[0] == prepared.y_raw.shape[0]
+
+    assert np.isfinite(prepared.X_raw).all()
+    assert np.isfinite(prepared.y_raw).all()
+    assert np.isfinite(prepared.X_scaled).all()
+    assert np.isfinite(prepared.y_scaled).all()
+
+def test_union_schema_does_not_implicitly_impute_missing_columns() -> None:
+    first = _dataframe()
+    second = first.rename(columns={"y": "target"})
+
+    with pytest.raises(ValueError, match="non-finite values"):
+        prepare_data(
+            [first, second],
+            stationarity=None,
+            schema_policy="union",
+            missing_value_imputer=None,
+        )

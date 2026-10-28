@@ -128,13 +128,31 @@ Staged data preparation and the contract passed to model execution:
 - `prepare_data.py`: convenience entry point and preparation data models,
   including `PreparedData`, `VariableRoles`, and `RemovedVariable`;
 - `pipeline.py`: `DataPreparer`, preparation configuration, stage execution,
+  and resolution of stationarity, lag, and scaling components;
   and resolution of lag components;
 - `missing/`: optional missing-value imputation;
-- `stationarity/`: stationarity testing and transformation;
+- `stationarity/`: abstract enforcer interface, shared differencing
+  workflow, independent ADF/KPSS implementations, and registry resolution;
 - `lag/`: selection interfaces, selector registration, configuration
   resolution, lag aggregation, feature construction, and target alignment;
 - `scaling/`: input and target scaling, including block-wise scaling;
 - `sampling.py`: workload-reduction strategies.
+
+The stationarity subsystem separates:
+
+- `base.py`: `BaseStationarityEnforcer` and `StationarityFitResult`;
+- `enforcers.py`: `BaseDifferencingEnforcer`,
+  `ADFStationarityEnforcer`, and `KPSSStationarityEnforcer`;
+- `registry.py`: class registration and specification resolution;
+- `tests.py`: numerical order-estimation and differencing helpers.
+
+The numerical-helper filename `stationarity/tests.py` does not identify
+the unit-test suite. Mechanism tests are located in
+`enhanced_granger_analysis/tests/test_stationarity.py`.
+
+The loader and builder preserve `stationarity` selections without
+interpreting them. The preparation stage resolves and fits the component,
+then stores it as `PreparedData.stationarity_enforcer`.
 
 The lag subsystem separates:
 

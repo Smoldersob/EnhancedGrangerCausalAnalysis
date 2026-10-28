@@ -21,7 +21,7 @@ from .missing import BaseImputer
 from .prepare_data import PreparedData, RemovedVariable, VariableRoles
 from .sampling import NoSampling, SamplingStrategy
 from .scaling import resolve_scaler, BlockScaler
-from .stationarity import StationarityTransformer
+from .stationarity import resolve_stationarity_enforcer
 
 _UNSET = object()
 
@@ -41,7 +41,7 @@ class DataPreparationConfig:
         default_factory=dict
     )
     lag_n_jobs: int = 1
-    stationarity_transformer: Optional[StationarityTransformer] = None
+    stationarity: Any = None
     missing_value_imputer: Optional[BaseImputer] = None
     sampling_strategy: Optional[SamplingStrategy] = field(
         default_factory=NoSampling
@@ -369,31 +369,39 @@ class DataPreparer:
     
     def force_stationarity(
         self,
-        transformer: Any = _UNSET,
+        stationarity: Any = _UNSET,
     ) -> "DataPreparer":
+        """Resolve and fit a stationarity enforcer before lag preparation."""
         if self.data_list is None:
             raise RuntimeError(
                 "set_data() must be called before force_stationarity()."
             )
+
         if self.prepared_data_.lag_engine is not None:
             raise RuntimeError(
                 "force_stationarity() must be called before lag()."
             )
 
-        effective = (
-            self.config.stationarity_transformer
-            if transformer is _UNSET
-            else transformer
+        spec = (
+            self.config.stationarity
+            if stationarity is _UNSET
+            else stationarity
         )
+
+        enforcer = resolve_stationarity_enforcer(spec)
+
+        source = [frame.copy() for frame in self.data_list]
 
         result = (
-            [df.copy() for df in self.data_list]
-            if effective is None
-            else effective.fit_transform(self.data_list)
+            source
+            if enforcer is None
+            else enforcer.fit_transform(source)
         )
 
-        self.data_list = [df.copy() for df in result]
-        self.prepared_data_.stationarity_transformer = effective
+        # Commit only after resolution and transformation succeed.
+        self.data_list = [frame.copy() for frame in result]
+        self.prepared_data_.stationarity_enforcer = enforcer
+
         return self
 
     def scale(

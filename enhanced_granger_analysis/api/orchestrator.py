@@ -1,17 +1,14 @@
 from __future__ import annotations
 
-from typing import Any, Dict, Optional, Sequence
+from typing import Any, Dict, Optional, Sequence, Mapping
 
 import pandas as pd
 
 from ..core.components.constraint_spec import RelationConstraintsSpec
-from ..core.lag_config import LagConfiguration
 from ..core.components.constraint_parsing import RelationsInput
 from ..core.components.constraint_spec import RelationConstraintsSpec
-from ..preprocessing.lag import BaseLagSelector
 from ..preprocessing.missing import BaseImputer
 from ..preprocessing.sampling import SamplingStrategy
-from ..preprocessing.stationarity import StationarityTransformer
 from ..results.granger_results import GrangerAnalysisResults
 from .builder import MultiTaskGrangerBuilder
 
@@ -55,8 +52,10 @@ class MultiTaskGrangerAPI:
         constraint_spec: Any = "mask_and_min_abs_sum",
         relations: RelationsInput = RelationConstraintsSpec(),
         lag_config: Optional[LagConfiguration] = None,
-        lag_selector: Optional[BaseLagSelector] = None,
-        stationarity_transformer: Optional[StationarityTransformer] = StationarityTransformer(),
+        lag_selector: Any = None,
+        lag_selector_params: Optional[Mapping[str, Any]] = None,
+        lag_n_jobs: int = 1,
+        stationarity: Any = "adf",
         missing_value_imputer: Optional[BaseImputer] = None,
         schema_policy: str = "union",
         prepared_data: Any = None,
@@ -83,7 +82,8 @@ class MultiTaskGrangerAPI:
         builder = MultiTaskGrangerBuilder(
             backend=self.backend, reuse_data=self._reuse_data
         ).data(data).variables(causes, effects, tested_causes).relations(relations).constraint(constraint_spec)
-        builder.lag(lag_config, lag_selector).stationarity(stationarity_transformer)
+        builder.lag(lag_config, lag_selector,lag_selector_params=lag_selector_params,lag_n_jobs=lag_n_jobs)
+        builder.stationarity(stationarity)
         builder._fit_kwargs.update({
             "missing_value_imputer": missing_value_imputer,
             "schema_policy": schema_policy,
