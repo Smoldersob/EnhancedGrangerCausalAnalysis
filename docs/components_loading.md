@@ -317,8 +317,8 @@ Simple example:
 
 ```python
 callbacks = [
-    {"type": "early_stopping", "patience": 10},
-    {"type": "reduce_lr", "factor": 0.5},
+    {"type": "early_stopping", "params":{"patience": 10}},
+    {"type": "reduce_lr", "params":{"factor": 0.5}},
 ]
 ```
 
@@ -416,8 +416,14 @@ Simple example:
 
 ```python
 callbacks = [
-    {"type": "early_stopping", "monitor": "loss", "patience": 3},
-    {"type": "tensorboard", "log_dir": "logs/demo"},
+    {
+        "type": "early_stopping", 
+        "params":{"monitor": "loss", "patience": 3}
+    },
+    {
+        "type": "tensorboard", 
+        "params"{"log_dir": "logs/demo"}
+    }
 ]
 ```
 

@@ -177,7 +177,7 @@ Execution methods do not share one fluent return contract:
 
 ```python
 from enhanced_granger_analysis.api import MultiTaskGrangerBuilder
-from enhanced_granger_analysis.core.lag_config import LagConfiguration
+from enhanced_granger_analysis.preprocessing.lag import LagEngineConfig
 import pandas as pd
 
 df = pd.read_csv("data.csv", index_col=0)
@@ -185,7 +185,7 @@ df = pd.read_csv("data.csv", index_col=0)
 output = (MultiTaskGrangerBuilder(backend="pytorch")
     .data(df)
     .variables(causes=["x1", "x2"], effects=["y"], tested_causes=["x1", "x2"])
-    .lag(lag_config=LagConfiguration(max_lag=5, use_lag_zero=False))
+    .lag(lag_config=LagEngineConfig(max_lag=5,use_lag_zero=False,),)
     .model(model_config={"epochs": 20, "batch_size": 16})
     .scaling(x_scaler="standard", y_scaler="standard")
     .fit()
@@ -194,6 +194,184 @@ output = (MultiTaskGrangerBuilder(backend="pytorch")
 causality = output.result(threshold=0.01, with_sign=True)
 print(causality)  # DataFrame with signed causality indicators
 ```
+
+### Configuring lag preparation
+
+The builder stores lag configuration without constructing a selector or
+executing lag selection. Resolution takes place in `DataPreparer.lag()`.
+
+Engine configuration, selector configuration, and execution parallelism
+are separate:
+
+```python
+builder.lag(
+    lag_config={
+        "use_lag_zero": False,
+        "aggregation": "frequency",
+        "selection_frequency": 0.5,
+        "predictor_overrides": {
+            "x1": (1, 3),
+        },
+        "pair_overrides": {
+            "y": {
+                "x2": (),
+            },
+        },
+    },
+    lag_selector={
+        "type": "cv",
+        "params": {
+            "max_lag": 12,
+            "cv_folds": 5,
+            "cv_metric": "mae",
+            "prune_lags": True,
+            "addition_reference": "initial",
+            "pruning_reference": "initial",
+        },
+    },
+    n_jobs=-1,
+)
+```
+
+`lag_config` accepts a `LagEngineConfig`, a mapping, or `None` for the
+default engine configuration.
+
+`lag_selector` accepts a registered name, a `type`/`params` specification,
+a compatible class, a compatible instance, a factory, or `None`.
+The pipeline resolves the specification using the selector registry.
+
+Constructor parameters may alternatively be supplied separately:
+
+```python
+builder.lag(
+    lag_config={"aggregation": "union"},
+    lag_selector="ic",
+    lag_selector_params={
+        "max_lag": 12,
+        "use_bic": True,
+    },
+    n_jobs=-1,
+)
+```
+
+Supplying the same constructor parameter both inside `params` and through
+`lag_selector_params` is an error. Existing selector instances must not be
+combined with constructor parameters.
+
+Calling `builder.lag(...)` replaces the stored lag setup and invalidates
+dependent preparation artifacts.
+
+#### Fixed versus selected lags
+
+Without an automatic selector, `lag_config.max_lag` defines the fixed
+positive-lag range:
+
+```python
+builder.lag(
+    lag_config={"max_lag": 4},
+    lag_selector=None,
+)
+```
+
+With a selector, its own `max_lag` defines the automatic search bound.
+The pipeline does not copy that value from the engine configuration.
+
+#### Explicit lag sets
+
+Override values contain actual lag values, not interval endpoints:
+
+- `(1, 3)` includes exactly lags 1 and 3.
+- `(0,)` includes only the contemporaneous predictor.
+- `()` excludes the predictor for the applicable output equations.
+
+Predictor-wide overrides replace the selected lag set across outputs.
+Pair-specific overrides are applied afterwards and take precedence.
+
+Lag 0 is permitted only when `lag_config.use_lag_zero=True`.
+A variable's own contemporaneous value is never a valid predictor of
+itself.
+
+#### Dataset-level parallelism
+
+The builder's `n_jobs` argument is passed to the preparation pipeline as
+`lag_n_jobs`. It controls independent selector execution across input
+DataFrames.
+
+Each dataset is processed with an independent selector instance. The
+resulting specifications are aggregated before user overrides and final
+feature construction.
+
+For one dataset, dataset-level parallelism provides no additional
+selection tasks.
+
+### Selecting a lag-search family
+
+Per-pair selection permits different ranges for different relationships:
+
+```python
+builder.lag(
+    lag_selector="ic",
+    lag_selector_params={
+        "max_lag": 6,
+        "use_bic": True,
+        "complexity_measure": "columns",
+        "prune_lags": True,
+    },
+)
+```
+
+Common-order selection evaluates complete ranges `1..p` and returns one
+order for all pairs:
+
+```python
+builder.lag(
+    lag_selector="common_order_ic",
+    lag_selector_params={
+        "max_lag": 6,
+        "use_bic": True,
+        "complexity_measure": "columns",
+    },
+)
+```
+
+To use common-order time-series validation:
+
+```python
+builder.lag(
+    lag_selector="common_order_cv",
+    lag_selector_params={
+        "max_lag": 6,
+        "cv_folds": 5,
+        "cv_metric": "mse",
+        "normalize_outputs": True,
+    },
+)
+```
+
+To retain the historical VAR procedure:
+
+```python
+builder.lag(
+    lag_selector="var",
+    lag_selector_params={
+        "max_lag": 6,
+        "min_lag": 1,
+        "center": True,
+        "maximum": True,
+    },
+)
+```
+
+`"var"` and `"naive_var"` resolve to the same historical implementation.
+
+The common-order methods do not accept per-pair pruning or addition
+settings.
+
+All selectors are preprocessing heuristics. Choosing a different family
+changes the auxiliary selection procedure, even if the returned lag
+format is unchanged.
+
+See [Lag Selection](lag_selection.md) for methodological details.
 
 ### Component preparation stages
 
@@ -394,12 +572,23 @@ print(output.p_value)
 **Purpose:** Loads YAML/JSON configuration files and normalizes them for the builder.
 
 **What it does:**
-- Reads JSON/YAML files.
-- Normalizes `lag_config` dict into `LagConfiguration` objects.
-- Resolves backend aliases (e.g., `"torch"` → `"pytorch"`).
-- Preserves callback specs for backend-native resolution.
-- Validates component types (lag selectors, regularizers).
-- Moves backend-specific defaults into `model_config`.
+- reads JSON/YAML configuration;
+- resolves backend aliases and existing backend configuration defaults;
+- resolves relation-file references relative to the configuration file;
+- preserves lag-engine and lag-selector specifications without
+  constructing those components;
+- preserves callback specifications for later backend resolution;
+- applies the existing normalization rules for other configuration
+  families.
+
+Lag specifications remain declarative when passed to the builder.
+
+`DataPreparer.lag()` calls `resolve_lag_engine_config()` and
+`resolve_lag_selector()`, then constructs the lag engine. Neither the
+configuration loader nor the analysis builder constructs lag selectors.
+
+For lag configuration formats, see
+[Configuration File Usage](config_file_usage.md#lag-preparation).
 
 **Given Example Config:**
 ```json
@@ -410,7 +599,7 @@ print(output.p_value)
     "use_lag_zero": false
   },
   "callbacks": [
-    {"type": "early_stopping", "patience": 5}
+    {"type": "early_stopping", "params":{"patience": 5}}
   ],
   "relations": [
     {
@@ -473,11 +662,21 @@ it = TestGroupConfigIterator.from_file("group_config.json")
 
 results = []
 for cfg in it:
-    print(f"Running: epochs={cfg['model_config']['epochs']}, max_lag={cfg['lag_config'].max_lag}")
+    print(
+        f"Running: epochs={cfg['model_config']['epochs']}, "
+        f"max_lag={cfg['lag_config']['max_lag']}"
+    )
     
     output = MultiTaskGrangerBuilder().from_config(cfg).data(df).fit()
     results.append(output)
 ```
+
+Lag configuration remains a mapping after file loading and sweep expansion.
+Use dictionary access when inspecting an unresolved configuration.
+
+When automatic selection is enabled, sweep its search bound through
+`lag_selector.params.max_lag` or `lag_selector_params.max_lag`, depending
+on the chosen specification form.
 
 **Features:**
 - Expands cartesian product of parameter values.
@@ -611,6 +810,32 @@ estimated coefficient sign.
 If a removed duplicate cause's representative was an input but was not
 formally tested, no representative result column is available to copy.
 
+#### Causes excluded during lag preparation
+
+An input with no final selected lags for any effective output is removed
+from the effective predictor roles. If it was a tested cause, it is also
+removed from the effective tested-cause set and receives no restricted
+model fit.
+
+Requested roles remain available for result restoration. Restored
+lag-excluded columns use the metric's configured neutral value:
+
+- p-values: `1`;
+- F, Wald, and likelihood-ratio statistics: `0`;
+- coefficient-derived signs: `0`;
+- metrics without an explicit restoration value: `NaN`.
+
+These are structural restoration conventions for the selected model, not
+additional statistical tests demonstrating absence of causality.
+
+A variable excluded as an input can remain an effective output.
+
+A lag-excluded tested cause is restored using a neutral reporting value.
+This records exclusion by the preprocessing procedure, not an independent
+statistical conclusion about the underlying relationship.
+
+Rank deficiency alone is not recorded as `"no_selected_lags"`.
+
 ## Key Distinctions: Builder vs. Orchestrator vs. Simple Granger
 
 | Aspect | **Builder** | **Orchestrator** | **Simple Granger** |
@@ -644,7 +869,7 @@ import numpy as np
 import pandas as pd
 
 from enhanced_granger_analysis.api import MultiTaskGrangerBuilder
-from enhanced_granger_analysis.core.lag_config import LagConfiguration
+from enhanced_granger_analysis.preprocessing.lag import LagEngineConfig
 
 rng = np.random.default_rng(42)
 n_samples = 400
@@ -669,7 +894,7 @@ results = (
         tested_causes=["x"],
     )
     .from_config({"stationarity_transformer": None})
-    .lag(LagConfiguration(max_lag=2, use_lag_zero=False))
+    .lag(lag_config=LagEngineConfig(max_lag=2,use_lag_zero=False,))
     .fit()
 )
 
@@ -722,7 +947,7 @@ for i, cfg in enumerate(it):
 
 ```python
 from enhanced_granger_analysis.api import MultiTaskGrangerBuilder
-from enhanced_granger_analysis.core.lag_config import LagConfiguration
+from enhanced_granger_analysis.preprocessing.lag import LagEngineConfig
 import pandas as pd
 
 df = pd.read_csv("data.csv", index_col=0)
@@ -730,7 +955,12 @@ df = pd.read_csv("data.csv", index_col=0)
 output = (MultiTaskGrangerBuilder(backend="pytorch")
     .data(df)
     .variables(causes=["x1", "x2"], effects=["y"], tested_causes=["x1", "x2"])
-    .lag(LagConfiguration(max_lag=5))
+    .lag(
+        lag_config=LagEngineConfig(
+            max_lag=5,
+            use_lag_zero=False,
+        ),
+    )
     .model({"epochs": 30})
     .relations([
         {

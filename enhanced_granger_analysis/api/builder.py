@@ -94,7 +94,10 @@ class MultiTaskGrangerBuilder:
                             "params": {},
                         },
             "relations": RelationConstraintsSpec(),
-            "lag_config": None, "lag_selector": None,
+            "lag_config": None,
+            "lag_selector": None,
+            "lag_selector_params": {},
+            "lag_n_jobs": 1,
             "stationarity_transformer": StationarityTransformer(),
             "missing_value_imputer": None, 
             "sampling_strategy": None, "backend_sample_fraction": 1.0, "backend_max_samples": None,
@@ -221,19 +224,42 @@ class MultiTaskGrangerBuilder:
         self._invalidate_from("components")
         return self
 
-    def lag(self, lag_config=None, lag_selector=None):
-        """
-        Configure the lag structure for the analysis.
+    def lag(
+        self,
+        lag_config=None,
+        lag_selector=None,
+        *,
+        lag_selector_params: Optional[Mapping[str, Any]] = None,
+        n_jobs: int = 1,
+    ) -> "MultiTaskGrangerBuilder":
+        """Store lag specifications for later resolution by the pipeline.
 
-        Args:
-            lag_config: Configuration for the lag structure
-            lag_selector: Selector for the lag structure
-
-        Returns:
-            Self for method chaining
+        Calling this method replaces the complete stored lag setup.
+        No selector or engine is constructed here.
         """
-        self._fit_kwargs["lag_config"] = lag_config
-        self._fit_kwargs["lag_selector"] = lag_selector
+        if (
+            lag_selector_params is not None
+            and not isinstance(lag_selector_params, Mapping)
+        ):
+            raise TypeError(
+                "lag_selector_params must be a mapping or None."
+            )
+
+        self._fit_kwargs.update({
+            "lag_config": copy.deepcopy(lag_config),
+            "lag_selector": (
+                copy.deepcopy(dict(lag_selector))
+                if isinstance(lag_selector, Mapping)
+                else lag_selector
+            ),
+            "lag_selector_params": (
+                {}
+                if lag_selector_params is None
+                else copy.deepcopy(dict(lag_selector_params))
+            ),
+            "lag_n_jobs": n_jobs,
+        })
+
         self._invalidate_from("data")
         return self
 
@@ -409,7 +435,19 @@ class MultiTaskGrangerBuilder:
             if key not in config:
                 continue
             value = config[key]
-            if key == "initializer" and isinstance(value, Mapping):
+            if key in {
+                "lag_config",
+                "lag_selector",
+                "lag_selector_params",
+            }:
+                value = (
+                    copy.deepcopy(dict(value))
+                    if isinstance(value, Mapping)
+                    else copy.deepcopy(value)
+                    if key == "lag_config"
+                    else value
+                )
+            elif key == "initializer" and isinstance(value, Mapping):
                 value = copy.deepcopy(dict(value))
             elif key == "regularizer_spec":
                 value = parse_regularizer_spec(value)
@@ -527,13 +565,33 @@ class MultiTaskGrangerBuilder:
             if self._data is None:
                 raise DataValidationError("Builder requires data(...) before prepare_data()")
             
-            prepared_data = run_prepare_data(data=self._data, **{
-                k: v for k, v in self._fit_kwargs.items()
-                if k in {"causes", "effects", "tested_causes", "lag_config", "lag_selector",
-                         "stationarity_transformer", "missing_value_imputer", "schema_policy",
-                         "backend_sample_fraction", "backend_max_samples", "random_state",
-                         "sampling_strategy", "x_scaler", "y_scaler"}
-            })
+            preparation_keys = {
+                "causes",
+                "effects",
+                "tested_causes",
+                "lag_config",
+                "lag_selector",
+                "lag_selector_params",
+                "lag_n_jobs",
+                "stationarity_transformer",
+                "missing_value_imputer",
+                "schema_policy",
+                "backend_sample_fraction",
+                "backend_max_samples",
+                "random_state",
+                "sampling_strategy",
+                "x_scaler",
+                "y_scaler",
+            }
+
+            prepared_data = run_prepare_data(
+                data=self._data,
+                **{
+                    key: value
+                    for key, value in self._fit_kwargs.items()
+                    if key in preparation_keys
+                },
+            )
         self._invalidate_from("components")
         self._prepared_data = prepared_data
         self._results = GrangerAnalysisResults(

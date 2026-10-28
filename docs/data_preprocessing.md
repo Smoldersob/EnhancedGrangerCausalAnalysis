@@ -1,6 +1,6 @@
 # Data Preprocessing
 
-This document explains the components in the `preprocessing` folder, their purpose,
+This document explains the components in the `preprocessing` frolder, their purpose,
 and the data contract passed to the backend model.
 
 ## Module Scope
@@ -123,8 +123,6 @@ they can be chained or executed one at a time.
 import numpy as np
 import pandas as pd
 
-from enhanced_granger_analysis.core.lag_config import LagConfiguration
-from enhanced_granger_analysis.preprocessing.lag import ICLagSelector
 from enhanced_granger_analysis.preprocessing.missing import ConstantImputer
 from enhanced_granger_analysis.preprocessing.pipeline import (
     DataPreparer,
@@ -147,7 +145,18 @@ second.loc[5, "context"] = np.nan
 config = DataPreparationConfig(
     schema_policy="error",
     lag_config=LagConfiguration(max_lag=3, use_lag_zero=False),
-    lag_selector=ICLagSelector(max_lag=3, use_bic=True),
+    lag_config={
+        "use_lag_zero": False,
+        "aggregation": "union",
+    },
+    lag_selector={
+        "type": "ic",
+        "params": {
+            "max_lag": 3,
+            "use_bic": True,
+        },
+    },
+    lag_n_jobs=-1,
     stationarity_transformer=StationarityTransformer(
         max_differencing_order=1,
         test_name="adf",
@@ -180,8 +189,16 @@ prepared = preparer.prepared_data_
 print(preparer.get_report())
 print(preparer.get_feature_map())
 print(prepared.X_scaled.shape, prepared.y_scaled.shape)
-print(prepared.cause_slices["cause"])
+print(prepared.cause_slices.get("cause"))
+print(prepared.lag_result.removed_predictors)
 ```
+
+Automatic lag preparation can remove an input entirely, so a requested
+cause is not guaranteed to appear in `cause_slices`.
+
+The complete lag-preparation result is available through
+`prepared.lag_result`, including per-dataset selections, aggregated lags,
+the final specification, the feature layout, and removed predictors.
 
 `prepared_data_` can be passed directly to the analysis builder. This avoids
 running preprocessing a second time:
@@ -209,82 +226,128 @@ Changing preprocessing settings on the builder does not transform an already
 supplied `PreparedData` object. Rebuild prepared data explicitly when changing
 the preprocessing workflow.
 
-## Lag-and-Scaling Example
+## Lag-and-scaling example
 
-The example below shows the lag and scaling contracts explicitly. For the complete
-standard order, including schema alignment, imputation, redundancy removal, and
-workload reduction, use `prepare_data(...)` or
-`MultiTaskGrangerBuilder.prepare_data()`.
+The lag engine returns unscaled arrays and a structured feature layout.
+Scaling is a separate operation.
 
 ```python
-import pandas as pd
-
-from enhanced_granger_analysis.core.lag_config import LagConfiguration
-from enhanced_granger_analysis.preprocessing.stationarity import StationarityTransformer
-from enhanced_granger_analysis.preprocessing.lag import LagEngine, ICLagSelector
-from enhanced_granger_analysis.preprocessing.scaling import StandardScaler
-
-# One or more datasets with the same schema
-df = pd.read_csv("example/PID_no_fault.csv", sep=";", index_col=0)
-data_list = [df]
-
-# Stage 1: stationarity
-stationarity = StationarityTransformer(
-    max_differencing_order=3,
-    test_name="adf",
-    alpha=0.05,
-    dropna=True,
+from enhanced_granger_analysis.preprocessing.lag import (
+    LagEngine,
+    LagEngineConfig,
+    resolve_lag_selector,
 )
-data_stationary = stationarity.fit_transform(data_list)
+from enhanced_granger_analysis.preprocessing.scaling import (
+    StandardScaler,
+)
 
-# Stage 2: lag preparation
-selector = ICLagSelector(max_lag=12, use_bic=True)
+selector = resolve_lag_selector(
+    "ic",
+    max_lag=12,
+    use_bic=True,
+)
+
 engine = LagEngine(
-    config=LagConfiguration(max_lag=12, use_lag_zero=False),
+    config=LagEngineConfig(
+        use_lag_zero=False,
+        aggregation="union",
+    ),
     selector=selector,
-)
-X_raw, y_raw, block_boundaries, feature_lags = engine.prepare(
-    data_stationary,
-    causes=["x1", "x2"],
-    effects=["x1", "x2"],
+    n_jobs=-1,
 )
 
-# Stage 3: scaling
+lagged = engine.prepare(
+    data_stationary,
+    predictors=["x1", "x2"],
+    outputs=["x1", "x2"],
+)
+
 x_scaler = StandardScaler()
 y_scaler = StandardScaler()
-X_scaled = x_scaler.fit_transform(X_raw)
-y_scaled = y_scaler.fit_transform(y_raw)
+
+if lagged.X.shape:[1]
+    X_scaled = x_scaler.fit_transform(lagged.X)
+else:
+    X_scaled = lagged.X.copy()
+
+y_scaled = y_scaler.fit_transform(lagged.y)
 
 print(X_scaled.shape, y_scaled.shape)
-print(block_boundaries)
-print(feature_lags)
+print(lagged.feature_predictorss)
+print(lagged.feature_lags)
+print(lagged.block_boundaries)
+print(lagged.removed_predictors)
 ```
-`LagEngine.prepare()` returns four values:
-- `X_scaled`: scaled features.
-- `y_scaled`: scaled targets.
-- `block_boundaries`: block boundaries with `n_causes+1` elment (`block_boundaries[i]:block_boundaries[i + 1]` is the feature block for the
-`i`-th cause). The higher-level `PreparedData` exposes the preferred named
-mapping, `cause_slices`, so callers do not need to depend on cause order.
-- `feature_lags`: one-dimensional integer array with one entry per input
-column. Each entry records the actual lag represented by that column.
+
+`data_stationary` is a nonempty sequence of numeric DataFrames prepared by
+the preceding stages.
+
+Direct engine callers supply a resolved selector and a `LagEngineConfig`.
+The staged pipeline performs this resolution automatically.
+
+### Structured lag-preparation result
+
+`LagEngine.prepare()` returns `LagPreparationResult`.
+
+| Field | Meaning |
+| --- | --- |
+| `X`, `y` | Unscaled lagged inputs and aligned targets |
+| `output_names` | Target and mask-row order |
+| `active_predictors` | Ordered inputs contributing features |
+| `removed_predictors` | Inputs with no final lags |
+| `feature_predictors` | Variable name for each feature column |
+| `feature_lags` | Actual lag for each feature column |
+| `block_boundaries` | Endpoints of active predictor blocks |
+| `mask` | Output-by-feature coefficient eligibility |
+| `final_lags` | Validated specification after overrides |
+| `aggregated_lags` | Baseline before manual overrides |
+| `selection_results` | Per-dataset lag specifications |
+| `segments` | Source-dataset and prepared-row correspondence |
+
+`PreparedData.lag_result` retains this result before subsequent scaling
+and workload reduction. Its arrays and segment slices are not updated
+by later pipeline sampling.
+
+Use `PreparedData.sample_indices` to map sampled rows back to the
+pre-sampling prepared rows.
+
+Selector-specific diagnostic attributes belong to the selector instances.
+The current engine result stores per-dataset lag specifications, not
+complete diagnostic objects from its selector copies.
+
+### Feature-lag metadata
+
+The layout provides:
+
+- `output_names`: output order used by `y` and mask rows;
+- `predictor_names`: active predictor order;
+- `feature_predictors`: variable name associated with each feature column;
+- `feature_lags`: actual lag associated with each feature column;
+- `block_boundaries`: endpoints of active predictor blocks;
+- `mask`: allowed coefficients in output-by-feature order.
 
 For example:
 
 ```python
-cause_slices = {
-    "x1": slice(0, 2),
-    "x2": slice(2, 5),
-}
-
-feature_lags = [1, 2, 0, 1, 2]
+feature_predictors = ("x1", "x1", "x2", "x2")
+feature_lags = (1, 3, 0, 2)
+block_boundaries = (0, 2, 4)
 ```
-Here `x1` contributes lags 1 and 2, while `x2` contributes lags 0, 1, and 2.
-Lag values are not positions within the cause block.
 
-The preparation pipeline stores a copy as `PreparedData.feature_lags`.
-Lag-dependent regularizer preparation uses this metadata directly.
+The first input contributes lags 1 and 3. The second contributes lags 0
+and 2. Blocks are contiguous in the feature matrix even when their lag
+values are not consecutive.
 
-Code unpacking the former three-value return must be updated.
+`feature_lags` must match the exact column order of both raw and scaled
+inputs. Scaling changes values, not the feature layout.
+
+The pipeline copies this metadata into `PreparedData.feature_lags`,
+`cause_slices`, and `base_mask`. It also stores the complete engine result
+as `PreparedData.lag_result`.
+
+Externally supplied prepared data must contain consistent feature
+metadata. Changing builder lag settings does not regenerate an externally
+supplied `PreparedData` object.
 
 ### Feature-lag metadata
 
@@ -334,49 +397,84 @@ Helper functions:
 - `static_kpss_order(...)`
 - `apply_differencing(series, order)`
 
-## Lag Processing
+## Lag processing
 
-Files:
+Lag selection is an auxiliary preprocessing heuristic. It proposes a
+restricted set of lagged inputs for the final model, which may apply
+different constraints, regularization, or architecture.
 
-- `preprocessing/lag/lag_engine.py`
-- `preprocessing/lag/lag_selectors.py`
+The available families are:
 
-Main class: `LagEngine`
+- Per-pair selection: `ICLagSelector` and `CVLagSelector`.
+- Common-order selection: `CommonOrderICLagSelector` and
+  `CommonOrderCVLagSelector`.
+- Historical VAR selection: `NaiveVARLagSelector`, also available as
+  `VARLagSelector` and registered as `"var"`.
 
-Purpose:
+Selectors return explicit `LagSpec` dictionaries. They do not construct
+final data arrays or coefficient masks.
 
-- Determine lag structure,
-- build lagged feature matrix,
-- align targets with lagged predictors.
+See [Lag Selection](lag_selection.md) for candidate construction,
+scoring, pruning, numerical policies, historical compatibility, and
+interpretation.
 
-Key `LagEngine` capabilities:
+### Engine workflow
 
-- Operates on a list of DataFrames. Each segment is lagged independently before
-  the resulting samples are combined; lags do not cross segment boundaries.
-- Supports fixed-lag mode (no selector) and auto-lag mode (with selector).
-- Supports overrides from config (`custom_lags`, `custom_pair_lags`).
-- Parallel processing with joblib (`n_jobs`).
-- Returns `block_boundaries` for positional predictor-block mapping.
-- Stores selection artifacts (`mask_`, `selection_result_`).
+`LagEngine.prepare()`:
 
-Public lag selectors:
+1. Validates input schema and configuration.
+2. Runs selection independently for each dataset, optionally in parallel.
+3. Validates each selector result.
+4. Aggregates selections using union, intersection, or selection frequency.
+5. Applies predictor-wide and pair-specific replacements.
+6. Validates the final specification.
+7. Identifies active and removed predictors.
+8. Constructs one ordered set of feature identities.
+9. Prepares each dataset independently and concatenates the aligned rows.
 
-- `ICLagSelector` (AIC/BIC)
-- `CVLagSelector` (cross-validation)
-- `VARLagSelector` (VAR-based)
+Without a selector, the baseline contains positive lags `1..max_lag`.
+Cross-variable lag 0 is additionally included when enabled.
 
-Shared interface:
+History never crosses dataset boundaries.
 
-- `BaseLagSelector.fit(X) -> LagSelectionResult`
+### Explicit lag sets
 
-`LagSelectionResult` includes, among others:
+Override values contain actual lags:
 
-- `ar_lags`
-- `pred_lag_matrix`
-- `max_lags_per_pred`
-- `col_offsets` in `LagSelectionResult` (the start offset of each predictor
-  block used by the lag-selection mask)
-- `mask`
+- `(1, 3)` means exactly lags 1 and 3.
+- `(0,)` means contemporaneous-only inclusion.
+- `()` excludes the predictor.
+
+Pair-specific overrides take precedence over predictor-wide overrides.
+Own-variable lag 0 is forbidden.
+
+### Feature construction
+
+Each predictor contributes the union of its final lag sets across outputs.
+
+Feature order follows requested predictor order and ascending lag order.
+An output-by-feature mask determines which shared columns each equation
+may use.
+
+Inputs with no final lags for any output are omitted from the feature
+matrix and reported as removed predictors. This decision occurs after
+manual overrides.
+
+A variable removed as a predictor can remain an output.
+
+### Numerical policies
+
+IC/CV auxiliary fitting permits rank-deficient designs. Candidate
+admissibility depends on the scoring method.
+
+The engine does not interpret numerical rank deficiency as a reason to
+remove a signal or restore a negative causality result.
+
+Historical VAR can still fail when none of its candidate orders produces
+valid information criteria.
+
+The engine represents zero-feature arrays, but scaling and backend
+execution must separately support them.
 
 ## Scaling
 
@@ -481,8 +579,11 @@ This keeps preprocessing consistent across all supported backends (`pytorch`, `t
 - `x_scaler` and `y_scaler`: fitted scaling objects.
 - `stationarity_transformer`: transformer used before lag construction,
   or `None`.
-- `lag_engine`: lag-construction object and its selection artifacts.
-- `base_mask`: configured lag-activity mask.
+- `lag_engine`: engine used to prepare the data;
+- `lag_result`: structured lag-preparation result, including the final
+  specification, layout, selection provenance, and segment metadata;
+- `base_mask`: final output-by-feature lag-activity mask.
+
 
 `raw` means unscaled at this preparation stage. It does not necessarily mean
 the original input values: stationarity transformation may already have been
@@ -509,9 +610,20 @@ Omitted or empty role lists are currently interpreted as defaults during
 initial role assignment. They should not be used to request an intentionally
 empty role.
 
-If cleanup leaves no effective causes, effects, or tested causes, lag
-preparation raises `DataValidationError`. This is an inability to execute the
-requested analysis, not a statistical conclusion that causality is absent.
+An empty effective role before lag selection remains an input/preparation
+error under the staged pipeline's role checks.
+
+Lag selection can subsequently exclude a predictor from every output.
+The pipeline then removes it from effective `causes` and, where applicable,
+effective `tested_causes`. Requested roles remain unchanged.
+
+The variable is not removed from effective `effects` merely because it is
+unused as an input.
+
+If all tested causes are excluded, execution must skip restricted-model
+fits and retain the preparation context for restoration. If all predictors
+are excluded, the backend and scaling path must support a zero-feature
+design; engine support alone does not guarantee end-to-end execution.
 
 ### Named input blocks
 
@@ -558,15 +670,44 @@ offsets internally.
 
 ### Removed variables
 
-`removed_variables` maps names to `RemovedVariable` objects containing:
+`removed_variables` maps names to `RemovedVariable` records:
 
 - `name`;
-- `reason`: `"constant"` or `"duplicate"`;
+- `reason`: `"constant"`, `"duplicate"`, or `"no_selected_lags"`;
 - `removed_roles`;
-- `retained_variable`, when the variable duplicates a retained signal.
+- `retained_variable`, where applicable.
 
-Constant and duplicate diagnostics operate on the combined input segments.
+Constant and duplicate diagnostics operate on combined input segments.
 Duplicate detection uses exact equality rather than a correlation threshold.
+
+`"no_selected_lags"` records exclusion from the predictor role after
+aggregation and manual overrides. Its removed roles include `"cause"`
+and, when applicable, `"tested_cause"`, but not `"effect"`.
+
+Lag removal metadata is merged with earlier redundancy records.
+
+### Restoration of requested results
+
+The result layer restores evaluated matrices to requested output and
+tested-cause axes.
+
+Lag-excluded tested causes receive the metric's `removed_signal_value`:
+typically `1` for p-values, `0` for test statistics and signs, and `NaN`
+when the metric does not define a restoration value.
+
+Duplicate effects copy available representative rows. Duplicate tested
+causes copy available representative columns, including a representative
+restored as neutral after lag exclusion.
+
+A representative that was never a requested/evaluated tested cause has
+no result column to copy.
+
+Restoration does not remove output rows for variables excluded only as
+inputs. It does not fit additional models or perform an independent test
+of the excluded relationships.
+
+Inspect removal metadata to distinguish computed results from
+structurally restored entries.
 
 ### How removal metadata is used by results
 
@@ -601,6 +742,13 @@ and does not encode segment identifiers or timestamps.
 Sampling updates raw arrays, already available scaled arrays, and
 `sample_indices` using the same selected positions.
 
+`prepared.lag_result.segments` preserves the connection between prepared
+rows and the source datasets. Each segment records its original row count,
+dropped leading history, prepared-row slice, and retained DataFrame index.
+
+These slices describe the combined arrays before workload reduction.
+After sampling, use `sample_indices` to map retained observations back
+to those pre-sampling positions.
 ## When to Use Which Component
 
 - `StationarityTransformer`: when data shows trend/non-stationarity and you need stable Granger inference.

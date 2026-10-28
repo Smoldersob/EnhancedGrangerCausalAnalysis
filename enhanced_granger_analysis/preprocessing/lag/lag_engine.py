@@ -1,1018 +1,860 @@
-import warnings
-from typing import (
-    Dict,
-    List,
-    Optional,
-    Tuple,
-)
+"""Lag selection, aggregation, overrides, and feature preparation."""
+
+from __future__ import annotations
 
 import numpy as np
 import pandas as pd
+
+from collections.abc import Mapping, Sequence
+from copy import deepcopy
+from numbers import Integral
+from collections.abc import Sequence
 from joblib import Parallel, delayed
-from .lag_selectors import BaseLagSelector, LagSelectionResult
-from ...core.exceptions import (
-    LagConfigurationError,
-    LagPreparationError,
+
+from ...core.lag_config import (
+    LagEngineConfig,
+    LagFeature,
+    LagPreparationResult,
+    LagSegmentInfo,
+    LagSpec,
 )
-from ...core.lag_config import LagConfiguration
-from ...utilities.validation import (
-    validate_columns_present,
-    validate_dataframe_list,
-    validate_lag_bounds,
-)
+from .registry import LagSelector
 
-# ===========================================================================
-# Free functions for parallel workers
-# ===========================================================================
 
-def _create_lagged_data(
+def _select_one_dataset(
+    selector: LagSelector,
     data: pd.DataFrame,
-    min_lags: np.ndarray,
-    max_lags: np.ndarray,
-) -> np.ndarray:
-    """
-    Generate a lagged feature matrix from a single DataFrame.
+    outputs: tuple[str, ...],
+    dataset_index: int,
+) -> LagSpec:
+    """Run selection using an independent selector instance."""
+    try:
+        local_selector = deepcopy(selector)
+    except Exception as exc:
+        raise TypeError(
+            "Lag selectors must support deepcopy so each dataset can "
+            "be processed using an independent instance."
+        ) from exc
 
-    Each column of *data* is expanded into a contiguous block of delayed
-    copies (``min_lags[k]`` … ``max_lags[k]``).  Rows with insufficient
-    history (the first ``max(max_lags)`` rows) are dropped.
+    try:
+        return local_selector.fit(data, outputs=outputs)
+    except Exception as exc:
+        raise RuntimeError(
+            f"Lag selection failed for dataset {dataset_index}. Exception: {exc}"
+        ) from exc
 
-    Parameters
-    ----------
-    data : pd.DataFrame
-        Input time series (rows = time steps, columns = variables).
-    min_lags : ndarray of shape (n_columns,)
-        Minimum lag to include for each variable.
-    max_lags : ndarray of shape (n_columns,)
-        Maximum lag to include for each variable.
-
-    Returns
-    -------
-    X : ndarray of shape (n_usable_rows, sum(max_lags - min_lags + 1))
-        Lagged feature matrix.  The caller is responsible for aligning
-        target values by dropping the first ``max(max_lags)`` rows.
-    """
-    # Use float dtype because shifted leading rows are filled with NaN.
-    x = np.asarray(data.values, dtype=np.float64)
-    min_lags = np.asarray(min_lags, dtype=int)
-    max_lags = np.asarray(max_lags, dtype=int)
-
-    validate_lag_bounds(min_lags, max_lags)
-
-    n_rows, n_vars = x.shape
-    total_cols = int((max_lags - min_lags + 1).sum())
-    X = np.empty((n_rows, total_cols), dtype=x.dtype)
-    
-    block_boundaries = np.concatenate(
-        [[0], (max_lags - min_lags + 1).cumsum(dtype=int)]
-    )
-
-    for k in range(n_vars):
-        cols = []
-        for lag in range(int(min_lags[k]), int(max_lags[k]) + 1):
-            col = np.roll(x[:, k], lag)
-            if lag > 0:
-                col[:lag] = np.nan
-            elif lag == 0:
-                pass  # no shift needed
-            cols.append(col)
-        X[:, block_boundaries[k]:block_boundaries[k + 1]] = np.column_stack(cols)
-
-    # Drop rows that contain NaNs (first max(max_lags) rows)
-    valid_start = int(max_lags.max())
-    return X[valid_start:]
-
-
-def _drop_unusable_targets(
-    data: pd.DataFrame,
-    effects: List[str],
-    n_drop: int,
-) -> np.ndarray:
-    """
-    Align target variables with lagged features by dropping leading rows.
-
-    Parameters
-    ----------
-    data : pd.DataFrame
-        Full (un-lagged) time series.
-    effects : list of str
-        Column names used as targets.
-    n_drop : int
-        Number of leading rows to remove (equal to ``max(max_lags)``).
-
-    Returns
-    -------
-    y : ndarray of shape (n_usable_rows, n_effects)
-    """
-    return data[effects].iloc[n_drop:].values
-
-
-def _prepare_single_segment(
-    data: pd.DataFrame,
-    predictors: List[str],
-    effects: List[str],
-    min_lags: np.ndarray,
-    max_lags: np.ndarray,
-) -> Tuple[np.ndarray, np.ndarray]:
-    """Build and align the lagged data for one independent segment."""
-    n_drop = int(max_lags.max())
-    X = _create_lagged_data(
-        data.loc[:, predictors],
-        min_lags,
-        max_lags,
-    )
-    y = _drop_unusable_targets(data, effects, n_drop)
-
-    if X.shape[0] != y.shape[0]:
-        raise LagPreparationError(
-            "Lagged predictors and targets are not aligned within a segment."
-        )
-    return X, y
-
-
-def _fit_selector_on_single(
-    selector: BaseLagSelector,
-    data: pd.DataFrame,
-) -> LagSelectionResult:
-    """
-    Fit a lag selector on a single DataFrame (worker function).
-
-    Parameters
-    ----------
-    selector : BaseLagSelector
-        A lag selector instance (IC, CV, or VAR-based).
-    data : pd.DataFrame
-        Multivariate time series.
-
-    Returns
-    -------
-    result : LagSelectionResult
-    """
-    return selector.fit(data.values)
-
-
-# ===========================================================================
-# LagEngine
-# ===========================================================================
 
 class LagEngine:
-    """
-    Orchestrates lag selection and lagged-feature construction for
-    multivariate causal time series models.
+    """Prepare a common lagged feature layout across independent datasets.
 
-    The engine follows a three-phase workflow:
+    Parallelism is used only for per-dataset selection. Aggregation,
+    overrides, layout construction, and feature preparation are sequential.
 
-    1. **Determine lag structure** — either use a fixed ``max_lag`` from
-       ``config`` or delegate to a :class:`BaseLagSelector` that returns
-       per-pair optimal lags.
-    2. **Apply overrides** — ``custom_lags`` and ``custom_pair_lags`` from
-       ``config`` modify the lag structure after selection.
-    3. **Build features** — each DataFrame in *data_list* is expanded into
-       lagged columns in parallel, then all are concatenated.
-
-    Parameters
-    ----------
-    config : LagConfiguration, default LagConfiguration()
-        Lag structure configuration (max_lag, zero-lag flag, overrides).
-    selector : BaseLagSelector or None, default None
-        If provided, lags are determined automatically by this selector.
-        If ``None``, the fixed ``config.max_lag`` is used uniformly.
-    n_jobs : int, default -1
-        Number of parallel jobs for feature construction and selector
-        fitting.  ``-1`` means all available cores.
-
-    Attributes
-    ----------
-    lag_order_ : dict
-        Fitted lag order with keys ``"min"`` and ``"max"``, each an
-        ndarray of shape ``(n_features,)``.
-    selection_result_ : LagSelectionResult or None
-        The raw selector output (available only when a selector was used).
-    mask_ : ndarray or None
-        Binary weight mask from the selector (shape depends on selector).
-
-    Examples
-    --------
-    Fixed uniform lag (no selector):
-
-    >>> cfg = LagConfiguration(max_lag=6, use_lag_zero=True)
-    >>> engine = LagEngine(config=cfg)
-    >>> X, y, block_boundaries = engine.prepare(data_list, effects=["y1"])
-
-    Automatic per-pair selection:
-
-    >>> from lag_selectors import ICLagSelector
-    >>> sel = ICLagSelector(max_lag=20, use_bic=True, n_jobs=-1)
-    >>> cfg = LagConfiguration(max_lag=20, custom_lags={"x3": (2, 8)})
-    >>> engine = LagEngine(config=cfg, selector=sel)
-    >>> X, y, block_boundaries = engine.prepare(data_list, effects=["y1", "y2"])
+    The engine does not mutate source DataFrames or the supplied selector.
     """
 
     def __init__(
         self,
-        config: LagConfiguration = LagConfiguration(),
-        selector: Optional[BaseLagSelector] = None,
-        n_jobs: int = -1,
+        config: LagEngineConfig | None = None,
+        selector: LagSelector | None = None,
+        *,
+        n_jobs: int = 1,
     ) -> None:
-        self.config = config
+        self.config = deepcopy(
+            config if config is not None else LagEngineConfig()
+        )
         self.selector = selector
-        self.n_jobs = n_jobs
 
-        # Fitted state
-        self.lag_order_: Optional[Dict[str, np.ndarray]] = None
-        self.selection_result_: Optional[LagSelectionResult] = None
-        self.mask_: Optional[np.ndarray] = None
-        self._aggregated_ar_lags: Optional[np.ndarray] = None
+        if (
+            isinstance(n_jobs, bool)
+            or not isinstance(n_jobs, Integral)
+            or n_jobs == 0
+        ):
+            raise ValueError("n_jobs must be a non-zero integer.")
 
-    # ------------------------------------------------------------------
-    # Public API
-    # ------------------------------------------------------------------
+        self.n_jobs = int(n_jobs)
 
+        if selector is not None and not callable(
+            getattr(selector, "fit", None)
+        ):
+            raise TypeError(
+                "selector must provide a callable fit method."
+            )
+
+        self._validate_config()
+    
     def prepare(
         self,
-        data_list: List[pd.DataFrame],
-        effects: List[str],
-        causes: Optional[List[str]] = None,
-    ) -> Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+        datasets: Sequence[pd.DataFrame],
+        *,
+        outputs: Sequence[str],
+        predictors: Sequence[str] | None = None,
+    ) -> LagPreparationResult:
         """
-        Determine lags, build lagged features, and align targets.
+        Select, merge, override, and prepare lagged data.
 
-        Parameters
-        ----------
-        data_list : list of pd.DataFrame
-            One or more DataFrames sharing the same column schema.  Each
-            DataFrame represents an independent segment (e.g. different
-            training runs or time windows).
-        effects : list of str
-            Column names that serve as prediction targets.
+        All datasets must have the same named column schema, although
+        their column order and number of rows may differ.
 
-        Returns
-        -------
-        X : ndarray of shape (n_total_usable, n_lagged_features)
-            Concatenated lagged feature matrix.
-        y : ndarray of shape (n_total_usable, n_effects)
-            Concatenated aligned target matrix.
-        block_boundaries : ndarray of shape (n_predictors + 1,)
-            Boundaries of consecutive predictor blocks.
-            Predictor k occupies columns
-            X[:, block_boundaries[k]:block_boundaries[k + 1]].
-            The final boundary equals X.shape[1].
-        feature_lags : ndarray of shape (n_lagged_features,)
-            Actual lag of each feature column, in the same order as X.
-            Predictor blocks contain consecutive lags from their
-            minimum to maximum lag, inclusive.
+        Predictor eligibility is controlled by predictors. Output columns
+        are supplied to selectors even if they are not eligible final
+        predictors, because selectors require their response values.
+
         Raises
         ------
         ValueError
-            If ``data_list`` is empty or DataFrames have inconsistent
-            columns.
+            If input data, lag specifications, or overrides are invalid,
+            or any dataset has no usable rows after final lagging.
         """
-
-        # Validation
-        data_list, columns = validate_dataframe_list(
-            data_list,
-            require_same_columns=True,
-            require_same_shape=False,
-            allow_superset_columns=False,
-            copy=False,
+        frames, output_names, predictor_names, selection_names = (
+            self._validate_inputs(
+                datasets,
+                outputs=outputs,
+                predictors=predictors,
+            )
         )
 
-        predictors = list(columns) if causes is None else list(causes)
-        targets = list(effects)
-
-        if not predictors:
-            raise LagPreparationError("No predictor variables were selected.")
-        if not targets:
-            raise LagPreparationError("No effect variables were selected.")
-
-        if len(predictors) != len(set(predictors)):
-            raise LagPreparationError("causes contains duplicated names.")
-        if len(targets) != len(set(targets)):
-            raise LagPreparationError("effects contains duplicated names.")
-
-        validate_columns_present(columns, predictors, context="causes")
-        validate_columns_present(columns, targets, context="effects")
-
-        n_vars = len(columns)
-
-        # Determine lag structure
-        min_lags, max_lags = self._determine_lags(data_list, columns, effects)
-
-        # Apply overrides from config
-        min_lags, max_lags = self._apply_overrides(
-            min_lags, max_lags, columns, effects
+        predictor_overrides, pair_overrides = (
+            self._validate_overrides(
+                output_names,
+                predictor_names,
+            )
         )
-
-        # Ensure mask has correct dimensions
-        total_cols = int((max_lags - min_lags + 1).sum())
-        if self.mask_ is None:
-            # No selector and no overrides triggered rebuild.
-            # Build mask properly to handle autoregression with use_lag_zero.
-            pred_lag_matrix = np.zeros((n_vars, n_vars), dtype=int)
-            for i in range(n_vars):
-                for j in range(n_vars):
-                    pred_lag_matrix[i, j] = max_lags[j]
-            self.mask_ = self._rebuild_mask(pred_lag_matrix, min_lags, max_lags)
-        elif self.mask_.shape[1] != total_cols:
-            # Safety net: if dimensions still disagree after overrides
-            # (should not happen with correct _apply_overrides, but
-            # guards against future regressions).
-            warnings.warn(
-                f"Mask has {self.mask_.shape[1]} columns but expected {total_cols} "
-                "after applying overrides. Rebuilding mask with correct dimensions.",
-                stacklevel=2,
-            )
-            if self._pred_lag_matrix is not None:
-                self.mask_ = self._rebuild_mask(
-                    self._pred_lag_matrix, min_lags, max_lags
-                )
-            else:
-                self.mask_ = np.ones((n_vars, total_cols), dtype=int)
-
-        # Store fitted lag order
-        full_boundaries = np.concatenate(
-            [[0], (max_lags - min_lags + 1).cumsum(dtype=int)]
-        )
-
-        predictor_indices = [columns.index(name) for name in predictors]
-        target_indices = [columns.index(name) for name in targets]
-
-        feature_indices = np.concatenate([
-            np.arange(
-                full_boundaries[index],
-                full_boundaries[index + 1],
-                dtype=int,
-            )
-            for index in predictor_indices
-        ])
-
-        # The existing mask construction uses the complete variable schema.
-        # Retain only selected output rows and predictor columns.
-        self.mask_ = np.asarray(self.mask_)[
-            np.ix_(target_indices, feature_indices)
-        ].copy()
-
-        predictor_min_lags = min_lags[predictor_indices]
-        predictor_max_lags = max_lags[predictor_indices]
-
-        self.lag_order_ = {
-            "min": predictor_min_lags.copy(),
-            "max": predictor_max_lags.copy(),
-        }
-        self.lag_order_ = {"min": min_lags.copy(), "max": max_lags.copy()}
-
-        self.predictor_names_ = tuple(predictors)
-        self.output_names_ = tuple(targets)
-
-        # Keep each segment independent while building both sides of the
-        # supervised sample.  Only after dropping the unavailable history
-        # from each segment are the resulting rows concatenated.
-        segment_results = Parallel(n_jobs=self.n_jobs)(
-            delayed(_prepare_single_segment)(
-                dataframe,
-                predictors,
-                targets,
-                predictor_min_lags,
-                predictor_max_lags,
-            )
-            for dataframe in data_list
-        )
-        non_empty_segments = [
-            (segment_X, segment_y)
-            for segment_X, segment_y in segment_results
-            if segment_X.shape[0] > 0
-        ]
-        if non_empty_segments:
-            X = np.concatenate(
-                [segment_X for segment_X, _ in non_empty_segments],
-                axis=0,
-            )
-            y = np.concatenate(
-                [segment_y for _, segment_y in non_empty_segments],
-                axis=0,
-            )
-        else:
-            X = np.empty((0, int((predictor_max_lags - predictor_min_lags + 1).sum())))
-            y = np.empty((0, len(targets)))
-
-        
-        # Metadata follows the exact predictor and lag order used
-        # by _create_lagged_data().
-        block_widths = (
-            predictor_max_lags - predictor_min_lags + 1
-        ).astype(np.int64)
-
-        block_boundaries = np.concatenate(
-            [
-                np.zeros(1, dtype=np.int64),
-                np.cumsum(block_widths, dtype=np.int64),
-            ]
-        )
-
-        feature_lags = np.concatenate(
-            [
-                np.arange(
-                    int(min_lag),
-                    int(max_lag) + 1,
-                    dtype=np.int64,
-                )
-                for min_lag, max_lag in zip(
-                    predictor_min_lags,
-                    predictor_max_lags,
-                )
-            ]
-        )
-
-        if (
-            int(block_boundaries[-1]) != X.shape[1]
-            or feature_lags.shape != (X.shape[1],)
-        ):
-            raise LagPreparationError(
-                "Lag metadata does not match the prepared feature matrix."
-            )
-
-        return X, y, block_boundaries, feature_lags
-
-    def _determine_lags(
-        self,
-        data_list: List[pd.DataFrame],
-        columns: List[str],
-        effects: List[str],
-    ) -> Tuple[np.ndarray, np.ndarray]:
-        """
-        Compute min/max lag arrays depending on whether a selector is set.
-
-        When a selector is used, the aggregated ``pred_lag_matrix`` is
-        stored in ``self._pred_lag_matrix`` for later use by
-        :meth:`_rebuild_mask`.
-
-        Returns
-        -------
-        min_lags : ndarray of shape (n_vars,)
-        max_lags : ndarray of shape (n_vars,)
-        """
-        n_vars = len(columns)
-
-        # Default min lags: 1 if lag_zero is off, 0 if lag_zero is on
-        if self.config.use_lag_zero:
-            min_lags = np.zeros(n_vars, dtype=int)
-        else:
-            min_lags = np.ones(n_vars, dtype=int)
-
-        self._pred_lag_matrix: Optional[np.ndarray] = None
 
         if self.selector is None:
-            max_lags = np.full(n_vars, self.config.max_lag, dtype=int)
-            return min_lags, max_lags
+            selection_results: tuple[LagSpec, ...] = ()
 
-        # Configure the selector with engine-level settings
-        if hasattr(self.selector, "max_lag") and self.selector.max_lag is None:
-            self.selector.max_lag = self.config.max_lag
-        if hasattr(self.selector, "min_lag"):
-            self.selector.min_lag = (self.config.use_lag_zero==False)*1
-        if hasattr(self.selector, "n_jobs"):
-            self.selector.n_jobs = self.n_jobs
-
-        # Set target indices on the selector
-        validate_columns_present(columns, effects, context="effects")
-        target_indices = [columns.index(e) for e in effects]
-        self.selector.target_indices = target_indices
-
-        # Fit selector on each DataFrame in parallel
-        results: List[LagSelectionResult] = Parallel(n_jobs=self.n_jobs)(
-            delayed(_fit_selector_on_single)(self.selector, df)
-            for df in data_list
-        )
-
-        # Aggregate across segments (take element-wise maximum)
-        self._aggregated_ar_lags = np.max(
-            [r.ar_lags for r in results], axis=0
-        ).astype(int)
-
-        if hasattr(results[0], "pred_lag_matrix"):
-            # Per-pair selector (IC / CV) — aggregate pred_lag_matrix
-            agg_pred_matrix = np.max(
-                [r.pred_lag_matrix for r in results], axis=0
+            aggregated = self._build_fixed_baseline(
+                output_names,
+                predictor_names,
             )
-            self._pred_lag_matrix = agg_pred_matrix.copy()
-            max_lags = agg_pred_matrix.max(axis=0).astype(int)
         else:
-            # Common-lag selector (VAR) — single scalar per predictor
-            max_lags = np.max(
-                [r.max_lags_per_pred for r in results], axis=0
-            ).astype(int)
-            # Build a uniform pred_lag_matrix for VAR case
-            self._pred_lag_matrix = np.full(
-                (n_vars, n_vars), int(max_lags.max()), dtype=int
+            selection_results = self._select_per_dataset(
+                frames,
+                output_names,
+                predictor_names,
+                selection_names,
             )
 
-        # Build initial mask (will be rebuilt after overrides)
-        self.mask_ = self._rebuild_mask(
-            self._pred_lag_matrix, min_lags, max_lags
-        )
-
-        # Preserve the selector baseline result as-is.
-        # It must not be overwritten by custom_lags/custom_pair_lags.
-        block_widths = (max_lags - min_lags + 1).astype(int)
-        col_offsets = np.zeros(len(block_widths), dtype=int)
-        if len(block_widths) > 1:
-            col_offsets[1:] = np.cumsum(block_widths[:-1], dtype=int)
-
-        self.selection_result_ = LagSelectionResult(
-            ar_lags=self._aggregated_ar_lags.copy(),
-            pred_lag_matrix=self._pred_lag_matrix.copy(),
-            max_lags_per_pred=max_lags.copy(),
-            col_offsets=col_offsets,
-            mask=self.mask_.copy(),
-        )
-
-        return min_lags, max_lags
-
-    def _apply_overrides(
-        self,
-        min_lags: np.ndarray,
-        max_lags: np.ndarray,
-        columns: List[str],
-        effects: List[str],
-    ) -> Tuple[np.ndarray, np.ndarray]:
-        """
-        Apply custom lag overrides on top of selector/fixed-lag results.
-
-        Rules implemented:
-        - selector output is the baseline,
-        - variable overrides resize predictor blocks and preserve overlap,
-        - when variable overrides expand blocks, new columns are filled with 1,
-        - pair overrides are local (target, predictor) edits,
-        - if pair overrides need larger blocks, extra columns are first added as 0,
-          then only the requested pair-range is set to 1.
-        """
-        has_custom_lags = bool(self.config.custom_lags)
-        has_custom_pairs = bool(self.config.custom_pair_lags)
-
-        if not has_custom_lags and not has_custom_pairs:
-            return min_lags, max_lags
-
-        min_lags = np.asarray(min_lags, dtype=int)
-        max_lags = np.asarray(max_lags, dtype=int)
-        old_min = min_lags.copy()
-        old_max = max_lags.copy()
-
-        col_to_idx = {name: i for i, name in enumerate(columns)}
-
-        if self.mask_ is None:
-            if self._pred_lag_matrix is not None:
-                self.mask_ = self._rebuild_mask(self._pred_lag_matrix, min_lags, max_lags)
-            else:
-                n_vars = len(columns)
-                total_cols = int((max_lags - min_lags + 1).sum())
-                self.mask_ = np.ones((n_vars, total_cols), dtype=int)
-
-        # 1) Variable overrides (custom_lags)
-        for name, lags in self.config.custom_lags.items():
-            if name not in col_to_idx:
-                warnings.warn(
-                    f"custom_lags key '{name}' not found in columns; skipping.",
-                    stacklevel=2,
-                )
-                continue
-
-            idx = col_to_idx[name]
-            if len(lags) == 1:
-                max_lags[idx] = int(lags[0])
-            elif len(lags) == 2:
-                min_lags[idx] = int(lags[0])
-                max_lags[idx] = int(lags[1])
-            else:
-                raise LagConfigurationError(
-                    f"custom_lags['{name}'] must have 1 (max_lag,) or "
-                    f"2 (min_lag, max_lag) elements, got {len(lags)}"
-                )
-
-        min_lags = np.minimum(min_lags, max_lags)
-
-        # Resize mask after variable overrides.
-        # Preserve overlap, fill newly created variable-range columns with 1.
-        self.mask_ = self._remap_mask(
-            self.mask_,
-            old_min=old_min,
-            old_max=old_max,
-            new_min=min_lags,
-            new_max=max_lags,
-            fill_new=1,
-            align="overlap",
-        )
-
-        var_min = min_lags.copy()
-        var_max = max_lags.copy()
-
-        # 2) Pair overrides (custom_pair_lags)
-        pair_overrides: List[Tuple[int, int, int, int]] = []
-        for (target_name, pred_name), lags in self.config.custom_pair_lags.items():
-            if target_name not in col_to_idx:
-                warnings.warn(
-                    f"custom_pair_lags target '{target_name}' not in columns; skipping.",
-                    stacklevel=2,
-                )
-                continue
-            if pred_name not in col_to_idx:
-                warnings.warn(
-                    f"custom_pair_lags predictor '{pred_name}' not in columns; skipping.",
-                    stacklevel=2,
-                )
-                continue
-
-            t_idx = col_to_idx[target_name]
-            p_idx = col_to_idx[pred_name]
-
-            if len(lags) == 1:
-                pair_min = int(min_lags[p_idx])
-                pair_max = int(lags[0])
-            elif len(lags) == 2:
-                pair_min = int(lags[0])
-                pair_max = int(lags[1])
-            else:
-                raise LagConfigurationError(
-                    f"custom_pair_lags[{(target_name, pred_name)!r}] must have 1 or 2 elements, got {len(lags)}"
-                )
-
-            if pair_max > max_lags[p_idx]:
-                max_lags[p_idx] = pair_max
-            if pair_min < min_lags[p_idx]:
-                min_lags[p_idx] = pair_min
-
-            pair_overrides.append((t_idx, p_idx, pair_min, pair_max))
-
-        min_lags = np.minimum(min_lags, max_lags)
-
-        # If pair overrides expanded global ranges, add those new columns as zeros.
-        self.mask_ = self._remap_mask(
-            self.mask_,
-            old_min=var_min,
-            old_max=var_max,
-            new_min=min_lags,
-            new_max=max_lags,
-            fill_new=0,
-            align="left",
-        )
-
-        # Local pair edits: zero block then set only requested lag window to 1.
-        if pair_overrides:
-            block_boundaries = np.concatenate(
-                [[0], (max_lags - min_lags + 1).cumsum(dtype=int)]
+            aggregated = self._aggregate_selections(
+                selection_results,
+                output_names,
+                predictor_names,
             )
 
-            for t_idx, p_idx, pair_min, pair_max in pair_overrides:
-                block_start = int(block_boundaries[p_idx])
-                block_end = int(block_boundaries[p_idx + 1])
-                block_len = block_end - block_start
+        final_lags = self._apply_overrides(
+            aggregated,
+            predictor_overrides,
+            pair_overrides,
+        )
 
-                if t_idx >= self.mask_.shape[0]:
-                    continue
+        final_lags = self._validate_lag_spec(
+            final_lags,
+            output_names,
+            predictor_names,
+            context="Final lag specification",
+        )
 
-                self.mask_[t_idx, block_start:block_end] = 0
+        # This ordered description is the common source for data columns,
+        # mask columns, and feature metadata.
+        feature_pairs = self._build_feature_pairs(
+            final_lags,
+            output_names,
+            predictor_names,
+        )
 
-                global_min = int(min_lags[p_idx])
-                rel_start = max(0, pair_min - global_min)
-                rel_end = min(block_len, pair_max - global_min + 1)
-                self.mask_[t_idx, block_start + rel_start:block_start + rel_end] = 1
+        feature_predictors = tuple(
+            predictor
+            for predictor, _ in feature_pairs
+        )
 
-                if self._pred_lag_matrix is not None:
-                    self._pred_lag_matrix[t_idx, p_idx] = max(
-                        int(self._pred_lag_matrix[t_idx, p_idx]),
-                        int(pair_max),
-                    )
+        feature_lags = np.asarray(
+            [lag for _, lag in feature_pairs],
+            dtype=np.int64,
+        )
 
-        return min_lags, max_lags
+        active_set = set(feature_predictors)
+
+        active_predictors = tuple(
+            predictor
+            for predictor in predictor_names
+            if predictor in active_set
+        )
+
+        removed_predictors = tuple(
+            predictor
+            for predictor in predictor_names
+            if predictor not in active_set
+        )
+
+        block_boundaries = self._build_block_boundaries(
+            feature_pairs,
+            active_predictors,
+        )
+
+        mask = self._build_mask(
+            final_lags,
+            output_names,
+            feature_pairs,
+        )
+
+        X_parts: list[np.ndarray] = []
+        y_parts: list[np.ndarray] = []
+        segments: list[LagSegmentInfo] = []
+
+        row_offset = 0
+
+        for dataset_index, frame in enumerate(frames):
+            segment_X, segment_y, n_drop = self._prepare_segment(
+                frame,
+                output_names=output_names,
+                feature_pairs=feature_pairs,
+                dataset_index=dataset_index,
+            )
+
+            n_prepared = segment_y.shape[0]
+
+            X_parts.append(segment_X)
+            y_parts.append(segment_y)
+
+            segments.append(
+                LagSegmentInfo(
+                    dataset_index=dataset_index,
+                    original_row_count=len(frame),
+                    dropped_leading_rows=n_drop,
+                    prepared_row_slice=slice(
+                        row_offset,
+                        row_offset + n_prepared,
+                    ),
+                    retained_index=frame.index[n_drop:].copy(),
+                )
+            )
+
+            row_offset += n_prepared
+
+        X = np.concatenate(X_parts, axis=0)
+        y = np.concatenate(y_parts, axis=0)
+
+        return LagPreparationResult(
+            X=X,
+            y=y,
+            output_names=output_names,
+            active_predictors=active_predictors,
+            removed_predictors=removed_predictors,
+            feature_predictors=feature_predictors,
+            feature_lags=feature_lags,
+            block_boundaries=block_boundaries,
+            mask=mask,
+            final_lags=final_lags,
+            aggregated_lags=deepcopy(aggregated),
+            selection_results=selection_results,
+            segments=tuple(segments),
+        )
+
+    def _validate_config(self) -> None:
+        cfg = self.config
+
+        if (
+            isinstance(cfg.max_lag, bool)
+            or not isinstance(cfg.max_lag, Integral)
+            or cfg.max_lag < 0
+        ):
+            raise ValueError(
+                "config.max_lag must be a non-negative integer."
+            )
+
+        if not isinstance(cfg.use_lag_zero, bool):
+            raise TypeError("config.use_lag_zero must be a bool.")
+
+        if cfg.aggregation not in {
+            "union",
+            "intersection",
+            "frequency",
+        }:
+            raise ValueError(
+                "aggregation must be 'union', 'intersection', "
+                "or 'frequency'."
+            )
+
+        frequency = cfg.selection_frequency
+
+        if isinstance(frequency, bool):
+            raise ValueError(
+                "selection_frequency must be in (0, 1]."
+            )
+
+        try:
+            frequency = float(frequency)
+        except (TypeError, ValueError) as exc:
+            raise ValueError(
+                "selection_frequency must be numeric."
+            ) from exc
+
+        if not np.isfinite(frequency) or not 0 < frequency <= 1:
+            raise ValueError(
+                "selection_frequency must be in (0, 1]."
+            )
+
+        if not isinstance(cfg.predictor_overrides, Mapping):
+            raise TypeError("predictor_overrides must be a mapping.")
+
+        if not isinstance(cfg.pair_overrides, Mapping):
+            raise TypeError("pair_overrides must be a mapping.")
 
     @staticmethod
-    def _remap_mask(
-        mask: np.ndarray,
-        old_min: np.ndarray,
-        old_max: np.ndarray,
-        new_min: np.ndarray,
-        new_max: np.ndarray,
-        fill_new: int,
-        align: str = "overlap",
-    ) -> np.ndarray:
-        """Remap predictor blocks while preserving overlap values."""
-        n_targets = int(mask.shape[0])
-        
-        old_boundaries = np.concatenate([
-            [0],
-            (old_max - old_min + 1).cumsum(dtype=int),
-        ])
-        new_boundaries = np.concatenate([
-            [0],
-            (new_max - new_min + 1).cumsum(dtype=int),
-        ])
-
-        out = np.full(
-            (n_targets, int(new_boundaries[-1])),
-            int(fill_new),
-            dtype=mask.dtype,
-        )
-
-        for j in range(len(old_min)):
-            old_start = int(old_boundaries[j])
-            new_start = int(new_boundaries[j])
-
-            old_w = int(old_max[j] - old_min[j] + 1)
-            new_w = int(new_max[j] - new_min[j] + 1)
-            copy_w = min(old_w, new_w)
-            if copy_w <= 0:
-                continue
-
-            if align == "right":
-                old_slice = slice(old_start + (old_w - copy_w), old_start + old_w)
-                new_slice = slice(new_start + (new_w - copy_w), new_start + new_w)
-            elif align == "left":
-                old_slice = slice(old_start, old_start + copy_w)
-                new_slice = slice(new_start, new_start + copy_w)
-            else:
-                overlap_lo = max(int(old_min[j]), int(new_min[j]))
-                overlap_hi = min(int(old_max[j]), int(new_max[j]))
-                if overlap_hi < overlap_lo:
-                    continue
-                old_rel_lo = overlap_lo - int(old_min[j])
-                old_rel_hi = overlap_hi - int(old_min[j]) + 1
-                new_rel_lo = overlap_lo - int(new_min[j])
-                new_rel_hi = overlap_hi - int(new_min[j]) + 1
-                old_slice = slice(old_start + old_rel_lo, old_start + old_rel_hi)
-                new_slice = slice(new_start + new_rel_lo, new_start + new_rel_hi)
-
-            out[:, new_slice] = mask[:, old_slice]
-
-        return out
-
-    def _rebuild_mask(
-        self,
-        pred_lag_matrix: np.ndarray,
-        min_lags: np.ndarray,
-        max_lags: np.ndarray,
-    ) -> np.ndarray:
-        """
-        Build (or rebuild) the binary weight mask from scratch.
-
-        This is the single source of truth for mask construction inside
-        ``LagEngine``.  It is called both after initial selector fitting
-        and after any override that changes ``min_lags`` / ``max_lags``.
-
-        The mask layout matches the lagged design matrix produced by
-        :func:`_create_lagged_data`: for each predictor *j* there is a
-        contiguous block of ``max_lags[j] - min_lags[j] + 1`` columns
-        ordered from ``min_lags[j]`` to ``max_lags[j]``.
-
-        When ``use_lag_zero`` is True (and ``min_lags[j] == 0``), the first
-        column of each block is the lag0 (current) value. For autoregression
-        (i == j), this column is set to 0 (forbidden); for external predictors
-        (i != j), it is set to 1 (allowed).
-
-        Parameters
-        ----------
-        pred_lag_matrix : ndarray of shape (n_targets, n_features)
-            Maximum lag per (target, predictor) pair.  ``plm[i, j] = L``
-            means predictor *j* is used for target *i* with lags up to
-            *L*.  ``plm[i, j] = 0`` means predictor *j* is unused for
-            target *i*.
-        min_lags : ndarray of shape (n_features,)
-            Per-predictor minimum lag (inclusive).
-        max_lags : ndarray of shape (n_features,)
-            Per-predictor maximum lag (inclusive).
-
-        Returns
-        -------
-        mask : ndarray of shape (n_targets, total_cols)
-            Binary mask.  ``mask[i, k] = 1`` means the corresponding
-            weight may be optimised; ``0`` means it must stay zero.
-        """
-        min_lags = np.asarray(min_lags, dtype=int)
-        max_lags = np.asarray(max_lags, dtype=int)
-        pred_lag_matrix = np.asarray(pred_lag_matrix, dtype=int)
-
-        n_targets, n_features = pred_lag_matrix.shape
-        block_widths = max_lags - min_lags + 1
-        total_cols = int(block_widths.sum())
-        block_boundaries = np.concatenate([
-            [0],
-            block_widths.cumsum(dtype=int),
-        ])
-
-        mask = np.zeros((n_targets, total_cols), dtype=int)
-
-        for j in range(n_features):
-            blk_start = int(block_boundaries[j])
-            blk_width = int(block_widths[j])
-            mn_j = int(min_lags[j])
-
-            for i in range(n_targets):
-                L = int(pred_lag_matrix[i, j])
-                if L <= 0:
-                    continue
-
-                # When use_lag_zero is True and min_lags[j] == 0,
-                # the block starts with lag0 (current value).
-                # For autoregression (i == j), lag0 must be forbidden.
-                # For external predictors (i != j), lag0 is allowed.
-                if self.config.use_lag_zero and mn_j == 0:
-                    # First column in block is lag0
-                    if i != j:
-                        # External predictor: allow lag0
-                        mask[i, blk_start] = 1
-                    # For i == j (autoregression), lag0 stays 0 (forbidden)
-
-                    # Enable lagged terms (lag1, lag2, ..., lagL)
-                    lag_lo = max(1, mn_j)  # start from lag1 at minimum
-                    lag_hi = min(L, int(max_lags[j]))
-                    
-                    if lag_hi >= lag_lo:
-                        rel_lo = lag_lo - mn_j
-                        rel_hi = lag_hi - mn_j + 1
-                        mask[i, blk_start + rel_lo : blk_start + rel_hi] = 1
-                else:
-                    # Standard case (use_lag_zero=False or min_lags[j] > 0)
-                    lag_lo = mn_j
-                    lag_hi = min(L, int(max_lags[j]))
-
-                    if lag_hi < lag_lo:
-                        continue
-
-                    rel_lo = lag_lo - mn_j
-                    rel_hi = lag_hi - mn_j + 1
-                    mask[i, blk_start + rel_lo : blk_start + rel_hi] = 1
-
-        return mask
-
-    def _build_features(
-        self,
-        data_list: List[pd.DataFrame],
-        min_lags: np.ndarray,
-        max_lags: np.ndarray,
-    ) -> np.ndarray:
-        """
-        Build the lagged design matrix from all segments in parallel.
-
-        Parameters
-        ----------
-        data_list : list of pd.DataFrame
-        min_lags, max_lags : ndarray of shape (n_vars,)
-
-        Returns
-        -------
-        X : ndarray of shape (n_total_usable, n_lagged_features)
-        """
-        results = Parallel(n_jobs=self.n_jobs)(
-            delayed(_create_lagged_data)(df, min_lags, max_lags)
-            for df in data_list
-        )
-
-        non_empty = [r for r in results if r.size > 0]
-        if non_empty:
-            return np.concatenate(non_empty, axis=0)
-        return np.empty((0, 0))
-
-    def _align_targets(
-        self,
-        data_list: List[pd.DataFrame],
-        effects: List[str],
-        n_drop: int,
-    ) -> np.ndarray:
-        """
-        Drop leading rows from targets so they align with lagged features.
-
-        Parameters
-        ----------
-        data_list : list of pd.DataFrame
-        effects : list of str
-        n_drop : int
-            Number of rows to remove (= max(max_lags)).
-
-        Returns
-        -------
-        y : ndarray of shape (n_total_usable, n_effects)
-        """
-        results = Parallel(n_jobs=self.n_jobs)(
-            delayed(_drop_unusable_targets)(df, effects, n_drop)
-            for df in data_list
-        )
-
-        non_empty = [r for r in results if r.size > 0]
-        if non_empty:
-            return np.concatenate(non_empty, axis=0)
-        return np.empty((0, 0))
-
-    def get_feature_names(
-        self,
-        columns: List[str],
-    ) -> List[str]:
-        """
-        Generate human-readable names for the lagged feature columns.
-
-        Requires that :meth:`prepare` has been called first.
-
-        Parameters
-        ----------
-        columns : list of str
-            Original column names.
-
-        Returns
-        -------
-        names : list of str
-            Names like ``"temperature_lag3"``, ``"pressure_lag0"``, etc.
-
-        Raises
-        ------
-        RuntimeError
-            If called before :meth:`prepare`.
-        """
-        if self.lag_order_ is None:
-            raise LagPreparationError(
-                "get_feature_names() requires a fitted engine; "
-                "call prepare() first."
+    def _validate_names(
+        values: Sequence[str],
+        *,
+        label: str,
+    ) -> tuple[str, ...]:
+        if isinstance(values, str):
+            raise TypeError(
+                f"{label} must be a sequence of names, not a string."
             )
 
-        min_lags = self.lag_order_["min"]
-        max_lags = self.lag_order_["max"]
-        names: List[str] = []
-        for k, col in enumerate(columns):
-            for lag in range(int(min_lags[k]), int(max_lags[k]) + 1):
-                names.append(f"{col}_lag{lag}")
+        names = tuple(values)
+
+        if not names:
+            raise ValueError(f"{label} must not be empty.")
+
+        if not all(isinstance(name, str) for name in names):
+            raise TypeError(
+                f"All {label} entries must be strings."
+            )
+
+        if len(names) != len(set(names)):
+            raise ValueError(f"{label} contains duplicated names.")
+
         return names
 
-    def summary(self, columns: List[str]) -> pd.DataFrame:
-        """
-        Return a summary table of the fitted lag structure.
+    def _validate_inputs(
+        self,
+        datasets: Sequence[pd.DataFrame],
+        *,
+        outputs: Sequence[str],
+        predictors: Sequence[str] | None,
+    ) -> tuple[
+        tuple[pd.DataFrame, ...],
+        tuple[str, ...],
+        tuple[str, ...],
+        tuple[str, ...],
+    ]:
+        if isinstance(datasets, pd.DataFrame):
+            raise TypeError(
+                "datasets must be a sequence of DataFrames, "
+                "not one DataFrame."
+            )
 
-        Parameters
-        ----------
-        columns : list of str
-            Original column names.
+        frames = tuple(datasets)
 
-        Returns
-        -------
-        summary : pd.DataFrame
-            Table with columns ``variable``, ``min_lag``, ``max_lag``,
-            ``n_features``.
+        if not frames:
+            raise ValueError("datasets must not be empty.")
 
-        Raises
-        ------
-        RuntimeError
-            If called before :meth:`prepare`.
-        """
-        if self.lag_order_ is None:
-            raise LagPreparationError("Call prepare() first.")
+        schema: tuple[str, ...] | None = None
 
-        rows = []
-        for k, col in enumerate(columns):
-            mn = int(self.lag_order_["min"][k])
-            mx = int(self.lag_order_["max"][k])
-            rows.append({
-                "variable": col,
-                "min_lag": mn,
-                "max_lag": mx,
-                "n_features": mx - mn + 1,
-            })
-        return pd.DataFrame(rows)
+        for index, frame in enumerate(frames):
+            if not isinstance(frame, pd.DataFrame):
+                raise TypeError(
+                    f"Dataset {index} is not a DataFrame."
+                )
 
+            if frame.empty:
+                raise ValueError(f"Dataset {index} is empty.")
 
-# ===========================================================================
-# Usage test
-# ===========================================================================
+            if not frame.columns.is_unique:
+                raise ValueError(
+                    f"Dataset {index} has duplicated column names."
+                )
 
-if __name__ == "__main__":
-    # Example 1: fixed uniform lag
-    np.random.seed(42)
-    n, d = 200, 4
-    col_names = ["y1", "x1", "x2", "x3"]
-    df1 = pd.DataFrame(np.random.randn(n, d), columns=col_names)
-    df2 = pd.DataFrame(np.random.randn(n, d), columns=col_names)
+            if not all(
+                isinstance(name, str)
+                for name in frame.columns
+            ):
+                raise TypeError(
+                    f"Dataset {index} column names must be strings."
+                )
 
-    cfg = LagConfiguration(
-        max_lag=5,
-        use_lag_zero=True,
-        custom_lags={"x3": (0, 8)},
-        custom_pair_lags={("y1", "x3"): (1, 3)},
-    )
-    engine = LagEngine(config=cfg, n_jobs=1)
-    X, y, col_idx = engine.prepare([df1, df2], effects=["y1"])
+            if schema is None:
+                schema = tuple(frame.columns)
+            elif set(frame.columns) != set(schema):
+                raise ValueError(
+                    f"Dataset {index} has a different column schema."
+                )
 
-    print("=== Fixed lag mode ===")
-    print(f"X shape:  {X.shape}")
-    print(f"y shape:  {y.shape}")
-    print(f"col_idx:  {col_idx}")
-    print(engine.summary(col_names))
-    print(engine.mask_)
-    print()
+        assert schema is not None
 
-    # Example 2: with a selector
-    from .lag_selectors import ICLagSelector
-    sel = ICLagSelector(max_lag=20, use_bic=True, n_jobs=-1)
-    cfg2 = LagConfiguration(
-        max_lag=20,
-        custom_lags={"x3": (2, 10)},
-        custom_pair_lags={("y1", "x2"): (1, 6)},
-    )
-    engine2 = LagEngine(config=cfg2, selector=sel, n_jobs=-1)
-    X2, y2, ci2 = engine2.prepare([df1, df2], effects=["y1"])
-    print(engine2.summary(col_names))
-    print(engine2.mask_)
-    print(engine2.selection_result_)
+        output_names = self._validate_names(
+            outputs,
+            label="outputs",
+        )
+        predictor_names = self._validate_names(
+            schema if predictors is None else predictors,
+            label="predictors",
+        )
+
+        available = set(schema)
+
+        for label, names in (
+            ("outputs", output_names),
+            ("predictors", predictor_names),
+        ):
+            missing = set(names).difference(available)
+            if missing:
+                raise ValueError(
+                    f"Unknown {label}: {sorted(missing)!r}."
+                )
+
+        # Preserve requested predictor order, then append target-only
+        # columns required by selection.
+        selection_names = tuple(
+            dict.fromkeys((*predictor_names, *output_names))
+        )
+
+        for index, frame in enumerate(frames):
+            try:
+                values = frame.loc[
+                    :, list(selection_names)
+                ].to_numpy(dtype=float)
+            except (TypeError, ValueError) as exc:
+                raise ValueError(
+                    f"Dataset {index} contains non-numeric values "
+                    "in selected columns."
+                ) from exc
+
+            if not np.isfinite(values).all():
+                raise ValueError(
+                    f"Dataset {index} contains non-finite values "
+                    "in selected columns."
+                )
+
+        return (
+            frames,
+            output_names,
+            predictor_names,
+            selection_names,
+        )
+
+    def _normalize_lags(
+        self,
+        value: tuple[int, ...],
+        *,
+        context: str,
+    ) -> tuple[int, ...]:
+        """Validate canonical explicit lag tuples without filling gaps."""
+        if not isinstance(value, tuple):
+            raise TypeError(
+                f"{context} must be a tuple of explicit lag values."
+            )
+
+        if any(
+            isinstance(lag, bool)
+            or not isinstance(lag, Integral)
+            or lag < 0
+            for lag in value
+        ):
+            raise ValueError(
+                f"{context} must contain non-negative integers."
+            )
+
+        normalized = tuple(int(lag) for lag in value)
+
+        if normalized != tuple(sorted(set(normalized))):
+            raise ValueError(
+                f"{context} must be sorted and contain no duplicates."
+            )
+
+        if not self.config.use_lag_zero and 0 in normalized:
+            raise ValueError(
+                f"{context} includes lag 0, but use_lag_zero is False."
+            )
+
+        return normalized
+
+    def _validate_lag_spec(
+        self,
+        specification: LagSpec,
+        outputs: tuple[str, ...],
+        predictors: tuple[str, ...],
+        *,
+        context: str,
+    ) -> LagSpec:
+        """Validate a complete specification and restore canonical order."""
+        if not isinstance(specification, Mapping):
+            raise TypeError(f"{context} must be a mapping.")
+
+        if set(specification) != set(outputs):
+            raise ValueError(
+                f"{context} must contain exactly the requested outputs."
+            )
+
+        normalized: LagSpec = {}
+
+        for output in outputs:
+            row = specification[output]
+
+            if not isinstance(row, Mapping):
+                raise TypeError(
+                    f"{context}[{output!r}] must be a mapping."
+                )
+
+            if set(row) != set(predictors):
+                raise ValueError(
+                    f"{context}[{output!r}] must contain exactly "
+                    "the expected predictors."
+                )
+
+            normalized[output] = {}
+
+            for predictor in predictors:
+                lags = self._normalize_lags(
+                    row[predictor],
+                    context=f"{context}[{output!r}][{predictor!r}]",
+                )
+
+                if output == predictor and 0 in lags:
+                    raise ValueError(
+                        f"{context} contains forbidden own-variable "
+                        f"lag 0 for {output!r}."
+                    )
+
+                normalized[output][predictor] = lags
+
+        return normalized
+
+    def _validate_overrides(
+        self,
+        outputs: tuple[str, ...],
+        predictors: tuple[str, ...],
+    ) -> tuple[
+        dict[str, tuple[int, ...]],
+        dict[str, dict[str, tuple[int, ...]]],
+    ]:
+        predictor_overrides: dict[str, tuple[int, ...]] = {}
+        pair_overrides: dict[
+            str,
+            dict[str, tuple[int, ...]],
+        ] = {}
+
+        for predictor, value in (
+            self.config.predictor_overrides.items()
+        ):
+            if predictor not in predictors:
+                raise ValueError(
+                    f"Override references unknown predictor "
+                    f"{predictor!r}."
+                )
+
+            predictor_overrides[predictor] = self._normalize_lags(
+                value,
+                context=f"predictor_overrides[{predictor!r}]",
+            )
+
+        for output, row in self.config.pair_overrides.items():
+            if output not in outputs:
+                raise ValueError(
+                    f"Override references unknown output {output!r}."
+                )
+
+            if not isinstance(row, Mapping):
+                raise TypeError(
+                    f"pair_overrides[{output!r}] must be a mapping."
+                )
+
+            pair_overrides[output] = {}
+
+            for predictor, value in row.items():
+                if predictor not in predictors:
+                    raise ValueError(
+                        f"Override references unknown predictor "
+                        f"{predictor!r}."
+                    )
+
+                lags = self._normalize_lags(
+                    value,
+                    context=(
+                        f"pair_overrides[{output!r}]"
+                        f"[{predictor!r}]"
+                    ),
+                )
+
+                if output == predictor and 0 in lags:
+                    raise ValueError(
+                        "Pair override explicitly requests forbidden "
+                        f"own-variable lag 0 for {output!r}."
+                    )
+
+                pair_overrides[output][predictor] = lags
+
+        return predictor_overrides, pair_overrides
+
+    def _build_fixed_baseline(
+        self,
+        outputs: tuple[str, ...],
+        predictors: tuple[str, ...],
+    ) -> LagSpec:
+        positive_lags = tuple(
+            range(1, int(self.config.max_lag) + 1)
+        )
+
+        return {
+            output: {
+                predictor: (
+                    (0,) + positive_lags
+                    if (
+                        self.config.use_lag_zero
+                        and output != predictor
+                    )
+                    else positive_lags
+                )
+                for predictor in predictors
+            }
+            for output in outputs
+        }
+
+    def _select_per_dataset(
+        self,
+        frames: tuple[pd.DataFrame, ...],
+        outputs: tuple[str, ...],
+        predictors: tuple[str, ...],
+        selection_names: tuple[str, ...],
+    ) -> tuple[LagSpec, ...]:
+        assert self.selector is not None
+
+        raw_results = Parallel(n_jobs=self.n_jobs)(
+            delayed(_select_one_dataset)(
+                self.selector,
+                frame.loc[:, list(selection_names)].copy(),
+                outputs,
+                dataset_index,
+            )
+            for dataset_index, frame in enumerate(frames)
+        )
+
+        normalized_results: list[LagSpec] = []
+
+        for index, raw_result in enumerate(raw_results):
+            validated = self._validate_lag_spec(
+                raw_result,
+                outputs,
+                selection_names,
+                context=f"Selector result for dataset {index}",
+            )
+
+            # Selector output includes target-only columns, but these
+            # are not necessarily eligible final predictors.
+            normalized_results.append(
+                {
+                    output: {
+                        predictor: validated[output][predictor]
+                        for predictor in predictors
+                    }
+                    for output in outputs
+                }
+            )
+
+        return tuple(normalized_results)
+
+    def _aggregate_selections(
+        self,
+        results: tuple[LagSpec, ...],
+        outputs: tuple[str, ...],
+        predictors: tuple[str, ...],
+    ) -> LagSpec:
+        if not results:
+            raise ValueError(
+                "Cannot aggregate an empty collection of selections."
+            )
+
+        aggregated: LagSpec = {
+            output: {} for output in outputs
+        }
+
+        for output in outputs:
+            for predictor in predictors:
+                lag_sets = [
+                    set(result[output][predictor])
+                    for result in results
+                ]
+
+                if self.config.aggregation == "union":
+                    merged = set().union(*lag_sets)
+
+                elif self.config.aggregation == "intersection":
+                    merged = lag_sets[0].intersection(
+                        *lag_sets[1:]
+                    )
+
+                else:
+                    candidates = set().union(*lag_sets)
+                    threshold = float(
+                        self.config.selection_frequency
+                    )
+
+                    merged = {
+                        lag
+                        for lag in candidates
+                        if (
+                            sum(lag in lags for lags in lag_sets)
+                            / len(lag_sets)
+                        ) >= threshold
+                    }
+
+                aggregated[output][predictor] = tuple(
+                    sorted(merged)
+                )
+
+        return aggregated
+
+    @staticmethod
+    def _apply_overrides(
+        baseline: LagSpec,
+        predictor_overrides: dict[str, tuple[int, ...]],
+        pair_overrides: dict[
+            str,
+            dict[str, tuple[int, ...]],
+        ],
+    ) -> LagSpec:
+        final = deepcopy(baseline)
+
+        # Predictor-wide replacement, with the self-lag-0 exception.
+        for predictor, lags in predictor_overrides.items():
+            for output in final:
+                final[output][predictor] = (
+                    tuple(lag for lag in lags if lag != 0)
+                    if output == predictor
+                    else lags
+                )
+
+        # More specific pair replacements take precedence.
+        for output, row in pair_overrides.items():
+            for predictor, lags in row.items():
+                final[output][predictor] = lags
+
+        return final
+
+    @staticmethod
+    def _build_feature_pairs(
+        specification: LagSpec,
+        outputs: tuple[str, ...],
+        predictors: tuple[str, ...],
+    ) -> tuple[LagFeature, ...]:
+        """Build unique feature identities in deterministic column order."""
+        return tuple(
+            (predictor, lag)
+            for predictor in predictors
+            for lag in sorted(
+                {
+                    lag
+                    for output in outputs
+                    for lag in specification[output][predictor]
+                }
+            )
+        )
+
+    @staticmethod
+    def _build_block_boundaries(
+        feature_pairs: tuple[LagFeature, ...],
+        active_predictors: tuple[str, ...],
+    ) -> np.ndarray:
+        """Build endpoints for the ordered active-predictor blocks."""
+        widths = {
+            predictor: 0
+            for predictor in active_predictors
+        }
+
+        for predictor, _ in feature_pairs:
+            widths[predictor] += 1
+
+        block_widths = np.asarray(
+            [
+                widths[predictor]
+                for predictor in active_predictors
+            ],
+            dtype=np.int64,
+        )
+
+        return np.concatenate(
+            (
+                np.zeros(1, dtype=np.int64),
+                np.cumsum(block_widths, dtype=np.int64),
+            )
+        )
+
+    @staticmethod
+    def _build_mask(
+        specification: LagSpec,
+        outputs: tuple[str, ...],
+        feature_pairs: tuple[LagFeature, ...],
+    ) -> np.ndarray:
+        """Build the output-by-feature mask for the exact feature order."""
+        feature_indices = {
+            feature: column
+            for column, feature in enumerate(feature_pairs)
+        }
+
+        mask = np.zeros(
+            (len(outputs), len(feature_pairs)),
+            dtype=bool,
+        )
+
+        for output_index, output in enumerate(outputs):
+            for predictor, lags in specification[output].items():
+                for lag in lags:
+                    column = feature_indices[(predictor, lag)]
+                    mask[output_index, column] = True
+
+        return mask
+    
+    @staticmethod
+    def _prepare_segment(
+        frame: pd.DataFrame,
+        *,
+        output_names: tuple[str, ...],
+        feature_pairs: tuple[LagFeature, ...],
+        dataset_index: int,
+    ) -> tuple[np.ndarray, np.ndarray, int]:
+        """Prepare aligned data for one independent dataset."""
+        n_drop = max(
+            (lag for _, lag in feature_pairs),
+            default=0,
+        )
+
+        n_source_rows = len(frame)
+
+        if n_source_rows <= n_drop:
+            raise ValueError(
+                f"Dataset {dataset_index} has {n_source_rows} rows, "
+                f"but the final specification requires dropping {n_drop}. "
+                "No usable observations remain."
+            )
+
+        n_prepared_rows = n_source_rows - n_drop
+
+        X = np.empty(
+            (n_prepared_rows, len(feature_pairs)),
+            dtype=float,
+        )
+
+        # Read each active source variable once.
+        predictor_names = tuple(
+            dict.fromkeys(
+                predictor
+                for predictor, _ in feature_pairs
+            )
+        )
+
+        predictor_values = {
+            predictor: frame[predictor].to_numpy(dtype=float)
+            for predictor in predictor_names
+        }
+
+        for column, (predictor, lag) in enumerate(feature_pairs):
+            X[:, column] = predictor_values[predictor][
+                n_drop - lag : n_source_rows - lag
+            ]
+
+        y = frame.loc[
+            :, list(output_names)
+        ].to_numpy(dtype=float)[n_drop:].copy()
+
+        return X, y, n_drop

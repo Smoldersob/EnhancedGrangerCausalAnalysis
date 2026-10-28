@@ -7,14 +7,41 @@
     "causes": ["x1", "x2", "u1", "e1", "u", "f1", "f2"],
     "effects": ["x1", "x2", "u1", "e1", "u", "f1", "f2"],
     "tested_causes": ["x1", "x2", "u1", "e1", "u", "f1", "f2"],
-    "lag_config": {"max_lag": 6, "use_lag_zero": false},
-    "lag_selector": {"type": "ic", "use_bic": true},
+    "lag_config": {
+      "max_lag": 6, 
+      "use_lag_zero": false, 
+      "aggregation": "union",
+      "pair_overrides": {
+        "x1": {"x2": [1,2,3]}
+        
+      },
+      "lag_n_jobs": -1
+    },
+    "lag_selector": {
+      "type": "ic",
+      "params": {
+        "max_lag": 6,
+        "use_bic": true,
+        "use_lag_zero": false,
+        "min_ar_order": 1,
+        "delta_min_ic": 2.0,
+        "prune_lags": true,
+        "delta_prune_ic": 2.0,
+        "addition_reference": "initial",
+        "prune_reference": "current"
+      }
+    },
     "relations": "group_relations_user.json",
     "callbacks": [
-      {"type": "early_stopping", "patience": 10, "min_delta": 0.0, "restore_best_weights": true, "monitor": "loss"},
-      {"type": "reduce_lr", "factor": 0.5, "patience": 5, "min_lr": 1e-06, "monitor": "loss"}
+      {
+        "type": "early_stopping", 
+        "params": {"patience": 10, "min_delta": 0.0, "restore_best_weights": true, "monitor": "loss"}
+      },
+      {
+        "type": "reduce_lr", "params": {"factor": 0.5, "patience": 5, "min_lr": 1e-06, "monitor": "loss"}
+      }
     ],
-    "initializer": "OLSInitializer",
+    "initializer": "olsinitializer",
     "model_config": {"learning_rate": 0.001, "batch_size": 32, "epochs": 50}
   },
   "sweep": {

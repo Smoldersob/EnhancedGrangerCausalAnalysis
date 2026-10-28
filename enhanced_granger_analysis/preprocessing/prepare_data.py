@@ -2,9 +2,10 @@ import numpy as np
 import pandas as pd
 
 from dataclasses import dataclass, field
-from typing import Any, Literal, Optional, Sequence
+from typing import Any, Literal, Mapping, Optional, Sequence
 
-from .lag import LagEngine, LagConfiguration, BaseLagSelector
+from .lag.lag_engine import LagEngine
+from ..core.lag_config import LagPreparationResult
 from .stationarity import StationarityTransformer
 from .missing import BaseImputer
 from .sampling import NoSampling, SamplingStrategy
@@ -25,7 +26,7 @@ class RemovedVariable:
 	"""Description of a variable removed during redundant-column cleanup."""
 
 	name: str
-	reason: Literal["constant", "duplicate"]
+	reason: Literal["constant", "duplicate","no_selected_lags"]
 	removed_roles: tuple[Literal["effect", "cause", "tested_cause"], ...]
 	retained_variable: Optional[str] = None
 
@@ -57,6 +58,7 @@ class PreparedData:
 	sample_indices: np.ndarray = field(
 		default_factory=lambda: np.empty(0, dtype=int)
 	)
+	lag_result: Optional[LagPreparationResult] = None
 
 	@property
 	def causes(self) -> tuple[str, ...]:
@@ -109,8 +111,10 @@ def prepare_data(
 		causes: Optional[Sequence[str]] = None,
 		tested_causes: Optional[Sequence[str]] = None,
 		effects: Optional[Sequence[str]] = None,
-		lag_config: Optional[LagConfiguration] = None,
-		lag_selector: Optional[BaseLagSelector] = None,
+		lag_config: Any = None,
+		lag_selector: Any = None,
+		lag_selector_params: Optional[Mapping[str, Any]] = None,
+		lag_n_jobs: int = 1,
 		stationarity_transformer: Optional[StationarityTransformer] = None,
 		missing_value_imputer: Optional[BaseImputer] = None,
 		schema_policy: str = "error",
@@ -135,6 +139,12 @@ def prepare_data(
 		y_scaler=y_scaler,
 		lag_config=lag_config,
 		lag_selector=lag_selector,
+		lag_selector_params=(
+			{}
+			if lag_selector_params is None
+			else dict(lag_selector_params)
+		),
+		lag_n_jobs=lag_n_jobs,
 		stationarity_transformer=stationarity_transformer,
 		missing_value_imputer=missing_value_imputer,
 		sampling_strategy=sampling_strategy,
