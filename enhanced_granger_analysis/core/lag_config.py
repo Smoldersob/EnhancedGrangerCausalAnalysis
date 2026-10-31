@@ -61,8 +61,50 @@ class LagSegmentInfo:
 
 
 @dataclass(frozen=True)
+class LagFittedConfig:
+    """Fitted lag layout and selection provenance, without prepared data.
+
+    Returned by :meth:`LagEngine.fit` after selection, aggregation,
+    overrides, and layout construction. The same layout is later used by
+    :meth:`LagEngine.transform` to build lagged matrices from any frames
+    that share the fitted schema.
+    """
+
+    output_names: tuple[str, ...]
+    active_predictors: tuple[str, ...]
+    removed_predictors: tuple[str, ...]
+
+    feature_predictors: tuple[str, ...]
+    feature_lags: np.ndarray
+    block_boundaries: np.ndarray
+    mask: np.ndarray
+
+    final_lags: LagSpec
+    aggregated_lags: LagSpec
+    selection_results: tuple[LagSpec, ...]
+
+
+@dataclass(frozen=True)
+class LaggedData:
+    """Lagged matrices built from one fitted layout.
+
+    ``segments`` records the source correspondence of each independently
+    prepared dataset, including the retained source index labels of the
+    prepared rows.
+    """
+
+    X: np.ndarray
+    y: np.ndarray
+    segments: tuple[LagSegmentInfo, ...]
+
+
+@dataclass(frozen=True)
 class LagPreparationResult:
-    """Prepared data, final feature metadata, and selection provenance."""
+    """Prepared data, final feature metadata, and selection provenance.
+
+    Compatibility container composed of :class:`LagFittedConfig` and
+    :class:`LaggedData`; prefer the fit/transform pair directly.
+    """
 
     X: np.ndarray
     y: np.ndarray

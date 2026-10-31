@@ -62,6 +62,14 @@ class PreparationContext:
 		return self.prepared_data.lag_engine
 
 	@property
+	def split(self):
+		"""Return the active data split, or None when splitting is disabled.
+
+		Returns: Assignment of prepared rows to named parts.
+		"""
+		return self.prepared_data.split
+
+	@property
 	def x_scaler(self):
 		"""Return the feature scaler attached to the model inputs.
 

@@ -5,7 +5,8 @@ from dataclasses import dataclass, field
 from typing import Any, Literal, Mapping, Optional, Sequence
 
 from .lag.lag_engine import LagEngine
-from ..core.lag_config import LagPreparationResult
+from ..core.lag_config import LagFittedConfig
+from .splitting.base import DataSplit
 from .stationarity import BaseStationarityEnforcer
 from .missing import BaseImputer
 from .sampling import NoSampling, SamplingStrategy
@@ -56,7 +57,8 @@ class PreparedData:
 	sample_indices: np.ndarray = field(
 		default_factory=lambda: np.empty(0, dtype=int)
 	)
-	lag_result: Optional[LagPreparationResult] = None
+	lag_fitted: Optional[LagFittedConfig] = None
+	split: Optional[DataSplit] = None
 
 	@property
 	def causes(self) -> tuple[str, ...]:
@@ -101,6 +103,8 @@ class PreparedData:
 			            feature_lags=np.empty(0, dtype=np.int64),
 			removed_variables={},
 			sample_indices=np.empty(0, dtype=int),
+			lag_fitted=None,
+			split=None,
 		)
 
 
@@ -122,6 +126,7 @@ def prepare_data(
 		sampling_strategy: Optional[SamplingStrategy] = NoSampling(),
 		x_scaler: Optional[Any] = "standard",
 		y_scaler: Optional[Any] = "standard",
+		splitter: Any = None,
 ) -> PreparedData:
 	from .pipeline import DataPreparer, DataPreparationConfig
 
@@ -146,6 +151,7 @@ def prepare_data(
 		stationarity=stationarity,
 		missing_value_imputer=missing_value_imputer,
 		sampling_strategy=sampling_strategy,
+		splitter=splitter,
 	)
 	preparer = DataPreparer(config=config)
 	roles = VariableRoles(

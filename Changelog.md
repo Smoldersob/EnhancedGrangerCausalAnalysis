@@ -872,3 +872,30 @@ a report of executed regression tests or cross-backend validation.
   HPO targets model quality, not Granger statistics or ground-truth causal scores.
 - No interchangeable high-level procedure registry, resumable session API,
   universal component resolver, or new training-device manager is introduced.
+
+## Data splitting and source-aware preparation
+
+### Added
+- Prepared-row splitting globally or independently within each series.
+- Source split plans for whole-series and within-series temporal holdout.
+- Row-index partition artifacts without storing separate train,
+  validation, and test matrices.
+- Original-target provenance in source-aware lag-segment metadata.
+- Source-aware preparation with training-only redundancy decisions,
+  stationarity fitting, and automatic lag selection.
+- Leakage warnings for random prepared-row splitting.
+
+### Changed
+- Proposed ordinary and block scaling fit on training rows when a split is active.
+- Proposed lag preparation accepts separate datasets for lag selection
+  and final matrix construction.
+
+### Restrictions
+- Source-aware imputation is not implemented.
+- Unsupported internal row gaps and incompatible workload reduction
+  raise errors.
+- Downstream fitting and HPO must explicitly consume split indices.
+
+### Verification
+- Implementation patches and tests were proposed in conversation.
+- Repository integration and test execution remain to be confirmed.

@@ -21,6 +21,7 @@ from .missing import BaseImputer
 from .prepare_data import PreparedData, RemovedVariable, VariableRoles
 from .sampling import NoSampling, SamplingStrategy
 from .scaling import resolve_scaler, BlockScaler
+from .splitting import DataSplit, resolve_data_splitter
 from .stationarity import resolve_stationarity_enforcer
 
 _UNSET = object()
@@ -46,6 +47,7 @@ class DataPreparationConfig:
     sampling_strategy: Optional[SamplingStrategy] = field(
         default_factory=NoSampling
     )
+    splitter: Any = None
 
 def _to_dataframe_list(data: pd.DataFrame | Sequence[pd.DataFrame]) -> list[pd.DataFrame]:
     if isinstance(data, pd.DataFrame):
@@ -66,10 +68,28 @@ class DataPreparer:
         if config is not None and config_overrides:
             raise ValueError("Use config or config_overrides, not both.")
         self.config = config or DataPreparationConfig(**config_overrides)
+        self.splitter = resolve_data_splitter(self.config.splitter)
         self.data_list: Optional[list[pd.DataFrame]] = None
         self.prepared_data_: Optional[PreparedData] = PreparedData.empty()
         self._roles_assigned = False
         self._redundancy_removed = False
+
+    def _source_splitter(self):
+        """Return the splitter when it defines source-level fitting frames."""
+        if self.splitter is None or self.splitter.stage != "source":
+            return None
+        return self.splitter
+
+    def _splitter_training_frames(
+        self,
+    ) -> Optional[list[pd.DataFrame]]:
+        """Frames used to fit preprocessing decisions under a source split."""
+        source_splitter = self._source_splitter()
+
+        if source_splitter is None or self.data_list is None:
+            return None
+
+        return source_splitter.select_for_fitting(self.data_list)
 
     @property
     def effective_roles(self) -> VariableRoles:
@@ -78,6 +98,11 @@ class DataPreparer:
     @property
     def requested_roles(self) -> VariableRoles:
         return self.prepared_data_.requested_roles
+
+    @property
+    def split(self) -> Optional[DataSplit]:
+        """Active assignment of prepared rows to parts, or None."""
+        return self.prepared_data_.split
         
     def set_data(
         self,
@@ -98,6 +123,11 @@ class DataPreparer:
         self.prepared_data_ = PreparedData.empty()
         self._roles_assigned = False
         self._redundancy_removed = False
+
+        source_splitter = self._source_splitter()
+        if source_splitter is not None:
+            source_splitter.fit(data_list)
+
         return self
 
     def set_roles(
@@ -227,7 +257,11 @@ class DataPreparer:
         )
         result = [df.copy() for df in self.data_list]
         if effective is not None:
-            result = effective.fit_transform(result)
+            training_frames = self._splitter_training_frames()
+            if training_frames is None:
+                result = effective.fit_transform(result)
+            else:
+                result = effective.fit(training_frames).transform(result)
 
         self.data_list = [df.copy() for df in result]
         return self
@@ -259,14 +293,25 @@ class DataPreparer:
             for dataframe in self.data_list
         ]
 
+        # Redundancy decisions are fitted on training frames only when a
+        # source-level split is active; removals are applied to all frames.
+        detection_frames = self._splitter_training_frames()
+        if detection_frames is None:
+            detection_frames = data_list
+
+        detection_aligned = [
+            dataframe.loc[:, required_columns].astype(float).copy()
+            for dataframe in detection_frames
+        ]
+
         all_columns = list(dict.fromkeys(column for dataframe in data_list for column in dataframe.columns))
         aligned_data = [df.astype(float).copy() for df in data_list]
 
-        combined = pd.concat(aligned_data, axis=0, ignore_index=True)
+        combined = pd.concat(detection_aligned, axis=0, ignore_index=True)
         constant_columns = [
             column for column in all_columns if combined[column].nunique(dropna=False) <= 1
         ]
-        data_without_constants = [df.drop(columns=constant_columns) for df in aligned_data]
+        data_without_constants = [df.drop(columns=constant_columns) for df in detection_aligned]
         combined_without_constants = pd.concat(data_without_constants, axis=0, ignore_index=True)
 
         duplicate_columns_map: dict[str, str] = {}
@@ -285,7 +330,7 @@ class DataPreparer:
         removed_columns = set(constant_columns)
         removed_columns.update(duplicate_columns_map)
 
-        cleaned_data = [df.drop(columns=list(removed_columns), errors="ignore") for df in data_without_constants]
+        cleaned_data = [df.drop(columns=list(removed_columns), errors="ignore") for df in aligned_data]
 
         causes_list = list(roles.causes)
         effects_list = list(roles.effects)
@@ -392,11 +437,14 @@ class DataPreparer:
 
         source = [frame.copy() for frame in self.data_list]
 
-        result = (
-            source
-            if enforcer is None
-            else enforcer.fit_transform(source)
-        )
+        if enforcer is None:
+            result = source
+        else:
+            training_frames = self._splitter_training_frames()
+            if training_frames is None:
+                result = enforcer.fit_transform(source)
+            else:
+                result = enforcer.fit(training_frames).transform(source)
 
         # Commit only after resolution and transformation succeed.
         self.data_list = [frame.copy() for frame in result]
@@ -420,14 +468,54 @@ class DataPreparer:
         x_obj = copy.deepcopy(resolve_scaler(x_spec))
         y_obj = copy.deepcopy(resolve_scaler(y_spec))
 
-        X_scaled = x_obj.fit_transform(prepared.X_raw)
-        y_scaled = y_obj.fit_transform(prepared.y_raw)
+        X_scaled, y_scaled = self._fit_scale_pair(
+            x_obj,
+            y_obj,
+            prepared.X_raw,
+            prepared.y_raw,
+        )
 
         prepared.x_scaler = x_obj
         prepared.y_scaler = y_obj
         prepared.X_scaled = X_scaled
         prepared.y_scaled = y_scaled
         return self
+
+    def _fit_scale_pair(
+        self,
+        x_obj: Any,
+        y_obj: Any,
+        X: np.ndarray,
+        y: np.ndarray,
+    ) -> tuple[np.ndarray, np.ndarray]:
+        """Fit scalers on training rows and transform all rows.
+
+        Without an active split the scalers are fitted on all rows,
+        which preserves the previous fit_transform behavior.
+        """
+        prepared = self.prepared_data_
+        training_indices = (
+            prepared.split.training_indices
+            if prepared.split is not None
+            else None
+        )
+
+        if training_indices is None or training_indices.size == 0:
+            return x_obj.fit_transform(X), y_obj.fit_transform(y)
+
+        X_train = X[training_indices]
+        y_train = y[training_indices]
+
+        if X_train.shape[0] == 0 or y_train.shape[0] == 0:
+            raise DataValidationError(
+                "The active data split provides no training rows for "
+                "fitting the scalers."
+            )
+
+        x_obj.fit(X_train)
+        y_obj.fit(y_train)
+
+        return x_obj.transform(X), y_obj.transform(y)
 
     def block_scale(
         self,
@@ -449,10 +537,13 @@ class DataPreparer:
             scaler=x_spec,
         )
         y_obj = copy.deepcopy(resolve_scaler(y_spec))
-        y_obj = copy.deepcopy(resolve_scaler(y_spec))
 
-        X_scaled = x_obj.fit_transform(prepared.X_raw)
-        y_scaled = y_obj.fit_transform(prepared.y_raw)
+        X_scaled, y_scaled = self._fit_scale_pair(
+            x_obj,
+            y_obj,
+            prepared.X_raw,
+            prepared.y_raw,
+        )
 
         prepared.x_scaler = x_obj
         prepared.y_scaler = y_obj
@@ -551,6 +642,13 @@ class DataPreparer:
         n_keep = max(1, int(np.floor(fraction * n)))
         if maximum is not None:
             n_keep = min(n_keep, int(maximum))
+
+        if n_keep < n and prepared.split is not None:
+            raise DataValidationError(
+                "reduce_workload() cannot remove rows while a data "
+                "split is active; the recorded part indices would become "
+                "stale. Remove the splitter or keep all prepared rows."
+            )
 
         indices = np.asarray(strategy.select(
             n,
@@ -683,24 +781,32 @@ class DataPreparer:
             n_jobs=effective_n_jobs,
         )
 
-        result = engine.prepare(
-            self.data_list,
+        # Lag selection is fitted on training frames under a source-level
+        # split; matrices are built from the full series with one layout.
+        selection_frames = self._splitter_training_frames()
+        if selection_frames is None:
+            selection_frames = self.data_list
+
+        fitted = engine.fit(
+            selection_frames,
             outputs=roles.effects,
             predictors=roles.causes,
         )
 
-        if result.X.shape[0] == 0 or result.y.shape[0] == 0:
+        lagged = engine.transform(self.data_list)
+
+        if lagged.X.shape[0] == 0 or lagged.y.shape[0] == 0:
             raise DataValidationError(
                 "No observations remain after lag preparation."
             )
 
-        if result.X.shape[1] == 0 or result.y.shape[1] == 0:
+        if lagged.X.shape[1] == 0 or lagged.y.shape[1] == 0:
             raise DataValidationError(
                 "No observations variables remain after lag preparation."
             )
 
-        active_causes = tuple(result.active_predictors)
-        removed_causes = tuple(result.removed_predictors)
+        active_causes = tuple(fitted.active_predictors)
+        removed_causes = tuple(fitted.removed_predictors)
 
         # Defensive checks at the pipeline/engine integration boundary.
         original_cause_set = set(roles.causes)
@@ -715,15 +821,15 @@ class DataPreparer:
                 "LagEngine returned an inconsistent predictor partition."
             )
 
-        if result.output_names != roles.effects:
+        if fitted.output_names != roles.effects:
             raise DataValidationError(
                 "LagEngine changed the requested output order."
             )
 
-        active_causes = result.active_predictors
-        removed_causes = result.removed_predictors
+        active_causes = fitted.active_predictors
+        removed_causes = fitted.removed_predictors
 
-        boundaries = result.block_boundaries
+        boundaries = fitted.block_boundaries
 
         if len(boundaries) != len(active_causes) + 1:
             raise DataValidationError(
@@ -773,27 +879,32 @@ class DataPreparer:
 
         # Commit only after engine execution and consistency checks succeed.
         prepared.lag_engine = engine
-        prepared.lag_result = result
+        prepared.lag_fitted = fitted
 
         prepared.effective_roles = effective_roles
         prepared.removed_variables = removed_variables
 
-        prepared.X_raw = result.X.copy()
-        prepared.y_raw = result.y.copy()
+        prepared.X_raw = lagged.X.copy()
+        prepared.y_raw = lagged.y.copy()
 
         prepared.base_mask = np.asarray(
-            result.mask,
+            fitted.mask,
             dtype=np.float64,
         ).copy()
 
-        prepared.feature_lags = result.feature_lags.copy()
+        prepared.feature_lags = fitted.feature_lags.copy()
         prepared.cause_slices = cause_slices
 
         prepared.sample_indices = np.arange(
-            result.X.shape[0],
+            lagged.X.shape[0],
             dtype=int,
         )
 
+        # The splitter owns the final assignment of prepared rows to parts.
+        if self.splitter is not None:
+            if self.splitter.stage == "prepared":
+                self.splitter.fit(lagged.X.shape[0])
+            prepared.split = self.splitter.split(lagged)
 
         return self
 

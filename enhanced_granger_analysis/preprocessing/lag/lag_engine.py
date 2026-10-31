@@ -14,6 +14,8 @@ from joblib import Parallel, delayed
 from ...core.lag_config import (
     LagEngineConfig,
     LagFeature,
+    LagFittedConfig,
+    LaggedData,
     LagPreparationResult,
     LagSegmentInfo,
     LagSpec,
@@ -82,29 +84,36 @@ class LagEngine:
             )
 
         self._validate_config()
-    
-    def prepare(
+
+        self.fitted_config_: LagFittedConfig | None = None
+
+    def fit(
         self,
         datasets: Sequence[pd.DataFrame],
         *,
         outputs: Sequence[str],
         predictors: Sequence[str] | None = None,
-    ) -> LagPreparationResult:
+    ) -> LagFittedConfig:
         """
-        Select, merge, override, and prepare lagged data.
+        Select, merge, override, and validate the final lag layout.
 
         All datasets must have the same named column schema, although
-        their column order and number of rows may differ.
+        their column order and number of rows may differ. Selection runs
+        on the supplied datasets only; use training fragments here and the
+        full series in :meth:`transform` to keep selection independent
+        of validation data.
 
         Predictor eligibility is controlled by predictors. Output columns
         are supplied to selectors even if they are not eligible final
         predictors, because selectors require their response values.
 
+        The fitted layout is stored on the engine and returned. It does
+        not depend on the row counts of the supplied datasets.
+
         Raises
         ------
         ValueError
-            If input data, lag specifications, or overrides are invalid,
-            or any dataset has no usable rows after final lagging.
+            If input data, lag specifications, or overrides are invalid.
         """
         frames, output_names, predictor_names, selection_names = (
             self._validate_inputs(
@@ -198,6 +207,57 @@ class LagEngine:
             feature_pairs,
         )
 
+        fitted = LagFittedConfig(
+            output_names=output_names,
+            active_predictors=active_predictors,
+            removed_predictors=removed_predictors,
+            feature_predictors=feature_predictors,
+            feature_lags=feature_lags,
+            block_boundaries=block_boundaries,
+            mask=mask,
+            final_lags=final_lags,
+            aggregated_lags=deepcopy(aggregated),
+            selection_results=selection_results,
+        )
+
+        self.fitted_config_ = fitted
+
+        return fitted
+
+    def transform(
+        self,
+        datasets: Sequence[pd.DataFrame],
+    ) -> LaggedData:
+        """Build lagged matrices from a layout fitted by :meth:`fit`.
+
+        The supplied datasets must share the fitted schema. Rows are
+        prepared independently per dataset; initial records lacking the
+        required history are dropped, and their source index labels are
+        recorded in the segment metadata.
+
+        Raises
+        ------
+        RuntimeError
+            If the engine has not been fitted.
+        ValueError
+            If any dataset is invalid or has no usable rows.
+        """
+        fitted = self.fitted_config_
+
+        if fitted is None:
+            raise RuntimeError(
+                "LagEngine.fit() must be called before transform()."
+            )
+
+        frames = self._validate_transform_inputs(datasets, fitted)
+
+        feature_pairs: tuple[LagFeature, ...] = tuple(
+            zip(
+                fitted.feature_predictors,
+                (int(lag) for lag in fitted.feature_lags),
+            )
+        )
+
         X_parts: list[np.ndarray] = []
         y_parts: list[np.ndarray] = []
         segments: list[LagSegmentInfo] = []
@@ -207,7 +267,7 @@ class LagEngine:
         for dataset_index, frame in enumerate(frames):
             segment_X, segment_y, n_drop = self._prepare_segment(
                 frame,
-                output_names=output_names,
+                output_names=fitted.output_names,
                 feature_pairs=feature_pairs,
                 dataset_index=dataset_index,
             )
@@ -235,21 +295,108 @@ class LagEngine:
         X = np.concatenate(X_parts, axis=0)
         y = np.concatenate(y_parts, axis=0)
 
-        return LagPreparationResult(
-            X=X,
-            y=y,
-            output_names=output_names,
-            active_predictors=active_predictors,
-            removed_predictors=removed_predictors,
-            feature_predictors=feature_predictors,
-            feature_lags=feature_lags,
-            block_boundaries=block_boundaries,
-            mask=mask,
-            final_lags=final_lags,
-            aggregated_lags=deepcopy(aggregated),
-            selection_results=selection_results,
-            segments=tuple(segments),
+        return LaggedData(X=X, y=y, segments=tuple(segments))
+
+    def prepare(
+        self,
+        datasets: Sequence[pd.DataFrame],
+        *,
+        outputs: Sequence[str],
+        predictors: Sequence[str] | None = None,
+    ) -> LagPreparationResult:
+        """Fit and transform in one call; compatibility for the legacy API.
+
+        Prefer the explicit :meth:`fit` and :meth:`transform` pair when
+        selection should run on training fragments only.
+        """
+        fitted = self.fit(
+            datasets,
+            outputs=outputs,
+            predictors=predictors,
         )
+
+        lagged = self.transform(datasets)
+
+        return LagPreparationResult(
+            X=lagged.X,
+            y=lagged.y,
+            output_names=fitted.output_names,
+            active_predictors=fitted.active_predictors,
+            removed_predictors=fitted.removed_predictors,
+            feature_predictors=fitted.feature_predictors,
+            feature_lags=fitted.feature_lags,
+            block_boundaries=fitted.block_boundaries,
+            mask=fitted.mask,
+            final_lags=fitted.final_lags,
+            aggregated_lags=fitted.aggregated_lags,
+            selection_results=fitted.selection_results,
+            segments=lagged.segments,
+        )
+
+    @staticmethod
+    def _validate_transform_inputs(
+        datasets: Sequence[pd.DataFrame],
+        fitted: LagFittedConfig,
+    ) -> tuple[pd.DataFrame, ...]:
+        if isinstance(datasets, pd.DataFrame):
+            raise TypeError(
+                "datasets must be a sequence of DataFrames, "
+                "not one DataFrame."
+            )
+
+        frames = tuple(datasets)
+
+        if not frames:
+            raise ValueError("datasets must not be empty.")
+
+        required = tuple(
+            dict.fromkeys(
+                (*fitted.output_names, *fitted.feature_predictors)
+            )
+        )
+
+        for index, frame in enumerate(frames):
+            if not isinstance(frame, pd.DataFrame):
+                raise TypeError(
+                    f"Dataset {index} is not a DataFrame."
+                )
+
+            if frame.empty:
+                raise ValueError(f"Dataset {index} is empty.")
+
+            if not frame.columns.is_unique:
+                raise ValueError(
+                    f"Dataset {index} has duplicated column names."
+                )
+
+            missing = [
+                column for column in required
+                if column not in frame.columns
+            ]
+
+            if missing:
+                raise ValueError(
+                    f"Dataset {index} is missing columns required by "
+                    f"the fitted layout: {missing!r}."
+                )
+
+            try:
+                values = frame.loc[
+                    :, list(required)
+                ].to_numpy(dtype=float)
+            except (TypeError, ValueError) as exc:
+                raise ValueError(
+                    f"Dataset {index} contains non-numeric values "
+                    "in required columns."
+                ) from exc
+
+            if not np.isfinite(values).all():
+                raise ValueError(
+                    f"Dataset {index} contains non-finite values "
+                    "in required columns."
+                )
+
+        return frames
 
     def _validate_config(self) -> None:
         cfg = self.config
