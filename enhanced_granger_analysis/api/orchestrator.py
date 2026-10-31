@@ -1,47 +1,35 @@
 from __future__ import annotations
 
-from typing import Any, Dict, Optional, Sequence, Mapping
+from typing import Any, Dict, Mapping, Optional, Sequence
 
 import pandas as pd
 
-from ..core.components.constraint_spec import RelationConstraintsSpec
+from ..configuration.analysis_spec import AnalysisSpec
 from ..core.components.constraint_parsing import RelationsInput
 from ..core.components.constraint_spec import RelationConstraintsSpec
+from ..execution.runner import AnalysisRunner
 from ..preprocessing.missing import BaseImputer
 from ..preprocessing.sampling import SamplingStrategy
 from ..results.granger_results import GrangerAnalysisResults
-from .builder import MultiTaskGrangerBuilder
 
 
 class MultiTaskGrangerAPI:
-    """Thin orchestration layer over the fluent builder API.
+    """Convenience interface for the standard Granger analysis workflow.
 
-    This class is a convenience wrapper that configures a
-    :class:`MultiTaskGrangerBuilder` and delegates the actual analysis work to it.
-    It keeps the selected backend and reuse policy, then executes the full
-    preparation, model-building, and restricted-model fitting workflow in one call.
-
-    Example:
-        api = MultiTaskGrangerAPI(backend="keras", reuse_data=True)
-        results = api.fit(
-            data=my_data,
-            causes=["cause1", "cause2"],
-            effects=["effect1"],
-            lag_config=LagConfiguration(max_lag=12),
-        )
-        print(results)
+    Preprocessing declarations are passed unchanged to the analysis
+    configuration and resolved by the existing preparation pipeline.
     """
 
-    def __init__(self, backend: Optional[str] = None, reuse_data: bool = False) -> None:
-        """Create an API wrapper around the builder pipeline.
+    def __init__(
+        self,
+        backend: Optional[str] = None,
+        reuse_data: bool = False,
+    ) -> None:
+        """Configure the backend and data reuse preference."""
 
-        Args:
-            backend: Backend name used when the underlying builder prepares the
-                execution strategy.
-            reuse_data: Reuse policy passed to the underlying builder.
-        """
         self.backend = backend
         self._reuse_data = bool(reuse_data)
+        self._analysis_runner = AnalysisRunner()
 
     def fit(
         self,
@@ -51,7 +39,7 @@ class MultiTaskGrangerAPI:
         tested_causes: Optional[Sequence[str]] = None,
         constraint_spec: Any = "mask_and_min_abs_sum",
         relations: RelationsInput = RelationConstraintsSpec(),
-        lag_config: Optional[LagConfiguration] = None,
+        lag_config: Any = None,
         lag_selector: Any = None,
         lag_selector_params: Optional[Mapping[str, Any]] = None,
         lag_n_jobs: int = 1,
@@ -63,42 +51,60 @@ class MultiTaskGrangerAPI:
         backend_max_samples: Optional[int] = None,
         random_state: Optional[int] = None,
         sampling_strategy: Optional[SamplingStrategy] = None,
-        x_scaler: Optional[Any] = "standard",
-        y_scaler: Optional[Any] = "standard",
-        regularizer_spec: Any = None,callbacks: Optional[Sequence[Any]] = None,
+        x_scaler: Any = "standard",
+        y_scaler: Any = "standard",
+        regularizer_spec: Any = None,
+        callbacks: Optional[Sequence[Any]] = None,
         hiperoptimalization_state: Optional[str] = None,
         hiperoptimalization_conf: Optional[Dict[str, Any]] = None,
-        initializer: Optional[Any] = None,
+        initializer: Any = None,
         model_config: Optional[Dict[str, Any]] = None,
         fit_restricted: bool = True,
     ) -> GrangerAnalysisResults:
-        """Execute the full Granger analysis pipeline for the provided data.
+        """Execute an analysis using declarative preprocessing settings.
 
-        The method builds a ``MultiTaskGrangerBuilder`` configured with the API
-        settings, prepares the data, instantiates the strategy and model,
-        estimates the unrestricted model, and then fits the restricted models for
-        each tested cause before returning the aggregated results.
+        Supplied prepared data takes precedence over source observations.
+        Component resolution remains in the preparation and backend layers.
         """
-        builder = MultiTaskGrangerBuilder(
-            backend=self.backend, reuse_data=self._reuse_data
-        ).data(data).variables(causes, effects, tested_causes).relations(relations).constraint(constraint_spec)
-        builder.lag(lag_config, lag_selector,lag_selector_params=lag_selector_params,lag_n_jobs=lag_n_jobs)
-        builder.stationarity(stationarity)
-        builder._fit_kwargs.update({
+
+        config = {
+            "backend": self.backend,
+            "reuse_data": self._reuse_data,
+            "causes": causes,
+            "effects": effects,
+            "tested_causes": tested_causes,
+            "constraint_spec": constraint_spec,
+            "relations": relations,
+            "lag_config": lag_config,
+            "lag_selector": lag_selector,
+            "lag_selector_params": (
+                {}
+                if lag_selector_params is None
+                else dict(lag_selector_params)
+            ),
+            "lag_n_jobs": lag_n_jobs,
+            "stationarity": stationarity,
             "missing_value_imputer": missing_value_imputer,
             "schema_policy": schema_policy,
-            "prepared_data": prepared_data,
             "backend_sample_fraction": backend_sample_fraction,
             "backend_max_samples": backend_max_samples,
             "random_state": random_state,
             "sampling_strategy": sampling_strategy,
-            "x_scaler": x_scaler, "y_scaler": y_scaler,
-            "callbacks": list(callbacks) if callbacks is not None else None,
+            "x_scaler": x_scaler,
+            "y_scaler": y_scaler,
+            "regularizer_spec": regularizer_spec,
+            "callbacks": callbacks,
             "hiperoptimalization_state": hiperoptimalization_state,
             "hiperoptimalization_conf": hiperoptimalization_conf,
-            "initializer": initializer, "model_config": model_config,
-        })
-        builder.regularization(
-            regularizer_spec=regularizer_spec,
+            "initializer": initializer,
+            "model_config": model_config,
+        }
+
+        spec = AnalysisSpec.from_mapping(config)
+
+        return self._analysis_runner.run_analysis(
+            spec=spec,
+            data=data,
+            prepared_data=prepared_data,
+            fit_restricted=fit_restricted,
         )
-        return builder.fit(fit_restricted=fit_restricted)

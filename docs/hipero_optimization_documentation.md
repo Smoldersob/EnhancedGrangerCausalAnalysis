@@ -1,182 +1,38 @@
-# Hyperoptimization Documentation
+# Hyperparameter Optimization: Current Status and Intended Boundary
 
-This document explains how to define hyperoptimization settings for the Granger analysis orchestrator.
+## Current status
 
-Hyperoptimization is performed as a sweep over candidate configurations. The optimizer evaluates each trial by building backend objects from the strategy, training a short-run model, and selecting the candidate with the best score.
+Automatic hyperparameter optimization is not executed by the standard builder, orchestrator, or `AnalysisRunner.run_analysis()` workflow.
 
-## Core Idea
+The retained fields `hiperoptimalization_state` and `hiperoptimalization_conf` are inactive. Their presence does not select parameters, adjust regularization, or change final fitting. Existing code under `hiperopt/` must not be presented as an integrated, validated search API.
 
-Hyperoptimization does not train one fixed model and then patch it afterward. Instead, it treats each trial as a complete configuration candidate and builds the trial-specific objects through the backend strategy.
+No `ModelSearchSpec`, `ModelQualityEvaluator`, `ModelSearchRunner`, or `search` configuration section is introduced by the execution refactor documented here. Those names describe intended future work only.
 
-The sweep can cover three parameter groups:
+## Intended purpose
 
-- `model` - model configuration parameters, such as `epochs`, `batch_size`, `learning_rate`, `max_iter`, `tol`, `optimizer`, and `loss`
-- `optimizer` - optimizer-specific settings, if the backend uses a structured optimizer spec
-- `regularizer` - regularizer parameters, such as `l1` or lag-dependent regularizer settings
+Future optional HPO should select configuration according to model quality. Its scope may include model/training parameters, regularization, and preprocessing such as lag selection or scaling.
 
-## Configuration Shape
+Candidate evaluation must not fit unrestricted/restricted pairs to score causal-analysis results. Do not optimize p-values, Granger statistics, recovered-edge F1, or ground-truth causal accuracy. An apparently favorable causal matrix does not establish adequate model quality.
 
-The preferred format is a sectioned sweep definition:
+The intended high-level flow is:
 
-```json
-{
-  "hiperoptimalization_conf": {
-    "type": "model",
-    "n_trials": 6,
-    "trial_epochs": 5,
-    "sections": {
-      "model": {
-        "learning_rate": [0.01, 0.001],
-        "batch_size": [16, 32]
-      },
-      "optimizer": {
-        "type": ["adam", "sgd"]
-      },
-      "regularizer": {
-        "l1": [0.0001, 0.001]
-      }
-    }
-  }
-}
+```text
+optional model-quality search
+    -> selected configuration
+    -> final model fitting
+    -> standard Granger analysis
 ```
 
-### Supported Fields
+Search should reuse existing preparation, model assembly, and single-fit services rather than implement another component resolver or model-construction path. Validation-specific prediction must remain under the evaluator's control; `FitExecutor` should not force prediction on training observations.
 
-- `type` or `mode` - selects the optimization target. Current supported values are `model` and `regularization`.
-- `n_trials` - maximum number of trial combinations to evaluate.
-- `sections` - preferred sweep container with `model`, `optimizer`, and `regularizer` subsections.
-- `param_grid` - backward-compatible flat sweep definition.
-- `trial_epochs` - explicit number of epochs used for trial training.
-- `trial_train_config` - optional mapping merged into the short-run training configuration.
+## Separate experiment sweeps
 
-## Backward-Compatible Flat Form
+`TestGroupConfigIterator` expands explicitly specified experiments. Sweeping L1 values runs separate analyses for those values; it does not automatically choose L1 by validation quality.
 
-A flat `param_grid` is still accepted. In that form, values are mapped using dotted keys or the default section for the selected state.
+Ground-truth metrics computed by the experiment script are reports on completed analyses, not feedback into HPO. Future optional HPO may run inside each explicit experiment without taking over the iterator's role.
 
-```json
-{
-  "hiperoptimalization_conf": {
-    "type": "regularization",
-    "n_trials": 4,
-    "param_grid": {
-      "regularizer.l1": [0.0001, 0.001, 0.01],
-      "model.learning_rate": [0.01, 0.001]
-    }
-  }
-}
-```
+## Validation requirements for future implementation
 
-If the optimizer is running in `model` mode and no section is specified, flat keys are treated as model parameters by default. In `regularization` mode, flat keys default to the regularizer section.
+A future implementation must specify the objective, temporal validation boundaries, preprocessing fitting scope, candidate isolation, final refit policy, failure handling, and recorded selected configuration. It must not infer statistical calibration of causal tests from predictive tuning alone.
 
-## Trial Training Budget
-
-Each trial uses a reduced training budget so that sweep evaluation stays cheaper than the final fit.
-
-The trial budget can be controlled in two ways:
-
-- `trial_epochs` - direct override for the trial epoch count
-- `trial_train_config` - extra trial-only overrides, such as `batch_size`, `max_iter`, or `learning_rate`
-
-If these values are omitted, the optimizer derives a short-run budget from the base `model_config`.
-
-Example:
-
-```json
-{
-  "hiperoptimalization_conf": {
-    "type": "model",
-    "n_trials": 8,
-    "trial_epochs": 3,
-    "trial_train_config": {
-      "batch_size": 16
-    },
-    "sections": {
-      "model": {
-        "epochs": [20, 50],
-        "learning_rate": [0.01, 0.001]
-      }
-    }
-  }
-}
-```
-
-## Model, Optimizer, and Regularizer Sweeps
-
-### Model sweep
-
-Use the `model` section for parameters forwarded into the backend model constructor.
-
-Common examples:
-
-```json
-{
-  "model": {
-    "epochs": [20, 50],
-    "batch_size": [16, 32],
-    "learning_rate": [0.01, 0.001]
-  }
-}
-```
-
-### Optimizer sweep
-
-Use the `optimizer` section for optimizer type or optimizer configuration fields when the backend supports them.
-
-Example:
-
-```json
-{
-  "optimizer": {
-    "type": ["adam", "sgd"]
-  }
-}
-```
-
-### Regularizer sweep
-
-Use the `regularizer` section for regularizer parameters.
-
-Example:
-
-```json
-{
-  "regularizer": {
-    "type": ["l1"],
-    "l1": [0.0001, 0.001, 0.01]
-  }
-}
-```
-
-For lag-dependent regularizers, you can also sweep parameters such as `max_lags_per_pred` or `col_offsets` when the backend spec accepts them.
-
-## Result Handling
-
-The optimizer returns the best configuration update and the best regularizer specification update. The orchestrator then applies these updates before building the final runtime objects.
-
-This means hyperoptimization changes:
-
-- the final `model_config`
-- the final `regularizer_spec`
-
-It does not store a prebuilt final regularizer object in the result.
-
-## Callbacks
-
-Callbacks can be part of the trial configuration if they are passed through the model configuration or constructed by the run configuration factory.
-
-A practical note:
-
-- If the orchestrator injects a fixed callback template, that template is cloned per run and will usually dominate trial-specific callback settings.
-- If you want to sweep callback settings, keep the callback definition in the sweep configuration rather than hard-coding a fixed callback list.
-
-## Practical Recommendation
-
-Use hyperoptimization for parameters that materially affect training cost or model quality:
-
-- learning rate
-- number of epochs
-- batch size
-- optimizer type
-- regularizer strength
-
-Keep the sweep small and focused. The optimizer is designed to compare a manageable set of candidate configurations rather than perform large-scale automated search.
+See [Architecture](execution_architecture.md) and [Configuration](config_file_usage.md).

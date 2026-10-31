@@ -111,6 +111,7 @@ class BackendStrategy(ABC):
 		config: Mapping[str, Any] | None = None,
 		supported_components: frozenset[str],
 		ignored_components: frozenset[str] = frozenset(),
+		ignored_config_names: frozenset[str] = frozenset(),
 	) -> GrangerModelProtocol:
 		"""Construct a model using an already selected backend registry."""
 		target, params = resolve_spec(
@@ -128,12 +129,18 @@ class BackendStrategy(ABC):
 				)
 			return target
 
+		params = dict(params)
+
 		component_values = (
 			{} if components is None else dict(components)
 		)
 		config_values = (
 			{} if config is None else dict(config)
 		)
+
+		for name in ignored_config_names:
+			params.pop(name, None)
+			config_values.pop(name, None)
 
 		for values in (params, config_values, component_values):
 			if any(not isinstance(key, str) for key in values):

@@ -1,272 +1,83 @@
 # Project Structure
 
-This document describes the repository layout and the role of each major package and module. The installable Python package lives in `enhanced_granger_analysis/` inside the repository root.
-
-## Repository Layout
+The installable source package is `enhanced_granger_analysis/`.
 
 ```text
 enhanced_granger_analysis/
-├── enhanced_granger_analysis/   # Installable package source
-│   ├── api/                    # Stateful builder, standard orchestration, config loading
-│   ├── backends/               # Strategies, models, and backend-specific components
-│   ├── core/                   # Shared configurations, protocols, and exceptions
-│   ├── hiperopt/               # Hyperoptimization subsystem
-│   ├── initializers/           # Optional model-weight initialization
-│   ├── preprocessing/          # Staged preparation and PreparedData contract
-│   ├── results/                # Snapshots, metrics, restoration, and causality matrices
-│   └── utilities/              # Shared helper functions (validation, metrics, etc.)
-├── docs/                       # User and developer documentation
-├── example/                    # Example data and notebooks
-├── CONTRIBUTING.md             # Contribution workflow and development rules
-├── README.md                   # Project overview and quick start
-├── VISION.md                   # Roadmap and long-term direction
-├── Changelog.md                # Release notes and change history
-├── pyproject.toml              # Build metadata and package configuration
-├── requirements.txt            # Base dependencies
-├── requirements-torch.txt      # PyTorch backend extras
-├── requirements-tensorflow.txt # TensorFlow backend extras
-└── requirements-full.txt       # Combined backend dependency set
+├── api/
+│   ├── builder.py
+│   ├── orchestrator.py
+│   ├── simple_granger.py
+│   └── config_loader.py
+├── configuration/
+│   ├── analysis_spec.py
+│   ├── modeling_spec.py
+│   └── loader.py
+├── modeling/
+│   ├── assembler.py
+│   ├── initialization.py
+│   ├── executor.py
+│   └── artifacts.py
+├── execution/
+│   ├── runner.py
+│   └── granger_trainer.py
+├── experiments/
+│   └── config_iterator.py
+├── backends/
+│   ├── backend_factory.py
+│   ├── base_backend.py
+│   ├── keras/
+│   ├── pytorch/
+│   └── numpy/
+├── core/
+├── initializers/
+├── preprocessing/
+├── results/
+├── hiperopt/
+├── scripts/
+├── tests/
+└── utilities/
 ```
 
-## Module Responsibilities
-
-### api
-
-Public analysis entry points and configuration loading:
-
-- `builder.py`: `MultiTaskGrangerBuilder`, which stores configuration and
-  runtime artifacts and executes individual pipeline stages.
-- `orchestrator.py`: `MultiTaskGrangerAPI`, which coordinates the standard
-  workflow through the builder.
-- `simple_granger.py`: independent pair-wise statsmodels analysis.
-- `config_loader.py`: JSON/YAML configuration normalization and grouped
-  experiment configuration expansion.
-
-`MultitaskGrangerBuilder` is a compatibility alias of
-`MultiTaskGrangerBuilder`.
-
-Configuration methods and execution stages are distinct. The builder is not
-only a facade over the orchestrator.
-
-### backends
-
-### backends
-
-Backend abstraction, model implementations, and backend-native components:
-
-- `backend_factory.py`: backend selection and strategy dispatch.
-- `base_backend.py`: shared strategy contract.
-- `keras/keras_backend.py`: Keras strategy.
-- `pytorch/pytorch_backend.py`: native PyTorch strategy.
-- `scikit/scikit_backend.py`: scikit strategy.
-- `keras/constraints/`, `pytorch/constraints/`, `scikit/constraints/`:
-  constraint bases, class registries, and implementations.
-- `keras/regularizers/`, `pytorch/regularizers/`, `scikit/regularizers/`:
-  regularizer bases, class registries, and implementations.
-- `models/`: model implementations and lifecycle contracts.
-- `callbacks/`: shared callback infrastructure and implementations.
-- `object_loaders/`: backend object loading, including callback and
-  optimizer resolution.
-
-Constraint and regularizer specifications are no longer resolved by
-the object loaders. Their dedicated registries select classes, and
-strategies construct instances from prepared component data.
-
-### backends
-
-Backend selection, registered model construction, and backend-native components:
-
-- `backend_factory.py`: strategy selection and backend aliases.
-- `base_backend.py`: shared strategy construction interface.
-- `keras/`, `pytorch/`, `numpy/`: backend-specific strategies and components.
-- `models/conditional.py` within each backend: training/lifecycle adapter.
-- `models/network_parts.py` within each backend: predictor architecture.
-- Backend-local `callbacks/`, `optimizers/`, and `losses/`: component resolution.
-- Backend-local `constraints/` and `regularizers/`: implementations and registries.
-
-The former shared `backends/models/`, `backends/object_loaders/`, and
-`backends/scikit/` packages are removed.
-
-### core models
-
-Shared contracts, configuration objects, registries, and exceptions.
-
-`core/models/` defines structural input metadata, model protocols,
-model-class registry infrastructure, training diagnostics, and shared array
-validation.
-
-`core/components/` additionally contains shared callback registry and lifecycle
-utilities alongside constraint and regularizer infrastructure.
-
-- `constraint_spec.py`: named relation rules and prepared constraint data;
-- `constraint_parsing.py`: canonical relation parsing;
-- `constraint_preparation.py`: compilation against effective feature layout;
-- `constraint_registry.py`: reusable constraint class-registry logic;
-- `constraint_serialization.py`: prepared constraint serialization;
-- `regularizer_spec.py`: normalized regularizer selection and layout data;
-- `regularizer_parsing.py`: regularizer specification parsing;
-- `regularizer_preparation.py`: layout and constructor-data preparation;
-- `regularizer_parameters.py`: shared built-in parameter validation and
-  lag-weight mapping;
-- `regularizer_registry.py`: reusable regularizer class-registry logic;
-- `regularizer_serialization.py`: specification and prepared-data serialization.
-
-Backend-independent preparation does not construct backend-native
-component instances.
-
-### initializers
-
-Utilities for building model state before training:
-
-- reusable initialization helpers,
-- backend-independent weight initialization logic.
-
-### preprocessing
-
-Staged data preparation and the contract passed to model execution:
-
-- `prepare_data.py`: convenience entry point and preparation data models,
-  including `PreparedData`, `VariableRoles`, and `RemovedVariable`;
-- `pipeline.py`: `DataPreparer`, preparation configuration, stage execution,
-  and resolution of stationarity, lag, and scaling components;
-  and resolution of lag components;
-- `missing/`: optional missing-value imputation;
-- `stationarity/`: abstract enforcer interface, shared differencing
-  workflow, independent ADF/KPSS implementations, and registry resolution;
-- `lag/`: selection interfaces, selector registration, configuration
-  resolution, lag aggregation, feature construction, and target alignment;
-- `scaling/`: input and target scaling, including block-wise scaling;
-- `sampling.py`: workload-reduction strategies.
-
-The stationarity subsystem separates:
-
-- `base.py`: `BaseStationarityEnforcer` and `StationarityFitResult`;
-- `enforcers.py`: `BaseDifferencingEnforcer`,
-  `ADFStationarityEnforcer`, and `KPSSStationarityEnforcer`;
-- `registry.py`: class registration and specification resolution;
-- `tests.py`: numerical order-estimation and differencing helpers.
-
-The numerical-helper filename `stationarity/tests.py` does not identify
-the unit-test suite. Mechanism tests are located in
-`enhanced_granger_analysis/tests/test_stationarity.py`.
-
-The loader and builder preserve `stationarity` selections without
-interpreting them. The preparation stage resolves and fits the component,
-then stores it as `PreparedData.stationarity_enforcer`.
-
-The lag subsystem separates:
-
-- `BaseLagSelector`: public selection interface;
-- `BaseIncrementalLagSelector`: cumulative per-pair expansion and pruning;
-- `ICLagSelector` and `CVLagSelector`: per-pair auxiliary scoring methods;
-- `BaseCommonOrderLagSelector`: search over complete common lag ranges;
-- `CommonOrderICLagSelector` and `CommonOrderCVLagSelector`: common-order
-  scoring methods;
-- `NaiveVARLagSelector`: historical four-criterion VAR procedure, with
-  `VARLagSelector` retained as an alias;
-- selector registry utilities: registration, discovery, and resolution;
-- engine configuration resolution;
-- `LagEngine`: dataset-level execution, aggregation, overrides, validation,
-  and final feature preparation.
-
-`core/lag_config.py` contains `LagSpec`, `LagEngineConfig`,
-`LagPreparationResult`, and `LagSegmentInfo`.
-
-Feature-layout fields are stored directly in `LagPreparationResult`.
-There is no separate `LagFeatureLayout` contract.
-
-Auxiliary fitting permits redundant columns where the scoring method can
-still evaluate the candidate. It does not automatically remove signals
-or establish the identifiability of the final model.
-
-See [Lag Selection](lag_selection.md) for algorithm definitions and their
-interpretation as preprocessing heuristics.
-
-### results
-
-Model-run storage, metric evaluation, and labelled result matrices:
-
-- `granger_results.py`: result container, model snapshots, preparation context,
-  metric evaluation, and convenience accessors.
-- `metrics.py`: registered statistical, diagnostic, and sign metrics.
-- `restoration.py`: restoration of requested result axes using preprocessing
-  metadata.
-- `causality_matrix.py`: labelled metric-matrix wrapper.
-- `statistics.py`: statistical helper calculations.
-
-Metrics are calculated for effective fitted variables.
-Restoration is applied when returning evaluated matrices.
-
-Signed results combine restored metric and sign matrices.
-Coefficient blocks are selected through named cause slices.
-
-Restoration distinguishes predictor-role exclusion from output removal.
-
-A requested tested cause excluded by final lag preparation is restored
-using the evaluated metric's neutral removal value. Its output row, if
-still effective, remains a computed row.
-
-Neutral restoration indicates structural exclusion by the selected model,
-not an additional hypothesis test establishing no causality.
-
-For the public result contract, see [Results and Metrics](results_and_metrics.md).
-
-### hiperopt
-
-Hyperoptimization subsystem for evaluating candidate configurations.
-
-Its configuration can describe model, optimizer, and regularizer parameter
-groups.
-
-The standard builder pipeline currently accepts hyperoptimization settings
-but does not execute an optimization stage.
-
-Keep subsystem capabilities separate from their integration into the standard
-analysis workflow.
-
-(still under development)
-
-### scripts
-
-Automation for reproducible experiment runs:
-
-- group/sweep execution,
-- per-case matrix export,
-- summary metrics vs. ground-truth.
-
-For details, see [script usage](script_usage.md).
-
-### tests
-
-Unit and integration tests for library components and execution workflows.
-
-The test directory is located inside the source package, while package
-configuration excludes it from installed distribution packages.
-
-New lifecycle and result-contract changes should include regression tests
-for:
-
-- named feature-block selection;
-- single-input and final-input restriction counting;
-- tested-cause ordering independent of input ordering;
-- restored sign and metric axes;
-- callback and omission isolation;
-- snapshot independence;
-- metric-cache invalidation.
-
-### utilities
-
-Shared helper functions used across the package:
-
-- validation helpers,
-- metric calculations,
-- small reusable analysis utilities.
-
-## Related Documentation
-
-- [API usage](api_usage.md)
-- [Backend usage](backend_usage.md)
-- [Components loading](components_loading.md)
-- [Data preprocessing](data_preprocessing.md)
-- [Configuration files](config_file_usage.md)
-- [Script usage](script_usage.md)
+## Responsibilities
+
+| Package | Responsibility |
+| --- | --- |
+| `api` | Fluent builder, one-call orchestrator, independent baseline, compatibility imports |
+| `configuration` | Configuration sections and document/reference reading; no backend component construction |
+| `modeling` | Assembly, initializer execution, one fit, and its artifacts |
+| `execution` | Full workflow coordination, standard Granger fitting, outcome-to-snapshot conversion |
+| `experiments` | Explicit test-case expansion, separate from HPO |
+| `backends` | Strategy selection, native model adapters/networks, existing resolvers and component registries |
+| `core` | Model protocols, structural metadata, registry infrastructure, shared component data, exceptions |
+| `initializers` | Existing initializer class registry and implementations |
+| `preprocessing` | Alignment, imputation, cleanup, stationarity, lag preparation, scaling, sampling |
+| `results` | Snapshots, preparation context, metrics, restoration, labelled matrices |
+| `hiperopt` | Existing optimization subsystem; not active in the standard runner |
+| `scripts` | Group experiments, export, timing, and ground-truth reporting |
+| `utilities` | Shared helpers including ground-truth metric calculation |
+
+`configuration/legacy.py` has been removed. `api/config_loader.py` only exposes compatibility imports. Removed shared `backends/models`, `backends/object_loaders`, and `backends/scikit` packages are not restored.
+
+## Existing shared contracts
+
+- `core/models/input_spec.py`: `ModelInputSpec`.
+- `core/models/protocol.py`: `GrangerModelProtocol` and related types.
+- `core/models/training_result.py`: `TrainingResult`.
+- `core/initialization.py`: `InitializationContext`.
+- `core/components/`: relation/regularizer parsing, preparation data, registry support, and serialization.
+- `core/lag_config.py`: lag specifications, engine settings, preparation result metadata.
+- `preprocessing/pipeline.py`: existing `DataPreparationConfig` and `DataPreparer`.
+- `preprocessing/prepare_data.py`: `PreparedData`, `VariableRoles`, and removed-variable metadata.
+
+Do not introduce parallel versions of these contracts in the new packages.
+
+## Results and execution artifacts
+
+`modeling/artifacts.py` defines `FitOutcome`; it is not a causal result container. `execution/runner.py` defines internal `AnalysisRunProgress`; it is not a public session. Final snapshot evaluation remains in `results/`.
+
+## Repository-level documentation
+
+`README.md` provides navigation and quick start; `Changelog.md` records changes. `docs/execution_architecture.md` describes responsibilities and data flow; `docs/api_refactor_migration.md` describes migration.
+
+The detailed preprocessing, lag-selection, model-contract, result-metric, NumPy-solver, and ground-truth pages retain their subsystem scope. Future sessions/procedures are not part of the tree above.

@@ -22,6 +22,10 @@ class NumpyBackendStrategy(BackendStrategy):
         "constraint",
     })
 
+    _ignored_config_names = frozenset({
+        "device",
+    })
+
     _ignored_component_names = frozenset({
         "optimizer",
         "loss",
@@ -214,6 +218,8 @@ class NumpyBackendStrategy(BackendStrategy):
         components: Mapping[str, Any] | None = None,
         config: Mapping[str, Any] | None = None,
     ) -> GrangerModelProtocol:
+        """Construct a NumPy model without device-selection arguments."""
+
         self._require_numpy()
 
         from .models.registry import (
@@ -229,4 +235,5 @@ class NumpyBackendStrategy(BackendStrategy):
             config=config,
             supported_components=self._component_names,
             ignored_components=self._ignored_component_names,
+            ignored_config_names=self._ignored_config_names,
         )

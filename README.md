@@ -1,196 +1,136 @@
 # EnhancedGrangerCausalAnalysis
 
-EnhancedGrangerCausalAnalysis is a compact framework for advanced Granger-causality workflows on multivariate time series.
+EnhancedGrangerCausalAnalysis provides configurable, multi-output Granger-causality analysis for multivariate time series. It separates data preparation, model construction, fitting, and evaluation of completed model snapshots.
 
-It extends classic pair-wise Granger tests with configurable multitask modeling, backend abstraction, constraint-aware training, and config-driven experiment sweeps.
+Current package version: `2.8.2`.
 
-Current package version: `2.8.1`
+## Main capabilities
 
-## Architecture at a glance
+- Joint prediction of configured effects, with independent input and tested-cause roles.
+- Configurable lag construction and selector-based preprocessing.
+- Optional imputation, stationarity transformation, scaling, and sampling.
+- Tracking of variables removed during preprocessing.
+- Layout-aware constraints, optional regularization, and weight initialization.
+- Standard unrestricted/restricted fitting with explicit weight, omission, optimizer, and callback lifecycle management.
+- Config-driven experiment cases and result export.
+- Extensible evaluation of saved model snapshots.
 
-The library is organized into focused layers:
+Automatic hyperparameter optimization is not executed by the standard workflow. Existing hyperoptimization fields are retained but inactive.
 
-- `api/`: public APIs, a stateful analysis builder, orchestration, and
-  configuration loading.
-- `preprocessing/`: schema alignment, optional imputation, redundancy
-  removal, stationarity transformation, lag construction, scaling,
-  and sampling.
-- `backends/`: backend strategies and model-specific components.
-- `results/`: model snapshots, metric evaluation, and causality matrices.
-- `scripts/`: configuration-driven experiment execution.
+## Entry points
 
-See [docs/project_structure.md](docs/project_structure.md) for the module map.
+| Interface | Purpose |
+| --- | --- |
+| `MultiTaskGrangerBuilder` | Fluent configuration, complete execution, and explicit execution stages |
+| `MultiTaskGrangerAPI` | One-call interface for the standard workflow |
+| `AnalysisSpec` + `AnalysisRunner` | Execute a configuration without constructing a builder |
+| `SimpleGrangerAPI` | Separate pair-wise statsmodels baseline |
 
-## Implemented capabilities
+The builder and orchestrator both use `AnalysisRunner`; the orchestrator no longer creates a builder. `MultitaskGrangerBuilder` remains a compatibility alias.
 
-- Joint prediction of multiple configured effects.
-- Separate selection of model inputs (`causes`), outputs (`effects`),
-  and formally tested input variables (`tested_causes`).
-- Explicitly executable analysis stages.
-- Reuse of externally prepared data.
-- Configurable lag construction and selection.
-- Optional imputation and stationarity transformation.
-- Removal and tracking of constant and exactly duplicated variables.
-- Input and target scaling.
-- Relation-based constraints and regularization.
-- Reuse of one working model for base and restricted runs.
-- Model snapshots and extensible metric evaluation.
-- Coefficient-derived signs evaluated through the same metric interface
-  as statistical and diagnostic metrics.
-- Restoration of removed-variable rows and columns before combining
-  significance decisions with coefficient-derived signs.
-- Configuration-driven grouped experiments.
-
-Hyperoptimization settings are accepted, but automatic hyperoptimization
-is not currently executed by the standard builder pipeline.
-
-## Public APIs
-
-- `MultiTaskGrangerBuilder`: a stateful pipeline with fluent configuration
-  and explicitly executable stages.
-- `MultiTaskGrangerAPI`: a coordinator for the standard builder workflow.
-- `SimpleGrangerAPI`: a pair-wise statsmodels baseline.
-
-`MultitaskGrangerBuilder` remains an alias of `MultiTaskGrangerBuilder`.
-
-Use the builder's explicit stages to inspect intermediate artifacts or pause
-between preparation, model construction, base fitting, and restricted fitting.
-
-Related documentation:
-
-- [API usage](./docs/api_usage.md)
-- [Data preprocessing](./docs/data_preprocessing.md)
-- [Results and metrics](./docs/results_and_metrics.md)
-- [Configuration files](./docs/config_file_usage.md)
-- [Experiment scripts](./docs/script_usage.md)
-
-## Backends
-
-Supported backends:
-
-- `pytorch` (`torch`)
-- `tensorflow` (`tf`, `keras`)
-- `sklearn` (`scikit`, `scikit-learn`)
-
-When not specified, backend selection prefers: PyTorch -> TensorFlow -> scikit-learn.
-
-Backend-specific component resolution (callbacks, regularizers, constraints) is documented in:
-- [docs/backend_usage.md](docs/backend_usage.md)
-- [docs/components_loading.md](docs/components_loading.md)
-
-## Quick example
+## Quick start
 
 ```python
 import pandas as pd
 
-from enhanced_granger_analysis.api import MultiTaskGrangerBuilder
-from enhanced_granger_analysis.preprocessing.lag import LagEngineConfig
+from enhanced_granger_analysis.api.builder import MultiTaskGrangerBuilder
 
-df = pd.read_csv("example/PID_no_fault.csv", sep=";", index_col=0)
+frame = pd.read_csv("data.csv", index_col=0)
 
 results = (
-    MultiTaskGrangerBuilder(backend="pytorch")
-    .data(df)
-    .variables(
-        causes=["u", "f1", "f2"],
-        effects=["x1", "x2", "u1", "e1"],
-        tested_causes=["u", "f1", "f2"],
-    )
-    .lag(lag_config=LagEngineConfig(max_lag=5,use_lag_zero=False,),)
-    .model({
-        "epochs": 40,
-        "batch_size": 32,
-        "learning_rate": 1e-3,
-    })
+    MultiTaskGrangerBuilder(backend="numpy")
+    .data(frame)
+    .variables(causes=["x", "y"], effects=["y"], tested_causes=["x"])
+    .stationarity(None)
+    .lag(lag_config={"max_lag": 2, "use_lag_zero": False})
+    .model({"model": "conditional_linear", "epochs": 100})
     .fit()
 )
 
-# result() returns a DataFrame directly.
-causality = results.result(threshold=0.01, with_sign=True)
-print(causality)
-
-# evaluate() returns a CausalityMatrix.
-f_statistics = results.evaluate("f_statistic")
-print(f_statistics.data)
+print(results.result(threshold=0.01))
+print(results.evaluate("f_statistic").data)
 ```
 
-`result(...)` returns a DataFrame directly, while `evaluate(...)` returns a
-`CausalityMatrix`.
+The example assumes numeric time-ordered columns `x` and `y`. Disabling stationarity transformation is an explicit modeling choice, not a general recommendation.
 
-When `with_sign=True`, both the selected metric and the sign metric are
-restored to the requested effect and tested-cause axes before multiplication.
+`result()` returns a DataFrame. `evaluate()` returns a `CausalityMatrix`, whose DataFrame is available through `.data`. Statistical interpretation depends on the assumptions of the selected metric and model; constructing a statistic does not establish its calibration for every constrained or regularized fit.
+
+## Configuration-driven execution
 
 ```python
-signs = results.evaluate("sign").data
-signed_causality = results.result(threshold=0.01, with_sign=True)
+from enhanced_granger_analysis.configuration import AnalysisSpec
+from enhanced_granger_analysis.configuration.loader import AnalysisConfigLoader
+from enhanced_granger_analysis.execution import AnalysisRunner
+
+config = AnalysisConfigLoader.load_file("analysis.yaml")
+spec = AnalysisSpec.from_mapping(config)
+results = AnalysisRunner().run_analysis(spec=spec, data=frame)
 ```
 
-The sign summarizes the sum of base-model coefficients in each cause's
-lagged feature block. It does not describe the direction of the causal arrow.
+The loader reads documents and relation-file references. It does not resolve components. The external configuration remains a flat mapping; `AnalysisSpec` groups it internally.
 
-Effects outside `causes` are allowed. Their lagged values are not automatically
-included in the input matrix, and preprocessing reports this configuration
-with a warning.
+## Architecture
 
-For execution stage by stage, see [API usage](./docs/api_usage.md).
+- `api/`: builder, orchestrator, baseline, and compatibility imports.
+- `configuration/`: analysis/modeling specifications and document loading.
+- `preprocessing/`: existing staged preparation and layout metadata.
+- `modeling/`: assembly, initialization, single-fit execution, and `FitOutcome`.
+- `execution/`: standard fitting coordination and conversion to result snapshots.
+- `backends/`: strategies, existing resolvers/registries, models, and device handling.
+- `experiments/`: explicit configuration-case expansion.
+- `results/`: snapshots, metric evaluation, restoration, and causality matrices.
 
-## Config-Driven Test Runs
+`TrainingResult` contains training diagnostics. `FitOutcome` captures one fit in model output scale. `GrangerAnalysisResults` stores analysis snapshots after target inverse scaling and evaluates their relationships. These are different contracts.
 
-Run grouped experiments from JSON/YAML with per-case matrices and summary metrics:
+## Backends and devices
+
+| Canonical backend | Selection aliases |
+| --- | --- |
+| `pytorch` | `torch` |
+| `keras` | `tensorflow`, `tf` |
+| `numpy` | `sklearn`, `scikit`, `scikit-learn` |
+
+Automatic selection prefers PyTorch, Keras, then NumPy, subject to availability. Explicit selection is preferable when recording an experiment configuration.
+
+PyTorch and Keras interpret `device` using their existing device managers. NumPy ignores `device` during model construction so that experiment cases can share a device declaration. Legacy scikit names select the NumPy implementation; they do not restore the removed scikit package.
+
+## Grouped experiments
 
 ```bash
-python enhanced_granger_analysis/scripts/run_group_causality_tests.py --config enhanced_granger_analysis/scripts/run_group_causality_tests.config.json
+python enhanced_granger_analysis/scripts/run_group_causality_tests.py --config enhanced_granger_analysis/scripts/run_group_causality_tests.config.json --save matrices
 ```
 
-This flow supports loading a list of input DataFrames, running sweep cases, measuring execution time, comparing against ground truth, and saving `summary.csv`.
-
-Details:
-- [docs/config_file_usage.md](docs/config_file_usage.md) — Group config structure and sweepable fields
-- [docs/script_usage.md](docs/script_usage.md) — Script runner options and output layout
+The iterator expands explicitly listed cases, not an automatic Cartesian product. Experiment sweeps are not HPO. The script can compare completed analysis matrices with ground truth; those scores are not a model-selection objective.
 
 ## Installation
 
-### Prerequisites
+Python 3.10 or newer is required by package metadata. Check the requirements of the selected runtime and dependencies separately.
 
-- Package metadata requires Python 3.10 or newer. Check the Python and
-  platform requirements of the pinned dependencies and selected backend
-  before creating the environment.
-- Git must be installed and available on your `PATH`.
-- Using a virtual environment such as `venv` or `conda` is recommended.
+```bash
+git clone https://github.com/Smoldersob/EnhancedGrangerCausalAnalysis.git
+cd EnhancedGrangerCausalAnalysis
+pip install -e .
+```
 
-### Install from the public Git repository
+Optional dependency sets:
 
-If the repository is public on GitHub, it can be installed directly with `pip` over HTTPS:
+```bash
+pip install -e ".[torch]"
+pip install -e ".[tensorflow]"
+pip install -e ".[full]"
+```
+
+Direct Git installation:
 
 ```bash
 pip install "enhanced_granger_analysis @ git+https://github.com/Smoldersob/EnhancedGrangerCausalAnalysis.git"
 ```
 
-This installs the package directly from the repository without publishing it to PyPI. Currently this repo has no PyPI support.
+Select the intended branch or commit explicitly when reproducing a development configuration. Installing the default branch does not guarantee installation of the API described for another branch. No PyPI publication is implied.
 
-### Clone and install locally
+Backend-specific requirements files may also be installed from the repository. Do not interpret the library's Keras selection alias as a command that changes the active Keras runtime; configure that runtime before importing Keras.
 
-If local development or source inspection is preferred:
-
-```bash
-git clone https://github.com/Smoldersob/EnhancedGrangerCausalAnalysis.git
-cd EnhancedGrangerCausalAnalysis
-pip install .
-```
-
-For an editable install:
-
-```bash
-pip install -e .
-```
-
-The project exposes three optional dependency sets:
-
-- `torch`
-- `tensorflow`
-- `full`
-
-This set of dependencies can be downloaded using bellow commands:
+If you want to install it with chosen dependencies use one of bellow commands:
 
 ```bash
 # core + PyTorch backend
@@ -203,38 +143,26 @@ pip install "enhanced_granger_analysis[tensorflow] @ git+https://github.com/Smol
 pip install "enhanced_granger_analysis[full] @ git+https://github.com/Smoldersob/EnhancedGrangerCausalAnalysis.git"
 ```
 
-These commands install the current branch state. For reproducible experiments,
-replace the branch reference with a recorded commit SHA.
+## Documentation
 
-### Clone and install locally
+- [API usage](docs/api_usage.md)
+- [Configuration files](docs/config_file_usage.md)
+- [Execution architecture](docs/execution_architecture.md)
+- [Migration guide](docs/api_refactor_migration.md)
+- [Project structure](docs/project_structure.md)
+- [Backend usage](docs/backend_usage.md)
+- [Component loading](docs/components_loading.md)
+- [Data preprocessing](docs/data_preprocessing.md)
+- [Lag selection](docs/lag_selection.md)
+- [Results and metrics](docs/results_and_metrics.md)
+- [Restricted-run lifecycle](docs/reference_loop.md)
+- [Experiment scripts](docs/script_usage.md)
+- [HPO status](docs/hipero_optimization_documentation.md)
 
-```bash
-git clone https://github.com/Smoldersob/EnhancedGrangerCausalAnalysis.git
-cd EnhancedGrangerCausalAnalysis
-pip install -e .
-```
+## Development and validation
 
-Optional local installations:
+- [Contributing](CONTRIBUTING.md)
+- [Roadmap](VISION.md)
+- [Changelog](Changelog.md)
 
-```bash
-pip install -e ".[torch]"
-pip install -e ".[tensorflow]"
-pip install -e ".[full]"
-```
-
-### Requirements files
-
-If the repository keeps backend-specific requirements files, they can still be used after cloning:
-
-```bash
-pip install -r requirements-torch.txt
-pip install -r requirements-tensorflow.txt
-pip install -r requirements-full.txt
-```
-
-Use this option when a fully explicit environment is preferred over extras.
-
-## Development
-
-- Contributing guide: [CONTRIBUTING.md](CONTRIBUTING.md)
-- Project roadmap: [VISION.md](VISION.md)
+This documentation describes the adopted refactor. Its examples are not a report of executed tests or proof of cross-backend numerical equivalence.

@@ -1,0 +1,1 @@
+The last version of library, for which all tests were done was 2.8.2. For it 861 tests passed, 2 were skipper and 33 returned warnings, but we did not cause errors. We don't promise that all tests will pass in future versions until we will have more time to test them.

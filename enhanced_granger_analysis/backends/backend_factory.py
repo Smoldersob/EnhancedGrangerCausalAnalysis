@@ -1,7 +1,8 @@
 """Factory for instantiating backend strategies."""
 
 import importlib
-from typing import Dict, List, Optional, Set
+from collections.abc import Mapping
+from typing import Dict, List, Optional, Set, Any
 
 from .base_backend import BackendStrategy
 from ..core.exceptions import BackendNotAvailableError, BackendSelectionError
@@ -117,8 +118,7 @@ class BackendFactory:
 			# Return first available backend in preference order
 			backend_name = cls._get_preferred_available_backend()
 
-		backend_name_lower = backend_name.lower().strip()
-		canonical_name = cls._CANONICAL_ALIASES.get(backend_name_lower, backend_name_lower)
+		canonical_name = cls.canonical_name(backend_name)
 		if canonical_name not in cls._BACKEND_REGISTRY:
 			available = cls.list_available_backends()
 			raise BackendSelectionError(
@@ -164,8 +164,7 @@ class BackendFactory:
 		bool
 			True if backend is available, False otherwise.
 		"""
-		backend_name_lower = backend_name.lower().strip()
-		canonical_name = cls._CANONICAL_ALIASES.get(backend_name_lower, backend_name_lower)
+		canonical_name = cls.canonical_name(backend_name)
 		if canonical_name not in cls._BACKEND_REGISTRY:
 			return False
 
@@ -238,3 +237,93 @@ class BackendFactory:
 	def reset_cache(cls) -> None:
 		"""Clear the strategy cache (useful for testing)."""
 		cls._STRATEGY_CACHE.clear()
+
+	@classmethod
+	def canonical_name(
+		cls,
+		name: str | None,
+	) -> str | None:
+		"""Normalize a backend name without checking its availability."""
+
+		if name is None:
+			return None
+
+		if not isinstance(name, str) or not name.strip():
+			raise BackendSelectionError(
+				"Backend name must be a non-empty string or None."
+			)
+
+		normalized = name.strip().lower()
+
+		return cls._CANONICAL_ALIASES.get(
+			normalized,
+			normalized,
+		)
+
+	@classmethod
+	def resolve_configuration(
+		cls,
+		backend_spec: Any,
+		*,
+		model_config: Mapping[str, Any] | None = None,
+	) -> tuple[str | None, dict[str, Any]]:
+		"""Resolve a backend declaration and model configuration defaults.
+
+		This preserves the existing mapping-based backend format.
+		Explicit model configuration overrides backend-provided defaults.
+
+		No strategy is instantiated and no component is constructed.
+		"""
+
+		if model_config is None:
+			explicit_config: dict[str, Any] = {}
+		elif isinstance(model_config, Mapping):
+			explicit_config = dict(model_config)
+		else:
+			raise BackendSelectionError(
+				"model_config must be a mapping or None."
+			)
+
+		if backend_spec is None or isinstance(backend_spec, str):
+			return (
+				cls.canonical_name(backend_spec),
+				explicit_config,
+			)
+
+		if not isinstance(backend_spec, Mapping):
+			raise BackendSelectionError(
+				"Backend specification must be a string, mapping, or None."
+			)
+
+		name = backend_spec.get(
+			"type",
+			backend_spec.get(
+				"name",
+				backend_spec.get("kind"),
+			),
+		)
+
+		if not isinstance(name, str) or not name.strip():
+			raise BackendSelectionError(
+				"Backend mapping requires a non-empty type name."
+			)
+
+		raw_params = backend_spec.get("params", {})
+
+		if raw_params is None:
+			raw_params = {}
+
+		if not isinstance(raw_params, Mapping):
+			raise BackendSelectionError(
+				"Backend params must be a mapping."
+			)
+
+		defaults = dict(raw_params)
+
+		for key, value in backend_spec.items():
+			if key not in {"type", "name", "kind", "params"}:
+				defaults[key] = value
+
+		defaults.update(explicit_config)
+
+		return cls.canonical_name(name), defaults

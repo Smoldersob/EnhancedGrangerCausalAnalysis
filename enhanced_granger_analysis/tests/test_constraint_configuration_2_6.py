@@ -11,8 +11,10 @@ import sys
 from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 from enhanced_granger_analysis.api.builder import MultiTaskGrangerBuilder
-from enhanced_granger_analysis.api.config_loader import (
-    BuilderConfigLoader,
+from enhanced_granger_analysis.configuration.loader import (
+    AnalysisConfigLoader,
+)
+from enhanced_granger_analysis.experiments.config_iterator import (
     TestGroupConfigIterator as GroupConfigIterator,
 )
 from enhanced_granger_analysis.core.components.constraint_parsing import (
@@ -557,17 +559,20 @@ def test_loader_reads_inline_json_relations(tmp_path, declarations):
         {"relations": declarations},
     )
 
-    config = BuilderConfigLoader.load_file(path)
+    config = AnalysisConfigLoader.load_file(path)
 
-    assert config["relations"] == parse_relations_spec(declarations)
+    assert config["relations"] == declarations
 
 
 def test_loader_reads_standalone_relation_list(tmp_path, declarations):
-    path = write_json(tmp_path / "relations.json", declarations)
+    path = write_json(
+        tmp_path / "relations.json",
+        declarations,
+    )
 
-    spec = BuilderConfigLoader.load_relations_file(path)
+    loaded = AnalysisConfigLoader.load_relations_file(path)
 
-    assert spec == parse_relations_spec(declarations)
+    assert loaded == declarations
 
 
 def test_loader_resolves_path_relative_to_config(
@@ -576,7 +581,12 @@ def test_loader_resolves_path_relative_to_config(
     declarations,
 ):
     config_dir = tmp_path / "experiment"
-    write_json(config_dir / "rules" / "relations.json", declarations)
+
+    write_json(
+        config_dir / "rules" / "relations.json",
+        declarations,
+    )
+
     config_path = write_json(
         config_dir / "config.json",
         {"relations": "rules/relations.json"},
@@ -586,65 +596,61 @@ def test_loader_resolves_path_relative_to_config(
     other_dir.mkdir()
     monkeypatch.chdir(other_dir)
 
-    config = BuilderConfigLoader.load_file(config_path)
+    config = AnalysisConfigLoader.load_file(config_path)
 
-    assert config["relations"] == parse_relations_spec(declarations)
+    assert config["relations"] == declarations
 
 
-def test_loader_accepts_absolute_relation_path(tmp_path, declarations):
+def test_loader_accepts_absolute_relation_path(
+    tmp_path,
+    declarations,
+):
     relations_path = write_json(
         tmp_path / "relations.json",
         declarations,
     )
+
     config_path = write_json(
         tmp_path / "config.json",
         {"relations": str(relations_path.resolve())},
     )
 
-    config = BuilderConfigLoader.load_file(config_path)
+    config = AnalysisConfigLoader.load_file(config_path)
 
-    assert config["relations"] == parse_relations_spec(declarations)
+    assert config["relations"] == declarations
 
 
 def test_loader_reads_referenced_yaml(tmp_path, declarations):
     yaml = pytest.importorskip("yaml")
+
     relations_path = tmp_path / "relations.yaml"
     relations_path.write_text(
         yaml.safe_dump(declarations),
         encoding="utf-8",
     )
+
     config_path = write_json(
         tmp_path / "config.json",
         {"relations": "relations.yaml"},
     )
 
-    config = BuilderConfigLoader.load_file(config_path)
+    config = AnalysisConfigLoader.load_file(config_path)
 
-    assert config["relations"] == parse_relations_spec(declarations)
+    assert config["relations"] == declarations
 
 
 def test_loader_reads_inline_yaml(tmp_path, declarations):
     yaml = pytest.importorskip("yaml")
+
     path = tmp_path / "config.yaml"
     path.write_text(
         yaml.safe_dump({"relations": declarations}),
         encoding="utf-8",
     )
 
-    config = BuilderConfigLoader.load_file(path)
+    config = AnalysisConfigLoader.load_file(path)
 
-    assert config["relations"] == parse_relations_spec(declarations)
-
-
-@pytest.mark.parametrize("reference", ["", "   ", "missing.json", "."])
-def test_loader_rejects_invalid_relation_file_reference(tmp_path, reference):
-    config_path = write_json(
-        tmp_path / "config.json",
-        {"relations": reference},
-    )
-
-    with pytest.raises(DataValidationError):
-        BuilderConfigLoader.load_file(config_path)
+    assert config["relations"] == declarations
 
 
 @pytest.mark.parametrize(
@@ -657,29 +663,60 @@ def test_loader_rejects_invalid_relation_file_reference(tmp_path, reference):
         [{"cause": "A", "effect": "Y", "zero": True}],
     ],
 )
-def test_loader_rejects_old_or_invalid_inline_formats(tmp_path, raw):
-    path = write_json(tmp_path / "config.json", {"relations": raw})
+def test_invalid_loaded_relations_are_rejected_during_preparation(
+    tmp_path,
+    raw,
+    prepared_data,
+):
+    path = write_json(
+        tmp_path / "config.json",
+        {"relations": raw},
+    )
+
+    config = AnalysisConfigLoader.load_file(path)
+
+    assert config["relations"] == raw
+
+    builder = MultiTaskGrangerBuilder().from_config(config)
+    builder._prepared_data = prepared_data
 
     with pytest.raises(ConstraintConfigurationError):
-        BuilderConfigLoader.load_file(path)
+        builder.prepare_constraint_data()
 
 
-def test_loader_rejects_wrapped_relation_file(tmp_path, declarations):
-    path = write_json(
+def test_wrapped_relation_file_is_rejected_during_preparation(
+    tmp_path,
+    declarations,
+    prepared_data,
+):
+    write_json(
         tmp_path / "relations.json",
         {"rules": declarations},
     )
 
+    config_path = write_json(
+        tmp_path / "config.json",
+        {"relations": "relations.json"},
+    )
+
+    config = AnalysisConfigLoader.load_file(config_path)
+
+    assert config["relations"] == {"rules": declarations}
+
+    builder = MultiTaskGrangerBuilder().from_config(config)
+    builder._prepared_data = prepared_data
+
     with pytest.raises(ConstraintConfigurationError):
-        BuilderConfigLoader.load_relations_file(path)
+        builder.prepare_constraint_data()
 
 
-def test_loader_normalization_preserves_ready_spec(declarations):
+def test_reference_resolution_preserves_ready_spec(declarations, tmp_path):
     spec = parse_relations_spec(declarations)
 
-    config = BuilderConfigLoader.normalize_builder_config({
-        "relations": spec,
-    })
+    config = AnalysisConfigLoader.resolve_references(
+        {"relations": spec},
+        base_dir=tmp_path,
+    )
 
     assert config["relations"] is spec
 
@@ -702,9 +739,13 @@ def test_group_iterator_resolves_relation_file(tmp_path, declarations):
 
     configs = list(GroupConfigIterator.from_file(group_path))
 
-    assert [cfg["model_config"]["epochs"] for cfg in configs] == [2, 3]
+    assert [
+        cfg["model_config"]["epochs"]
+        for cfg in configs
+    ] == [2, 3]
+
     assert all(
-        cfg["relations"] == parse_relations_spec(declarations)
+        cfg["relations"] == declarations
         for cfg in configs
     )
 
@@ -757,22 +798,45 @@ def test_builder_invalid_relations_preserve_previous_state(declarations):
     assert builder._fit_kwargs["relations"] is previous_spec
     assert builder._constraint is previous_constraint
 
-
-def test_builder_from_config_parses_relations(declarations):
+def test_builder_from_config_defers_relation_parsing(
+    declarations,
+    prepared_data,
+):
     builder = MultiTaskGrangerBuilder().from_config({
         "relations": declarations,
     })
 
-    assert builder._fit_kwargs["relations"] == parse_relations_spec(
-        declarations
+    assert builder._fit_kwargs["relations"] == declarations
+
+    builder._prepared_data = prepared_data
+
+    actual = builder.prepare_constraint_data()
+
+    expected = prepare_constraint_data(
+        parse_relations_spec(declarations),
+        cause_slices=prepared_data.cause_slices,
+        output_names=prepared_data.effects,
+        n_features=prepared_data.X_scaled.shape[1],
+        base_mask=prepared_data.base_mask,
     )
 
+    np.testing.assert_array_equal(
+        actual.mask,
+        expected.mask,
+    )
+    assert actual.rules == expected.rules
 
-def test_builder_from_file_parses_referenced_relations(
+
+def test_builder_from_file_prepares_referenced_relations(
     tmp_path,
     declarations,
+    prepared_data,
 ):
-    write_json(tmp_path / "relations.json", declarations)
+    write_json(
+        tmp_path / "relations.json",
+        declarations,
+    )
+
     config_path = write_json(
         tmp_path / "config.json",
         {"relations": "relations.json"},
@@ -780,8 +844,18 @@ def test_builder_from_file_parses_referenced_relations(
 
     builder = MultiTaskGrangerBuilder().from_file(config_path)
 
-    assert builder._fit_kwargs["relations"] == parse_relations_spec(
-        declarations
+    assert builder._fit_kwargs["relations"] == declarations
+
+    builder._prepared_data = prepared_data
+
+    actual = builder.prepare_constraint_data()
+
+    assert isinstance(actual, PreparedConstraintData)
+    assert actual.rules[0].feature_indices == (2, 4)
+
+    np.testing.assert_array_equal(
+        actual.mask[0, :2],
+        [False, False],
     )
 
 

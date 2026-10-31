@@ -772,7 +772,7 @@ response window.
 - Integration tests and numerical regression checks are required before
   treating these changes as a validated release.
 
-## Stationarity preprocessing refactor 2.8.1
+## Version Changes 2.8.1 - Stationarity preprocessing refactor
 
 ### Changed
 
@@ -802,3 +802,73 @@ response window.
   project-structure documentation.
 - Tests were not executed as part of this change preparation.
   Numerical helper search and fallback behavior remain unchanged.
+
+## Version Changes 2.8.2 — Shared analysis execution and configuration refactor
+
+This entry describes the adopted architecture refactor. No new package version
+is assigned here. Implementation examples and this documentation update are not
+a report of executed regression tests or cross-backend validation.
+
+### Added
+
+- Added `AnalysisSpec` and `ModelingSpec`, reusing the existing preparation
+  configuration and variable-role contracts rather than duplicating them.
+- Added `ModelAssembler`, `ModelInitializer`, and `FitExecutor` as focused services.
+- Added `FitOutcome` for one fit's model-scale predictions, copied full weights,
+  existing `TrainingResult`, and timing information.
+- Added `AnalysisRunner` for full execution and standard fit coordination.
+- Added internal `AnalysisRunProgress` for publishing artifacts and synchronizing
+  builder state after successful stages, including partial failures.
+- Added document-only `AnalysisConfigLoader` and an `experiments` package for
+  explicit configuration-case expansion.
+- Added architecture and migration documentation.
+
+### Changed
+
+- Both the builder and orchestrator execute the shared runner. The orchestrator
+  no longer constructs a builder or mutates its private configuration mapping.
+- Extracted standard full/restricted fitting into `GrangerTrainer`; it returns
+  fit artifacts instead of modifying `GrangerAnalysisResults`.
+- Moved outcome-to-snapshot conversion to the runner, preserving target inverse
+  scaling, current first-weight-array coefficient extraction, and snapshot metadata.
+- Retained `TrainingResult` as the training diagnostics contract; diagnostics are
+  not automatically added to final snapshot metadata or script summary columns.
+- Centralized backend aliases and mapping-form declaration handling in the
+  existing `BackendFactory`, without adding another backend resolver.
+- Kept the external analysis mapping flat; specifications group configuration
+  internally and exclude source/prepared data and live model state.
+- Clarified `from_config()` as a top-level update and `replace_config()` as a
+  reset/replacement; nested maps are not recursively merged.
+- Device values are interpreted by existing Keras/PyTorch managers. NumPy ignores
+  `device` at strategy model construction, including resolved model params, to
+  support shared experiment configuration and automatic backend selection.
+- Group iteration returns mappings, expands explicit case rows, and resolves
+  document references without component normalization or Cartesian expansion.
+
+### Removed
+
+- Removed transitional configuration normalization through `configuration/legacy.py`.
+- Removed normalizing loader helpers `normalize_builder_config()` and
+  `normalize_relations()`; existing domain parsers remain available directly.
+- Removed duplicate backend-alias/device-value handling from document loading.
+
+### Compatibility and migration
+
+- `BuilderConfigLoader` remains an alias of `AnalysisConfigLoader`; it no longer
+  has the former normalizing behavior. Relation-file loading returns raw data.
+- `MultitaskGrangerBuilder` remains an alias of `MultiTaskGrangerBuilder`.
+- Explicit builder stages and public builder fit return values are retained.
+  Complete fit does not dispatch through overridden builder stage methods.
+- `run_analysis()` is the full runner entry point; lower-level `run()` has a
+  different contract and is not a public resume operation.
+- Prepared data is an explicit runtime input. `reuse_data` alone does not create
+  a runner cache; the script's external cache retains its own limitations.
+- Backend mapping params retain their role as model defaults, not arbitrary
+  strategy-constructor options. Explicit model settings take precedence.
+
+### Not included
+
+- Automatic HPO remains inactive despite retained compatibility fields. Future
+  HPO targets model quality, not Granger statistics or ground-truth causal scores.
+- No interchangeable high-level procedure registry, resumable session API,
+  universal component resolver, or new training-device manager is introduced.
