@@ -873,7 +873,7 @@ a report of executed regression tests or cross-backend validation.
 - No interchangeable high-level procedure registry, resumable session API,
   universal component resolver, or new training-device manager is introduced.
 
-## Data splitting and source-aware preparation
+## 2.9 - Data splitting and source-aware preparation
 
 ### Added
 - Prepared-row splitting globally or independently within each series.
@@ -902,8 +902,7 @@ a report of executed regression tests or cross-backend validation.
 
 ## Version Changes 2.10.0 — Standalone Hyperparameter Optimization
 
-Proposed development version following the 2.9 splitting work. This entry
-assumes the HPO changes described below have been applied. It does not claim
+Proposed development version following the 2.9 splitting work. It does not claim
 that all backends have been validated or that a release has been published.
 
 ### Added
