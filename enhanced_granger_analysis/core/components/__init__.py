@@ -16,6 +16,12 @@ from .constraint_serialization import (
     constraint_data_to_config,
 )
 from .constraint_registry import ConstraintClassRegistry
+from .search_parsing import (
+    parse_search_component,
+    parse_choice,
+    SearchComponentSpec,
+)
+
 __all__ = [
     "MinAbsSumRelationRule",
     "PreparedConstraintData",
@@ -29,4 +35,7 @@ __all__ = [
     "constraint_data_from_config",
     "constraint_data_to_config",
     "ConstraintClassRegistry",
+    "parse_search_component",
+    "parse_choice",
+    "SearchComponentSpec",
 ]

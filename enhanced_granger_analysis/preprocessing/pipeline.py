@@ -493,27 +493,26 @@ class DataPreparer:
         Without an active split the scalers are fitted on all rows,
         which preserves the previous fit_transform behavior.
         """
+        """Fit scalers on training rows and transform all prepared rows."""
         prepared = self.prepared_data_
-        training_indices = (
-            prepared.split.training_indices
-            if prepared.split is not None
-            else None
-        )
 
-        if training_indices is None or training_indices.size == 0:
-            return x_obj.fit_transform(X), y_obj.fit_transform(y)
-
-        X_train = X[training_indices]
-        y_train = y[training_indices]
-
-        if X_train.shape[0] == 0 or y_train.shape[0] == 0:
+        if (
+            X.ndim != 2
+            or y.ndim != 2
+            or X.shape[0] != prepared.X_raw.shape[0]
+            or y.shape[0] != prepared.X_raw.shape[0]
+        ):
             raise DataValidationError(
-                "The active data split provides no training rows for "
-                "fitting the scalers."
+                "Scaling inputs are not aligned with prepared rows."
             )
 
-        x_obj.fit(X_train)
-        y_obj.fit(y_train)
+        training = prepared.indices_for(
+            "training",
+            require_nonempty=True,
+        )
+
+        x_obj.fit(X[training])
+        y_obj.fit(y[training])
 
         return x_obj.transform(X), y_obj.transform(y)
 
@@ -934,6 +933,7 @@ class DataPreparer:
             .scale()
             .reduce_workload()
         )
+        self.prepared_data_.finalize_split()
         return self
     
     def get_feature_map(self) -> dict[str, slice]:
@@ -950,6 +950,7 @@ class DataPreparer:
             "effects": self.prepared_data_.effective_roles.effects,
             "causes": self.prepared_data_.effective_roles.causes,
             "tested_causes": self.prepared_data_.effective_roles.tested_causes,
+            "split": self.prepared_data_.split_snapshot(),
         }
 
 

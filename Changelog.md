@@ -899,3 +899,74 @@ a report of executed regression tests or cross-backend validation.
 ### Verification
 - Implementation patches and tests were proposed in conversation.
 - Repository integration and test execution remain to be confirmed.
+
+## Version Changes 2.10.0 — Standalone Hyperparameter Optimization
+
+Proposed development version following the 2.9 splitting work. This entry
+assumes the HPO changes described below have been applied. It does not claim
+that all backends have been validated or that a release has been published.
+
+### Added
+
+- Added standalone model-quality hyperparameter search through
+  `execution/model_search_runner.py::ModelSearchRunner`.
+- Added `ModelSearchSpec` and `SearchBudget` for declarative search settings,
+  candidate-count limits, trial epoch limits, and training seeds.
+- Added a dedicated `SearchSpaceParser`, normalized parameter paths, discrete
+  choices, integer ranges, and linear or logarithmic floating-point ranges.
+- Added decorator-registered grid and random strategies using the shared
+  `Registry`. Grid enumerates discrete combinations; random samples domains
+  with replacement. The runner owns the maximum number of trials.
+- Added the `hiperopt/objectives/` package with `BaseObjective`,
+  `ObjectiveResult`, registry-based resolution, MSE, MAE, RMSE, named output
+  weights, and an explicit-direction `CallableObjective` adapter.
+- Added `modeling/search_evaluator.py::ModelCandidateEvaluator`, reusing
+  `ModelAssembler`, `ModelInitializer`, and `FitExecutor` to evaluate one
+  multi-output candidate on an existing training/validation split.
+- Added candidate configuration application without mutation of baseline
+  declarations, including copying configuration containers and numeric arrays.
+- Added `TrialResult`, `TrialError`, `ModelSearchResult`, and
+  `ModelSearchFailedError` with trial history, selected modeling settings,
+  split snapshots, budget metadata, and search stop reasons.
+- Added shared input validation, explicit error recording, deterministic
+  first-successful-trial tie breaking, and finite-score checks.
+
+### Changed
+
+- Extended `ModelInitializer.compute_weights()` with optional training-row
+  selection and an explicit initialization mask. Existing calls remain valid.
+- Each HPO trial constructs a fresh model and fresh model-specific components;
+  prepared data and fitted preprocessing transformations remain fixed during
+  the search. No trained trial objects are transferred to another trial.
+- Trial-only epoch limits are applied separately from selected final-training
+  settings. Fixed epoch budgets reject conflicting search dimensions.
+- Normalized prepared split artifacts to include `training`, `validation`,
+  and `test`. Without a splitter, all prepared rows are training rows and the
+  other two parts are empty.
+
+### Compatibility notes
+
+- Code expecting `PreparedData.split is None` must inspect the explicit split
+  instead. Empty optional parts are now valid; malformed or overlapping
+  assignments remain invalid.
+- Random strategy declarations use `seed`; candidate limits belong to
+  `SearchBudget.max_trials`, not a strategy-level `n_trials` parameter.
+- Ready model, optimizer, loss, callback, constraint, regularizer, and
+  initializer instances are not supported as training-component inputs by
+  this initial evaluator. Use supported names, classes, or declarations.
+- Existing configuration parsers still define which forms each component
+  accepts. The evaluator does not make all component formats interchangeable.
+
+### Scope and limitations
+
+- Search is available through the standalone Python interface. Automatic
+  integration with the standard analysis runner, builder, orchestrator, and
+  file-based analysis configuration is not included in this change.
+- HPO requires a non-empty training part and a non-empty validation part.
+  It does not run restricted Granger models, select by p-values, evaluate a
+  test part, or automatically fit the selected final analysis.
+- Separate HPO and Granger preprocessing contexts are an integration design,
+  not an automatically executed workflow in this release.
+- No claim is made that the implementation or the revised tests were executed.
+- The explicit split representation changes the earlier low-level contract.
+  Review release numbering if that contract is already a stable public API.

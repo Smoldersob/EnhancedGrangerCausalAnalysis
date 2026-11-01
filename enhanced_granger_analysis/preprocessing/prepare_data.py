@@ -5,11 +5,13 @@ from dataclasses import dataclass, field
 from typing import Any, Literal, Mapping, Optional, Sequence
 
 from .lag.lag_engine import LagEngine
-from ..core.lag_config import LagFittedConfig
 from .splitting.base import DataSplit
 from .stationarity import BaseStationarityEnforcer
 from .missing import BaseImputer
 from .sampling import NoSampling, SamplingStrategy
+
+from ..core.lag_config import LagFittedConfig
+from ..core.exceptions import DataValidationError
 
 @dataclass(frozen=True)
 class VariableRoles:
@@ -49,11 +51,11 @@ class PreparedData:
 	)
 	cause_slices: dict[str, slice] = field(default_factory=dict)
 	feature_lags: np.ndarray = field(
-        default_factory=lambda: np.empty(0, dtype=np.int64)
-    )
+		default_factory=lambda: np.empty(0, dtype=np.int64)
+	)
 	removed_variables: dict[str, RemovedVariable] = field(
-        default_factory=dict
-    )
+		default_factory=dict
+	)
 	sample_indices: np.ndarray = field(
 		default_factory=lambda: np.empty(0, dtype=int)
 	)
@@ -100,11 +102,78 @@ class PreparedData:
 			requested_roles=VariableRoles((), (), ()),
 			effective_roles=VariableRoles((), (), ()),
 			cause_slices={},
-			            feature_lags=np.empty(0, dtype=np.int64),
+						feature_lags=np.empty(0, dtype=np.int64),
 			removed_variables={},
 			sample_indices=np.empty(0, dtype=int),
 			lag_fitted=None,
 			split=None,
+		)
+	
+	def resolved_split(self) -> DataSplit:
+		"""Return validated assignments without changing this artifact."""
+		n_rows = self.X_raw.shape[0]
+
+		if self.y_raw.shape[0] != n_rows:
+			raise DataValidationError(
+				"X_raw and y_raw have different row counts."
+			)
+
+		if self.split is None:
+			return DataSplit.all_training(n_rows)
+
+		return self.split.validate(n_rows)
+
+	def finalize_split(self) -> DataSplit:
+		"""Store explicit assignments after preparation is complete."""
+		split = self.resolved_split()
+		self.split = split
+		return split
+
+	def indices_for(
+		self,
+		part: str,
+		*,
+		require_nonempty: bool = False,
+	) -> np.ndarray:
+		"""Return indices into the current prepared matrices."""
+		return self.resolved_split().indices_for(
+			part,
+			require_nonempty=require_nonempty,
+		)
+
+	def arrays_for(
+		self,
+		part: str,
+		*,
+		scaled: bool = True,
+		require_nonempty: bool = True,
+	) -> tuple[np.ndarray, np.ndarray]:
+		"""Select aligned predictors and targets for one part."""
+		X = self.X_scaled if scaled else self.X_raw
+		y = self.y_scaled if scaled else self.y_raw
+		n_rows = self.X_raw.shape[0]
+
+		if (
+			X.ndim != 2
+			or y.ndim != 2
+			or X.shape[0] != n_rows
+			or y.shape[0] != n_rows
+		):
+			raise DataValidationError(
+				"Prepared matrices are not aligned."
+			)
+
+		indices = self.indices_for(
+			part,
+			require_nonempty=require_nonempty,
+		)
+
+		return X[indices], y[indices]
+
+	def split_snapshot(self) -> dict:
+		"""Return a serializable copy of the row assignments."""
+		return self.resolved_split().to_dict(
+			n_rows=self.X_raw.shape[0],
 		)
 
 

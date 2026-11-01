@@ -116,10 +116,47 @@ def test_available_splitters_lists_all_registered_names():
 
 
 def test_no_splitter_preserves_legacy_behavior():
+    """No splitter assigns all prepared rows to training."""
     preparer = fit_preparer(make_preparer(None))
+    prepared = preparer.prepared_data_
+    split = prepared.split
 
-    assert preparer.prepared_data_.split is None
-    assert preparer.prepared_data_.X_scaled.shape == preparer.prepared_data_.X_raw.shape
+    assert split is not None
+    assert split.stage == "prepared"
+    assert split.splitter_name is None
+    assert split.part_names == ("training", "validation", "test")
+
+    n_rows = prepared.X_raw.shape[0]
+    assert n_rows > 0
+
+    np.testing.assert_array_equal(
+        split.training_indices,
+        np.arange(n_rows, dtype=np.intp),
+    )
+
+    for part in ("validation", "test"):
+        indices = split.indices_for(part)
+        assert indices.shape == (0,)
+        assert indices.dtype.kind in {"i", "u"}
+
+    assert prepared.X_scaled.shape == prepared.X_raw.shape
+    assert prepared.y_scaled.shape == prepared.y_raw.shape
+
+    # Default standard scaling must still use all prepared rows.
+    for raw, scaled in (
+        (prepared.X_raw, prepared.X_scaled),
+        (prepared.y_raw, prepared.y_scaled),
+    ):
+        mean = raw.mean(axis=0)
+        scale = raw.std(axis=0, ddof=0)
+        scale = np.where(scale == 0.0, 1.0, scale)
+
+        np.testing.assert_allclose(
+            scaled,
+            (raw - mean) / scale,
+            rtol=1e-10,
+            atol=1e-10,
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -128,37 +165,76 @@ def test_no_splitter_preserves_legacy_behavior():
 
 
 def test_temporal_blocks_assigns_prefix_and_suffix_per_dataset():
+    """Assign each source prefix to training and suffix to validation."""
+    data = make_datasets()
+
     preparer = fit_preparer(
-        make_preparer(
-            {"type": "temporal_blocks", "params": {"parts": {"training": 0.6, "validation": 0.4}}}
-        )
+        make_preparer({
+            "type": "temporal_blocks",
+            "params": {
+                "parts": {
+                    "training": 0.6,
+                    "validation": 0.4,
+                },
+            },
+        }),
+        data=data,
     )
 
-    split = preparer.prepared_data_.split
+    prepared = preparer.prepared_data_
+    split = prepared.split
+
+    assert split is not None
     assert split.stage == "source"
-    assert set(split.parts) == {"training", "validation"}
+    assert split.part_names == ("training", "validation", "test")
+    assert split.indices_for("test").size == 0
 
-    n_rows = preparer.prepared_data_.X_raw.shape[0]
-    training = split.training_indices
-    validation = split.parts["validation"]
-
-    assert training.size + validation.size == n_rows
-
-    # Within each source dataset the training rows precede validation rows.
-    lagged = preparer.prepared_data_.lag_engine.transform(make_datasets())
+    lagged = prepared.lag_engine.transform(data)
+    expected_training = []
+    expected_validation = []
 
     for segment in lagged.segments:
-        segment_rows = np.arange(
+        frame = data[segment.dataset_index]
+
+        source_positions = frame.index.get_indexer(
+            segment.retained_index
+        )
+        assert np.all(source_positions >= 0)
+
+        prepared_rows = np.arange(
             segment.prepared_row_slice.start,
             segment.prepared_row_slice.stop,
+            dtype=np.intp,
         )
-        in_training = np.isin(segment_rows, training)
-        in_validation = np.isin(segment_rows, validation)
 
-        assert np.all(in_training | in_validation)
-        assert np.all(in_training[:-1] >= in_training[1:])  # prefix shape
-        last_training = np.flatnonzero(in_training)[-1]
-        assert np.all(~in_validation[: last_training + 1])
+        assert prepared_rows.size == source_positions.size
+
+        # The fixture has 60 rows: the 60% boundary is position 36.
+        boundary = int(len(frame) * 0.6)
+        training_mask = source_positions < boundary
+
+        assert np.any(training_mask)
+        assert np.any(~training_mask)
+
+        expected_training.append(prepared_rows[training_mask])
+        expected_validation.append(prepared_rows[~training_mask])
+
+    np.testing.assert_array_equal(
+        split.indices_for("training"),
+        np.sort(np.concatenate(expected_training)),
+    )
+    np.testing.assert_array_equal(
+        split.indices_for("validation"),
+        np.sort(np.concatenate(expected_validation)),
+    )
+
+    np.testing.assert_array_equal(
+        np.sort(np.concatenate([
+            split.indices_for("training"),
+            split.indices_for("validation"),
+        ])),
+        np.arange(prepared.X_raw.shape[0], dtype=np.intp),
+    )
 
 
 def test_temporal_blocks_fits_preprocessing_on_training_rows_only():
@@ -191,31 +267,76 @@ def test_temporal_blocks_requires_fractions_summing_to_one():
 
 
 def test_dataset_level_assigns_whole_datasets():
+    """Assign whole datasets without splitting their prepared rows."""
+    data = make_datasets()
+
     preparer = fit_preparer(
-        make_preparer(
-            {"type": "dataset_level", "params": {"parts": {"training": 2, "validation": 1}}}
-        )
+        make_preparer({
+            "type": "dataset_level",
+            "params": {
+                "parts": {
+                    "training": 2,
+                    "validation": 1,
+                },
+            },
+        }),
+        data=data,
     )
 
-    split = preparer.prepared_data_.split
-    assert set(split.parts) == {"training", "validation"}
+    prepared = preparer.prepared_data_
+    split = prepared.split
 
-    engine = preparer.prepared_data_.lag_engine
-    fitted = engine.fitted_config_
-    assert fitted is not None
+    assert split is not None
+    assert split.stage == "source"
+    assert split.part_names == ("training", "validation", "test")
+    assert split.indices_for("test").size == 0
 
-    # Dataset 0 and 2 are training; dataset 1 is validation.
-    lagged = engine.transform(make_datasets())
-    training_rows = 0
-    validation_rows = 0
+    engine = prepared.lag_engine
+    assert engine.fitted_config_ is not None
+
+    training = split.indices_for("training")
+    validation = split.indices_for("validation")
+    lagged = engine.transform(data)
+
+    dataset_owners = {}
+
     for segment in lagged.segments:
-        if segment.dataset_index == 1:
-            validation_rows += segment.prepared_row_slice.stop - segment.prepared_row_slice.start
-        else:
-            training_rows += segment.prepared_row_slice.stop - segment.prepared_row_slice.start
+        segment_rows = np.arange(
+            segment.prepared_row_slice.start,
+            segment.prepared_row_slice.stop,
+            dtype=np.intp,
+        )
+        assert segment_rows.size > 0
 
-    assert split.parts["training"].size == training_rows
-    assert split.parts["validation"].size == validation_rows
+        in_training = np.isin(segment_rows, training)
+        in_validation = np.isin(segment_rows, validation)
+
+        assert np.all(in_training ^ in_validation)
+
+        if np.all(in_training):
+            owner = "training"
+        elif np.all(in_validation):
+            owner = "validation"
+        else:
+            pytest.fail(
+                f"Dataset {segment.dataset_index} was split "
+                "between training and validation."
+            )
+
+        previous_owner = dataset_owners.setdefault(
+            segment.dataset_index,
+            owner,
+        )
+        assert previous_owner == owner
+
+    assert set(dataset_owners) == set(range(len(data)))
+    assert list(dataset_owners.values()).count("training") == 2
+    assert list(dataset_owners.values()).count("validation") == 1
+
+    np.testing.assert_array_equal(
+        np.sort(np.concatenate([training, validation])),
+        np.arange(prepared.X_raw.shape[0], dtype=np.intp),
+    )
 
 
 def test_dataset_level_explicit_positions_and_validation_errors():
@@ -417,27 +538,72 @@ def test_lag_engine_transform_validates_schema():
 
 
 def test_data_split_validation_rejects_bad_parts():
-    with pytest.raises(DataValidationError):
-        DataSplit(stage="prepared", splitter_name="x", parts={}).validate(10)
+    """Reject malformed assignments and normalize optional parts."""
+    bad_parts = [
+        {},
+        {"training": np.array([0, 0], dtype=np.intp)},
+        {"training": np.array([2, 1], dtype=np.intp)},
+        {"training": np.array([-1, 0], dtype=np.intp)},
+        {"training": np.array([0, 5], dtype=np.intp)},
+        {"training": np.array([0.0, 1.0], dtype=float)},
+        {"training": np.array([[0, 1]], dtype=np.intp)},
+        {
+            "training": np.array([0, 1], dtype=np.intp),
+            "validation": np.array([1, 2], dtype=np.intp),
+        },
+    ]
 
-    with pytest.raises(DataValidationError):
-        DataSplit(
-            stage="prepared",
-            splitter_name="x",
-            parts={"training": np.array([0, 0])},
-        ).validate(10)
+    for parts in bad_parts:
+        with pytest.raises(DataValidationError):
+            DataSplit(
+                stage="prepared",
+                splitter_name="x",
+                parts=parts,
+            ).validate(5)
 
-    with pytest.raises(DataValidationError):
-        DataSplit(
-            stage="prepared",
-            splitter_name="x",
-            parts={"training": np.array([0, 5])},
-        ).validate(5)
-
+    # An omitted optional part is normalized to an empty integer array.
     good = DataSplit(
         stage="prepared",
         splitter_name="x",
-        parts={"training": np.array([0, 1, 2]), "validation": np.array([3, 4])},
+        parts={
+            "training": np.array([0, 1, 2], dtype=np.intp),
+            "validation": np.array([3, 4], dtype=np.intp),
+        },
     ).validate(5)
-    assert good.part_names == ("training", "validation")
-    assert good.training_indices.tolist() == [0, 1, 2]
+
+    assert good.part_names == ("training", "validation", "test")
+
+    np.testing.assert_array_equal(
+        good.training_indices,
+        np.array([0, 1, 2], dtype=np.intp),
+    )
+    np.testing.assert_array_equal(
+        good.indices_for("validation"),
+        np.array([3, 4], dtype=np.intp),
+    )
+
+    assert good.indices_for("test").shape == (0,)
+    assert good.indices_for("test").dtype.kind in {"i", "u"}
+
+    # Explicitly empty validation and test parts are also valid.
+    training_only = DataSplit(
+        stage="prepared",
+        splitter_name=None,
+        parts={
+            "training": np.arange(5, dtype=np.intp),
+            "validation": np.empty(0, dtype=np.intp),
+            "test": np.empty(0, dtype=np.intp),
+        },
+    ).validate(5)
+
+    assert training_only.part_names == (
+        "training",
+        "validation",
+        "test",
+    )
+    np.testing.assert_array_equal(
+        training_only.training_indices,
+        np.arange(5, dtype=np.intp),
+    )
+    assert training_only.indices_for("validation").size == 0
+    assert training_only.indices_for("test").size == 0

@@ -37,6 +37,11 @@ class GrangerTrainer:
     ) -> FitOutcome:
         """Fit the unrestricted model and capture its artifacts."""
 
+        # Teporary restriction: 
+        # The standard Granger workflow currently requires all prepared rows to belong to training.
+        # Use the split-aware executor for HPO. Prepare a separate analytical sample for final refitting.
+        self._require_full_training_sample(prepared)
+
         timings: dict[str, float] = {}
 
         started = perf_counter()
@@ -92,6 +97,11 @@ class GrangerTrainer:
         start_with_initial: bool = False,
     ) -> FitOutcome:
         """Fit one restricted model and capture its artifacts."""
+        
+        # Teporary restriction: 
+        # The standard Granger workflow currently requires all prepared rows to belong to training.
+        # Use the split-aware executor for HPO. Prepare a separate analytical sample for final refitting.
+        self._require_full_training_sample(prepared)
 
         if base_weights is None:
             raise DataValidationError(
@@ -193,3 +203,25 @@ class GrangerTrainer:
             np.asarray(weight).copy()
             for weight in weights
         ])
+
+    @staticmethod
+    def _require_full_training_sample(
+        prepared: PreparedData,
+    ) -> None:
+        """Reject held-out rows in the standard Granger workflow."""
+        training = prepared.indices_for(
+            "training",
+            require_nonempty=True,
+        )
+        expected = np.arange(
+            prepared.X_raw.shape[0],
+            dtype=np.intp,
+        )
+
+        if not np.array_equal(training, expected):
+            raise DataValidationError(
+                "The standard Granger workflow currently requires "
+                "all prepared rows to belong to training. "
+                "Use the split-aware executor for HPO. "
+                "Prepare a separate analytical sample for final refitting."
+            )

@@ -2,7 +2,7 @@
 
 EnhancedGrangerCausalAnalysis provides configurable, multi-output Granger-causality analysis for multivariate time series. It separates data preparation, model construction, fitting, and evaluation of completed model snapshots.
 
-Current package version: `2.8.2`.
+Current package version: `2.10`.
 
 ## Main capabilities
 

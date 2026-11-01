@@ -8,6 +8,7 @@ from . import (
 	protocols,
 	registry,
 	training_config,
+	search,
 )
 
 
@@ -20,6 +21,7 @@ __all__ = [
     "protocols",
     "registry",
     "training_config",
+    "search",
 ]
 
 
