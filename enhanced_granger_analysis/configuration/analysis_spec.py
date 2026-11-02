@@ -4,6 +4,7 @@ from dataclasses import dataclass, field, fields
 from typing import Any, Mapping, Sequence
 
 from .modeling_spec import ModelingSpec
+from .model_search_spec import ModelSearchSpec
 
 from ..core.exceptions import DataValidationError
 
@@ -63,6 +64,7 @@ class AnalysisSpec:
     modeling: ModelingSpec = field(
         default_factory=ModelingSpec
     )
+    search: ModelSearchSpec | None = None
 
     reuse_data: bool = False
 
@@ -87,6 +89,22 @@ class AnalysisSpec:
                 "The 'regularizer' configuration field is not supported. "
                 "Use 'regularizer_spec'."
             )
+
+        if config.get("hiperoptimalization_state") is not None or config.get(
+            "hiperoptimalization_conf"
+        ) is not None:
+            raise DataValidationError(
+                "Legacy hyperoptimization settings are not supported. "
+                "Use the 'search' declaration instead."
+            )
+
+        search_value = config.get("search")
+        if search_value is None:
+            search = None
+        elif isinstance(search_value, ModelSearchSpec):
+            search = search_value
+        else:
+            search = ModelSearchSpec.from_mapping(search_value)
 
         preparation_values = {
             item.name: config[item.name]
@@ -158,10 +176,5 @@ class AnalysisSpec:
             ),
             modeling=ModelingSpec(**modeling_values),
             reuse_data=bool(config.get("reuse_data", False)),
-            hiperoptimalization_state=config.get(
-                "hiperoptimalization_state"
-            ),
-            hiperoptimalization_conf=config.get(
-                "hiperoptimalization_conf"
-            ),
+            search=search,
         )

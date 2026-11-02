@@ -214,6 +214,85 @@ Use empty relations for no additional named rules. `relations: null` is not supp
 
 See [Components](components_loading.md) and [Backend usage](backend_usage.md).
 
+## Hyperparameter optimization
+
+Model-quality hyperparameter optimization can be declared in the same JSON or
+YAML file under `search`. The search runs before final model construction and
+selects a `ModelingSpec`; it does not select Granger statistics and does not
+reuse a trained trial model.
+
+```yaml
+backend: numpy
+causes: [a, b]
+effects: [y]
+tested_causes: [a, b]
+stationarity: null
+lag_config:
+  max_lag: 2
+search:
+  preparation:
+    splitter:
+      type: temporal_blocks
+      params:
+        parts:
+          training: 0.75
+          validation: 0.25
+    random_state: 123
+  space:
+    model_config.learning_rate:
+      choices: [0.1, 0.5, 1.0]
+    model_config.batch_size:
+      choices: [16, 32]
+  strategy:
+    type: grid
+  objective:
+    type: mse
+  budget:
+    max_trials: 6
+    epochs_per_trial: 20
+  validation_part: validation
+  objective_scale: scaled
+  training_seed: 42
+  collect_history: true
+  error_policy: raise
+```
+
+The `search.preparation` section inherits the final analysis preparation and
+supports only `splitter` and `random_state` overrides. It is prepared in a
+separate context. The splitter must provide non-empty `training` and
+`validation` parts. Use `splitter: null` only when intentionally testing the
+clear validation error for enabled HPO.
+
+Load and execute the file through either public path:
+
+```python
+from enhanced_granger_analysis.api.builder import MultiTaskGrangerBuilder
+
+results = (
+    MultiTaskGrangerBuilder()
+    .from_file("analysis.yaml")
+    .data(frame)
+    .fit()
+)
+```
+
+or:
+
+```python
+from enhanced_granger_analysis.configuration.loader import AnalysisConfigLoader
+from enhanced_granger_analysis.configuration.analysis_spec import AnalysisSpec
+from enhanced_granger_analysis.execution.runner import AnalysisRunner
+
+mapping = AnalysisConfigLoader.load_file("analysis.yaml")
+spec = AnalysisSpec.from_mapping(mapping)
+results = AnalysisRunner().run_analysis(spec=spec, data=frame)
+```
+
+The resulting `GrangerAnalysisResults.model_search_result` contains the
+selected configuration, split metadata, budget, and trial history. Legacy
+`hiperoptimalization_state` and `hiperoptimalization_conf` fields are rejected
+with a migration message; use `search` instead.
+
 ## Explicit groups of experiments
 
 ```json
@@ -252,7 +331,14 @@ DataFrame inputs and `PreparedData` are runtime inputs, not serializable fields 
 
 ## HPO status
 
-`hiperoptimalization_state` and `hiperoptimalization_conf` are retained but inactive. No `search` document section is implemented by this refactor. Sweeping L1 here executes multiple experiments; it does not select L1 internally by model-quality validation.
+The `search` section described above is the supported integrated HPO workflow.
+It selects model settings by validation objective before the final Granger
+model is built. Sweeping a parameter through the experiment iterator still
+executes multiple independent experiments; it does not select that parameter
+internally by model-quality validation.
+
+`hiperoptimalization_state` and `hiperoptimalization_conf` are legacy fields
+and are rejected with an actionable migration message. Use `search` instead.
 
 ## Migration
 

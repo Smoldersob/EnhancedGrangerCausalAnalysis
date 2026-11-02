@@ -50,6 +50,7 @@ class ModelSearchRunner:
         spec: ModelSearchSpec,
         modeling: ModelingSpec,
         prepared: PreparedData,
+        preparation: Mapping[str, object] | None = None,
     ) -> ModelSearchResult:
         """Evaluate candidates and return selected modeling settings."""
         started = perf_counter()
@@ -140,6 +141,7 @@ class ModelSearchRunner:
                 else "space_exhausted"
             ),
             duration_seconds=perf_counter() - started,
+            preparation=preparation,
         )
 
     @staticmethod

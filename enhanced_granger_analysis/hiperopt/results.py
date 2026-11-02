@@ -108,6 +108,7 @@ class ModelSearchResult:
         "space_exhausted",
     ]
     duration_seconds: float
+    preparation: Mapping[str, object] | None = None
 
     def __post_init__(self) -> None:
         ids = [trial.trial_id for trial in self.trials]

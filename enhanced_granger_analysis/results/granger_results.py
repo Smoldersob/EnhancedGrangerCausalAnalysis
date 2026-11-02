@@ -146,6 +146,8 @@ class GrangerAnalysisResults:
 		self._metric_cache: dict[Any, CausalityMatrix] = {}
 		self._rss_cache: dict[str, NDArray[np.float64]] = {}
 		self.preparation_context: Optional[PreparationContext] = None
+		self.model_search_result: Any = None
+		self.effective_modeling: Any = None
 
 	@property
 	def base_predictions(self) -> NDArray[np.float64] | None:

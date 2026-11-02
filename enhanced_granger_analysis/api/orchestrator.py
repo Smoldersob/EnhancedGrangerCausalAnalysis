@@ -59,6 +59,8 @@ class MultiTaskGrangerAPI:
         hiperoptimalization_conf: Optional[Dict[str, Any]] = None,
         initializer: Any = None,
         model_config: Optional[Dict[str, Any]] = None,
+        search: Any = None,
+        search_prepared_data: Any = None,
         fit_restricted: bool = True,
     ) -> GrangerAnalysisResults:
         """Execute an analysis using declarative preprocessing settings.
@@ -98,6 +100,7 @@ class MultiTaskGrangerAPI:
             "hiperoptimalization_conf": hiperoptimalization_conf,
             "initializer": initializer,
             "model_config": model_config,
+            "search": search,
         }
 
         spec = AnalysisSpec.from_mapping(config)
@@ -106,5 +109,6 @@ class MultiTaskGrangerAPI:
             spec=spec,
             data=data,
             prepared_data=prepared_data,
+            search_prepared_data=search_prepared_data,
             fit_restricted=fit_restricted,
         )

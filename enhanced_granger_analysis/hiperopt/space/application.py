@@ -5,6 +5,8 @@ from __future__ import annotations
 from collections.abc import Mapping
 from typing import Any
 
+import numpy as np
+
 from .base import SearchCandidate
 from .parser import SearchSpaceParser
 

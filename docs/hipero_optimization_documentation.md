@@ -6,13 +6,11 @@ This document describes the standalone HPO implementation prepared for
 EnhancedGrangerCausalAnalysis: contracts, parsing, objectives, strategies,
 candidate evaluation, budgets, and the search loop.
 
-It assumes the code fragments and subsequent corrections from the HPO work
-have been applied. It is not an independent audit of the local repository and
-does not claim successful execution across all backends.
+It describes the integrated HPO workflow available through the analysis
+runner, builder, orchestrator, and configuration-file APIs.
 
-The standard analysis runner does not automatically invoke this subsystem.
-Automatic public API integration and file-based analysis integration are not
-part of this document's implemented workflow.
+When `search` is configured, HPO runs before final model construction.
+Disabled search preserves the existing analysis workflow.
 s
 ## Purpose
 
@@ -162,10 +160,16 @@ lag-engine state, initial weights, models, optimizers, and callbacks do not.
 The same preparation declarations can be used in both contexts without
 sharing their fitted instances.
 
-Automatic orchestration of these two contexts is not implemented by the
-standalone search module. The caller must prepare the HPO artifact explicitly.
-Do not assume that `ModelSearchSpec` already has a working `preparation`
-override field or a file-loading integration.
+`AnalysisRunner.run_analysis()` prepares the HPO context automatically when
+source observations are supplied. An explicitly prepared
+`search_prepared_data` artifact can be supplied instead. The final analysis
+still uses its own `prepared_data` or preparation declaration; HPO artifacts
+are never reused as final-analysis artifacts.
+
+`ModelSearchSpec.preparation` may override only `splitter` and
+`random_state`. A missing override inherits the analysis declaration, while
+`splitter: null` explicitly disables splitting and therefore fails enabled HPO
+because validation data are required.
 
 ## Search space
 
@@ -471,6 +475,47 @@ provenance or a fully reproducible experiment manifest.
 
 This example uses a NumPy model and explicitly prepares HPO data. It is
 illustrative code, not a claim of runtime verification.
+
+## Integrated analysis example
+
+The public API accepts the same declaration through `search`:
+
+```python
+results = MultiTaskGrangerAPI(backend="numpy").fit(
+    data,
+    causes=["a", "b"],
+    tested_causes=["a", "b"],
+    effects=["y"],
+    stationarity=None,
+    lag_config={"max_lag": 2},
+    search={
+        "preparation": {
+            "splitter": {
+                "type": "temporal_blocks",
+                "params": {
+                    "parts": {"training": 0.75, "validation": 0.25}
+                },
+            },
+            "random_state": 123,
+        },
+        "space": {
+            "model_config.learning_rate": {
+                "choices": [0.1, 0.5, 1.0]
+            }
+        },
+        "strategy": {"type": "grid"},
+        "objective": {"type": "mse"},
+        "budget": {"max_trials": 3, "epochs_per_trial": 20},
+        "validation_part": "validation",
+        "training_seed": 42,
+    },
+)
+```
+
+The result exposes `model_search_result`, including trial history and the
+selected `best_modeling`. The final Granger model is freshly constructed from
+that selected specification and is trained with its normal final-training
+settings; the trial epoch limit is not copied into final training.
 
 ```python
 import numpy as np

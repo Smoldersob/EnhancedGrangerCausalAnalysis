@@ -8,6 +8,7 @@ from pathlib import Path
 from typing import Any, Dict, List, Mapping, Optional, Sequence
 
 from ..configuration.analysis_spec import AnalysisSpec
+from ..configuration.modeling_spec import ModelingSpec
 from ..configuration.loader import AnalysisConfigLoader
 
 from ..modeling.assembler import ModelAssembler
@@ -112,6 +113,8 @@ class MultiTaskGrangerBuilder:
             "initializer": None, 
             "model_config": None,
             "prepared_data": None,
+            "search": None,
+            "search_prepared_data": None,
         }
         self._model_assembler = ModelAssembler()
         self._model_initializer = ModelInitializer()
@@ -138,6 +141,8 @@ class MultiTaskGrangerBuilder:
         self._base_weights: Optional[List[np.ndarray]] = None
         self._results: Optional[GrangerAnalysisResults] = None
         self._hyperopt_result: Any = None
+        self._model_search_result: Any = None
+        self._effective_modeling: ModelingSpec | None = None
 
     
     # Configuration methods remain deliberately side-effect free.
@@ -517,7 +522,7 @@ class MultiTaskGrangerBuilder:
 
         compiled = self._model_assembler.prepare_constraint_data(
             prepared=self._prepared_data,
-            relations=self._fit_kwargs["relations"],
+            relations=self._current_modeling().relations,
         )
 
         self._constraint_data = compiled
@@ -531,7 +536,7 @@ class MultiTaskGrangerBuilder:
         self._require_prepared()
 
         spec = parse_regularizer_spec(
-            self._fit_kwargs.get("regularizer_spec")
+            self._current_modeling().regularizer_spec
         )
 
         self._invalidate_from(
@@ -590,7 +595,7 @@ class MultiTaskGrangerBuilder:
 
         self._require_prepared()
 
-        modeling = self.to_spec().modeling
+        modeling = self._current_modeling()
 
         self._strategy = BackendFactory.get_strategy(
             modeling.backend
@@ -607,7 +612,7 @@ class MultiTaskGrangerBuilder:
 
         constraint = self._model_assembler.build_constraint(
             strategy=self._strategy,
-            constraint_spec=self._fit_kwargs["constraint_spec"],
+            constraint_spec=self._current_modeling().constraint_spec,
             data=data,
         )
 
@@ -624,7 +629,7 @@ class MultiTaskGrangerBuilder:
         self._require_components_data()
 
         spec = parse_regularizer_spec(
-            self._fit_kwargs.get("regularizer_spec")
+            self._current_modeling().regularizer_spec
         )
 
         self._invalidate_from(
@@ -655,7 +660,7 @@ class MultiTaskGrangerBuilder:
 
         self._callbacks = self._model_assembler.build_callbacks(
             strategy=self._strategy,
-            callbacks=self._fit_kwargs.get("callbacks"),
+            callbacks=self._current_modeling().callbacks,
         )
 
         return self._callbacks
@@ -690,13 +695,11 @@ class MultiTaskGrangerBuilder:
         if self._constraint is None:
             self.prepare_constraint()
 
-        if (
-            self._fit_kwargs.get("regularizer_spec") is not None
-            and self._regularizer is None
-        ):
+        if self._current_modeling().regularizer_spec is not None and self._regularizer is None:
             self.prepare_regularizer()
 
-        config = dict(self.to_spec().modeling.model_config)
+        modeling = self._current_modeling()
+        config = dict(modeling.model_config)
         if model_config is not None:
             config.update(model_config)
 
@@ -704,7 +707,7 @@ class MultiTaskGrangerBuilder:
             strategy=self._strategy,
             prepared=self._prepared_data,
             model_config=config,
-            callbacks=self._fit_kwargs.get("callbacks"),
+            callbacks=modeling.callbacks,
             constraint=self._constraint,
             regularizer=self._regularizer,
         )
@@ -734,7 +737,7 @@ class MultiTaskGrangerBuilder:
         spec = (
             initializer
             if initializer is not None
-            else self._fit_kwargs.get("initializer")
+            else self._current_modeling().initializer
         )
 
         weights = self._model_initializer.compute_weights(
@@ -883,7 +886,34 @@ class MultiTaskGrangerBuilder:
     def fit(self, *, fit_restricted: bool = True):
         """Prepare the analysis and execute the standard fitting workflow."""
 
+        spec = self.to_spec()
+        self._effective_modeling = spec.modeling
+        self._model_search_result = None
+        if spec.search is not None:
+            if (
+                self._data is None
+                and self._fit_kwargs.get("search_prepared_data") is None
+            ):
+                raise DataValidationError(
+                    "Builder requires data(...) or search_prepared_data "
+                    "before fitting model search."
+                )
+            self._effective_modeling, self._model_search_result = (
+                self._analysis_runner.run_model_search(
+                    spec=spec,
+                    data=self._data,
+                    search_prepared_data=self._fit_kwargs.get(
+                        "search_prepared_data"
+                    ),
+                )
+            )
+
+        selected_modeling = self._effective_modeling
+        search_result = self._model_search_result
+
         self.prepare_data()
+        self._effective_modeling = selected_modeling
+        self._model_search_result = search_result
         self.prepare_components()
         self.build_model()
         self.initialize_weights()
@@ -894,7 +924,7 @@ class MultiTaskGrangerBuilder:
         )
 
         try:
-            return self._analysis_runner.run(
+            result = self._analysis_runner.run(
                 model=self._model,
                 prepared=self._prepared_data,
                 progress=progress,
@@ -902,6 +932,9 @@ class MultiTaskGrangerBuilder:
                 backend=self._backend,
                 fit_restricted=fit_restricted,
             )
+            result.model_search_result = self._model_search_result
+            result.effective_modeling = self._current_modeling()
+            return result
         finally:
             self._base_weights = progress.base_weights
 
@@ -915,6 +948,14 @@ class MultiTaskGrangerBuilder:
         """
         if self._prepared_data is None:
             raise DataValidationError("prepare_data() must be completed first")
+
+    def _current_modeling(self) -> ModelingSpec:
+        """Return the selected modeling declaration for the current run."""
+        return (
+            self._effective_modeling
+            if self._effective_modeling is not None
+            else self.to_spec().modeling
+        )
 
     def _require_components_data(self):
         """
@@ -951,6 +992,8 @@ class MultiTaskGrangerBuilder:
             self._constraint = None
             self._regularizer = None
             self._model = None
+            self._effective_modeling = None
+            self._model_search_result = None
 
         elif stage == "components":
             self._regularizer_data = None
@@ -958,6 +1001,8 @@ class MultiTaskGrangerBuilder:
             self._constraint = None
             self._regularizer = None
             self._model = None
+            self._effective_modeling = None
+            self._model_search_result = None
 
         elif stage == "model":
             self._model = None

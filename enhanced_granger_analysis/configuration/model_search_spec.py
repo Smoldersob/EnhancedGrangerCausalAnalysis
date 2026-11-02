@@ -53,6 +53,70 @@ class ModelSearchSpec:
     error_policy: ErrorPolicy = "raise"
     training_seed: int | None = 42
     collect_history: bool = True
+    preparation: Mapping[str, Any] | None = None
+
+    @classmethod
+    def from_mapping(cls, config: Mapping[str, Any]) -> "ModelSearchSpec":
+        """Parse a search declaration without resolving runtime components."""
+        if not isinstance(config, Mapping):
+            raise TypeError("search must be a mapping or None.")
+
+        allowed = {
+            "space", "strategy", "objective", "budget", "validation_part",
+            "objective_scale", "error_policy", "training_seed",
+            "collect_history", "preparation",
+        }
+        unknown = set(config) - allowed
+        if unknown:
+            raise ValueError(
+                "Unknown model search fields: "
+                f"{sorted(unknown, key=repr)!r}."
+            )
+
+        if "space" not in config or "strategy" not in config or "objective" not in config:
+            raise ValueError(
+                "An active search requires space, strategy, and objective."
+            )
+
+        budget_value = config.get("budget", {})
+        if isinstance(budget_value, SearchBudget):
+            budget = budget_value
+        else:
+            if not isinstance(budget_value, Mapping):
+                raise TypeError("search.budget must be a mapping.")
+            budget_unknown = set(budget_value) - {
+                "max_trials", "epochs_per_trial",
+            }
+            if budget_unknown:
+                raise ValueError(
+                    "Unknown search budget fields: "
+                    f"{sorted(budget_unknown, key=repr)!r}."
+                )
+            budget = SearchBudget(**dict(budget_value))
+
+        preparation = config.get("preparation")
+        if preparation is not None:
+            if not isinstance(preparation, Mapping):
+                raise TypeError("search.preparation must be a mapping or None.")
+            preparation = dict(preparation)
+            invalid = set(preparation) - {"splitter", "random_state"}
+            if invalid:
+                raise ValueError(
+                    "Unsupported search preparation overrides: "
+                    f"{sorted(invalid, key=repr)!r}. Only splitter and "
+                    "random_state may be overridden."
+                )
+
+        values = {
+            key: config[key]
+            for key in (
+                "space", "strategy", "objective", "validation_part",
+                "objective_scale", "error_policy", "training_seed",
+                "collect_history",
+            )
+            if key in config
+        }
+        return cls(**values, budget=budget, preparation=preparation)
 
     def __post_init__(self) -> None:
         if not isinstance(self.space, (Mapping, SearchSpace)):
@@ -93,3 +157,15 @@ class ModelSearchSpec:
 
         if not isinstance(self.collect_history, bool):
             raise TypeError("collect_history must be bool.")
+
+        if self.preparation is not None:
+            if not isinstance(self.preparation, Mapping):
+                raise TypeError(
+                    "preparation must be a mapping or None."
+                )
+            unknown = set(self.preparation) - {"splitter", "random_state"}
+            if unknown:
+                raise ValueError(
+                    "Unsupported search preparation overrides: "
+                    f"{sorted(unknown, key=repr)!r}."
+                )

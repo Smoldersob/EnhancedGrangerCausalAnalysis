@@ -11,6 +11,7 @@ from .granger_trainer import GrangerTrainer
 from ..backends import BackendFactory
 
 from ..configuration.analysis_spec import AnalysisSpec
+from ..configuration.modeling_spec import ModelingSpec
 
 from ..core.models.protocol import GrangerModelProtocol
 from ..core.exceptions import (
@@ -23,10 +24,12 @@ from ..modeling.assembler import ModelAssembler
 from ..modeling.initialization import ModelInitializer
 
 from ..preprocessing.pipeline import DataPreparer
+from ..preprocessing.search_preparation import resolve_search_preparation
 from ..preprocessing.prepare_data import PreparedData
 
 from ..results.granger_results import PreparationContext
 from ..results.granger_results import GrangerAnalysisResults
+from .model_search_runner import ModelSearchRunner
 
 @dataclass
 class AnalysisRunProgress:
@@ -54,6 +57,7 @@ class AnalysisRunner:
 		*,
 		assembler: ModelAssembler | None = None,
 		initializer: ModelInitializer | None = None,
+		search_runner: ModelSearchRunner | None = None,
 	) -> None:
 		self._trainer = (
 			trainer if trainer is not None else GrangerTrainer()
@@ -66,6 +70,66 @@ class AnalysisRunner:
 		self._initializer = (
 			initializer if initializer is not None else ModelInitializer()
 		)
+		self._search_runner = (
+			search_runner if search_runner is not None else ModelSearchRunner()
+		)
+
+	def run_model_search(
+		self,
+		*,
+		spec: AnalysisSpec,
+		data: pd.DataFrame | Sequence[pd.DataFrame] | None = None,
+		search_prepared_data: PreparedData | None = None,
+	) -> tuple[ModelingSpec, Any]:
+		"""Run optional HPO in its own preparation context."""
+		if spec.search is None:
+			if search_prepared_data is not None:
+				raise DataValidationError(
+					"search_prepared_data cannot be supplied when search is disabled."
+				)
+			return spec.modeling, None
+
+		if search_prepared_data is None:
+			if data is None:
+				raise DataValidationError(
+					"Enabled model search requires source data or search_prepared_data."
+				)
+			search_config = resolve_search_preparation(
+				spec.preparation,
+				spec.search.preparation,
+			)
+			search_prepared_data = DataPreparer(
+				config=search_config,
+			).fit(data, roles=spec.roles).prepared_data_
+			preparation_metadata = {
+				"config": search_config,
+				"split": search_prepared_data.split_snapshot(),
+				"index_space": "prepared_rows",
+				"n_samples": int(search_prepared_data.X_raw.shape[0]),
+				"output_names": tuple(search_prepared_data.effects),
+			}
+		else:
+			preparation_metadata = {
+				"index_space": "prepared_rows",
+				"n_samples": int(search_prepared_data.X_raw.shape[0]),
+				"split": search_prepared_data.split_snapshot(),
+				"output_names": tuple(search_prepared_data.effects),
+			}
+
+		split = search_prepared_data.resolved_split()
+		split.indices_for("training", require_nonempty=True)
+		split.indices_for(
+			spec.search.validation_part,
+			require_nonempty=True,
+		)
+
+		result = self._search_runner.run(
+			spec=spec.search,
+			modeling=spec.modeling,
+			prepared=search_prepared_data,
+			preparation=preparation_metadata,
+		)
+		return result.best_modeling, result
 
 	def prepare_data(
 		self,
@@ -328,15 +392,19 @@ class AnalysisRunner:
 		spec: AnalysisSpec,
 		data: pd.DataFrame | Sequence[pd.DataFrame] | None = None,
 		prepared_data: PreparedData | None = None,
+		search_prepared_data: PreparedData | None = None,
 		fit_restricted: bool = True,
 	) -> GrangerAnalysisResults:
 		"""Execute a complete analysis from configuration and observations.
 
 		Supplied prepared data takes precedence over source observations.
 
-		Reserved hyperoptimization settings are not executed by this
-		implementation.
 		"""
+		modeling, search_result = self.run_model_search(
+			spec=spec,
+			data=data,
+			search_prepared_data=search_prepared_data,
+		)
 
 		prepared = self.prepare_data(
 			spec=spec,
@@ -345,8 +413,6 @@ class AnalysisRunner:
 		)
 
 		results = self.create_results(prepared)
-
-		modeling = spec.modeling
 
 		strategy = BackendFactory.get_strategy(
 			modeling.backend
@@ -414,7 +480,7 @@ class AnalysisRunner:
 			results=results,
 		)
 
-		return self.run(
+		results = self.run(
 			model=model,
 			prepared=prepared,
 			progress=progress,
@@ -422,3 +488,6 @@ class AnalysisRunner:
 			backend=modeling.backend,
 			fit_restricted=fit_restricted,
 		)
+		results.model_search_result = search_result
+		results.effective_modeling = modeling
+		return results

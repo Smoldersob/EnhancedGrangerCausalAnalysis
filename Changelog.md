@@ -969,3 +969,34 @@ that all backends have been validated or that a release has been published.
 - No claim is made that the implementation or the revised tests were executed.
 - The explicit split representation changes the earlier low-level contract.
   Review release numbering if that contract is already a stable public API.
+
+## Version Changes 2.11.0 — Integrated Model Search
+
+### Added
+
+- Integrated model-quality hyperparameter optimization with
+  `AnalysisRunner`, `MultiTaskGrangerAPI`, and
+  `MultiTaskGrangerBuilder`.
+- Added declarative `search` parsing to `AnalysisSpec`, including
+  `SearchBudget`, validation-part selection, error policy, training seed,
+  and collection of trial history.
+- Added independent HPO preparation overrides for `splitter` and
+  `random_state`, while preserving a separate final-analysis preparation
+  context.
+- Added `search_prepared_data` for callers that already own a compatible HPO
+  preparation artifact.
+- Added HPO metadata to `GrangerAnalysisResults`, including the selected
+  modeling declaration and search history.
+- Added configuration-file examples for JSON/YAML HPO declarations.
+- Added unit coverage for API propagation, search-space parsing, grid
+  candidate generation, and candidate application.
+
+### Compatibility and behavior
+
+- `search: null` or an omitted `search` section preserves the existing
+  workflow.
+- Enabled HPO requires non-empty `training` and validation parts.
+- Trial models and components remain isolated; the final analysis constructs
+  fresh components from `best_modeling`.
+- Legacy `hiperoptimalization_state` and `hiperoptimalization_conf` settings
+  are rejected with an actionable migration message.
