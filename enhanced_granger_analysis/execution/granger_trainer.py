@@ -69,6 +69,36 @@ class GrangerTrainer:
             restricted=True,
         )
 
+    def capture_restricted(
+        self, *, model: GrangerModelProtocol, prepared: PreparedData,
+        cause: str, source_weights: Sequence[np.ndarray] | None = None,
+    ) -> FitOutcome:
+        """Mask the fitted U in place and capture predictions without a fit."""
+        self._require_full_training_sample(prepared)
+        if cause not in prepared.cause_slices:
+            raise DataValidationError(f"Unknown cause: {cause!r}")
+        if not model.is_fitted:
+            raise DataValidationError("Capture requires a fitted unrestricted model")
+        if source_weights is not None:
+            current = model.get_weights()
+            if len(current) != len(source_weights) or any(
+                not np.array_equal(a, b) for a, b in zip(current, source_weights)
+            ):
+                raise DataValidationError(
+                    "Current weights differ from the corresponding U. "
+                    "Capture R immediately after fitting U, or without changing shared U weights."
+                )
+        started = perf_counter()
+        block = prepared.cause_slices[cause]
+        model.omit_variables(list(range(block.start, block.stop)))
+        if not model.is_fitted:
+            raise DataValidationError("omit_variables must preserve fitted status")
+        timings = {"update_mask": perf_counter() - started}
+        return self._capture_outcome(
+            model=model, X=prepared.X_scaled,
+            training_result=TrainingResult(), timings=timings,
+        )
+
     def _fit_model(
         self, *, model: GrangerModelProtocol, prepared: PreparedData,
         cause: str | None = None,

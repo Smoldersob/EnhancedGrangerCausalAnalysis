@@ -84,7 +84,7 @@ def estimate_masked_weight_covariance(
         active_idx = np.flatnonzero(mask_arr[out_idx])
 
         if active_idx.size == 0:
-            raise ResultsError(f"Output {out_idx} has no active slope coefficients")
+            continue
 
         x_active = x_arr[:, active_idx]
 
@@ -196,38 +196,33 @@ def wald_test_value(
     return statistics
 
 
-def f_test_value(
-    error_ref: NDArray[np.float64],
-    error_base: NDArray[np.float64],
-    n_restrictions: NDArray[np.int64],
-    n_unrestricted_parameters: NDArray[np.int64],
-    n_samples: int,
-) -> NDArray[np.float64]:
-    """
-    F test for nested restricted and unrestricted OLS models.
-    """
-    if np.any(n_restrictions < 0):
-        raise ResultsError(f"n_restrictions must be >= 0, got {n_restrictions}")
-
-    residual_df = n_samples - n_unrestricted_parameters
-
-    if np.any(residual_df <= 0):
-        raise ResultsError(
-            "Unrestricted residual degrees of freedom must be > 0, got "
-            f"n_samples={n_samples}, n_unrestricted_parameters={n_unrestricted_parameters}"
-        )
-    if np.any(n_restrictions == 0):
-        return np.full_like(np.asarray(error_base, dtype=np.float64), np.nan)
-
-    err_ref = np.asarray(error_ref, dtype=np.float64)
-    err_base = np.asarray(error_base, dtype=np.float64)
-
-    if err_ref.shape != err_base.shape:
-        raise ResultsError("error_ref and error_base must have the same shape")
-
-    numerator = (err_ref - err_base) / n_restrictions
-    denominator = err_base / residual_df
-    return numerator / denominator
+def f_test_value(error_ref, error_base, n_restrictions,
+                 n_unrestricted_parameters, n_samples):
+    """Compute nested-model F statistics independently for each output."""
+    r = np.asarray(error_ref, dtype=float)
+    u = np.asarray(error_base, dtype=float)
+    if r.shape != u.shape:
+        raise ResultsError("Restricted and unrestricted RSS shapes differ")
+    q = np.broadcast_to(np.asarray(n_restrictions, dtype=float), u.shape)
+    k = np.broadcast_to(np.asarray(n_unrestricted_parameters, dtype=float), u.shape)
+    if (not np.isfinite(r).all() or not np.isfinite(u).all()
+            or np.any(r < 0) or np.any(u < 0)):
+        raise ResultsError("RSS must be finite and nonnegative")
+    if (not np.isfinite(q).all() or not np.isfinite(k).all()
+            or np.any(q < 0) or np.any(k < 0)
+            or np.any(q != np.floor(q)) or np.any(k != np.floor(k))):
+        raise ResultsError("Parameter and restriction counts must be nonnegative integers")
+    df = n_samples - k
+    if np.any(df <= 0):
+        raise ResultsError("Unrestricted residual degrees of freedom must be positive")
+    valid = q > 0
+    improvement = np.maximum(r - u, 0.0)
+    values = np.full(u.shape, np.nan)
+    positive = valid & (u > 0)
+    values[positive] = ((np.maximum(improvement[positive], 0) / q[positive])
+                        / (u[positive] / df[positive]))
+    values[valid & (u == 0) & (r > 0)] = np.inf
+    return values
 
 
 def likelihood_ratio_test_value(
@@ -276,7 +271,7 @@ def p_value_from_f_test(
         raise ResultsError("residual_df must be > 0 for every output, got " f"{residual_df_arr}")
 
     p_values = np.full(f_values_arr.shape, np.nan, dtype=np.float64)
-    valid = (n_restrictions_arr > 0) & np.isfinite(f_values_arr)
+    valid = (n_restrictions_arr > 0) & ~np.isnan(f_values_arr) & (f_values_arr >= 0)
     p_values[valid] = f.sf(np.maximum(f_values_arr[valid], 0.0), dfn=n_restrictions_arr[valid], dfd=residual_df_arr[valid])
     return p_values
 
@@ -301,7 +296,7 @@ def p_value_from_chi_square_test(
         raise ResultsError(f"Chi-square df cannot be negative, got {df_arr}")
 
     p_values = np.full(values.shape, np.nan, dtype=np.float64)
-    valid = (df_arr > 0) & np.isfinite(values)
+    valid = (df_arr > 0) & ~np.isnan(values) & (values >= 0)
     p_values[valid] = chi2.sf(np.maximum(values[valid], 0.0), df=df_arr[valid])
     return p_values
 

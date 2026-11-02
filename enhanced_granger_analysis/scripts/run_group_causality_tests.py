@@ -378,7 +378,7 @@ def run_from_config(script_config_path: str | Path, save_mode: str = "minimum", 
 			if cached_prepared_data is not None:
 				builder.prepared_data(cached_prepared_data)
 			results = builder.fit(
-				fit_restricted=(selected_test != "wald"),
+				train_only_unrestricted=(selected_test != "wald"),
 			)
 
 			# Extract and save all result matrices

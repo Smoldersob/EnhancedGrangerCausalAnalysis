@@ -337,7 +337,7 @@ class GrangerAnalysisResults:
 			elif role == "restricted":
 				self.restricted_snapshots = {cause: self.base_snapshot for cause in self.causes}
 			self.reference_snapshots = self.restricted_snapshots
-			self._rss_cache.pop("base", None)
+			self._rss_cache.clear()
 			self._metric_cache.clear()
 
 	def set_reference_snapshot(
@@ -368,7 +368,7 @@ class GrangerAnalysisResults:
 			self.reference_snapshots[cause] = snapshot
 			self.restricted_snapshots = self.reference_snapshots
 			self.restricted_snapshots[cause] = snapshot
-			self._rss_cache.pop(f"reference:{cause}", None)
+			self._rss_cache.clear()
 			self._metric_cache.clear()
 
 	def set_unrestricted_snapshot(
@@ -481,6 +481,8 @@ class GrangerAnalysisResults:
 				f"mask has {u_mask.shape[1]} feature columns"
 			)
 
+		if unrestricted.bias_enabled != restricted.bias_enabled:
+			raise ValueError("Compared snapshots must use matching intercept settings")
 		tested = u_mask & ~r_mask
 		if self.dof_method == "active_support":
 			if unrestricted.weights is None:
@@ -491,21 +493,20 @@ class GrangerAnalysisResults:
 			tested = tested & (np.abs(weights) > self.active_support_tolerance)
 		return np.asarray(tested.sum(axis=1), dtype=np.int_)
 	
-	def n_unrestricted_parameters(self, cause: str | None = None) -> NDArray[np.int_]:
-		"""
-		Calculate the model-width proxy used for residual degree-of-freedom
-		calculations.
-
-		Returns:
-			Number of unrestricted parameters, falling back to the stored
-			explanatory matrix width when no base snapshot is present.
-		"""
+	def n_unrestricted_parameters(self, cause=None):
+		"""Count enabled unrestricted slopes and bias per output."""
 		if cause is None:
-			cause = self.causes[0] if self.causes else ""
+			if not self.causes:
+				raise ValueError("A tested cause is required")
+			cause = self.causes[0]
 		snapshot = self._snapshot_for(cause, "unrestricted")
-		mask = self._require_snapshot_mask(snapshot)
-		counts = mask.sum(axis=1).astype(np.int_)
-		return counts + int(snapshot.bias_enabled)
+		mask = self._require_snapshot_mask(snapshot).copy()
+		if self.dof_method == "active_support":
+			if snapshot.weights is None:
+				raise ValueError("Active-support counts require unrestricted weights")
+			weights = self._weights_as_feature_output(snapshot.weights)
+			mask &= np.abs(weights) > self.active_support_tolerance
+		return mask.sum(axis=1).astype(np.int_) + int(snapshot.bias_enabled)
 
 	def _snapshot_for(self, cause: str, role: Literal["restricted", "unrestricted"]) -> ModelSnapshot:
 		mapping = self.restricted_snapshots if role == "restricted" else self.unrestricted_snapshots

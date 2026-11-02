@@ -69,13 +69,11 @@ def _p_value_from_statistic(results: Any, statistic_name: str) -> CausalityMatri
         q_matrix[:, cause_idx] = results.n_restrictions_for(cause)
 
     if statistic_name == "f_statistic":
-        residual_df = np.broadcast_to(
-            np.asarray([
+        residual_df = np.empty_like(stat_values, dtype=np.int_)
+        for col, cause in enumerate(results.causes):
+            residual_df[:, col] = (
                 results.n_samples - results.n_unrestricted_parameters(cause)
-                for cause in results.causes
-            ], dtype=np.int_),
-            stat_values.shape,
-        ).copy()
+            )
         p_values = p_value_from_f_test(stat_values, q_matrix, residual_df)
         name = "f_statistic_p_value"
     elif statistic_name == "wald_test":
@@ -156,45 +154,50 @@ def f_test_p_value(results: Any) -> CausalityMatrix:
 
 
 @register_metric("wald_test", "wald", "wald_statistic")
-def wald_test(results: Any) -> CausalityMatrix:
-    """Compute Wald statistics from base weights and per-output OLS covariance.
-
-    The design matrix, target values, predictions, and coefficient mask must
-    describe the same multi-output model. Structurally inactive coefficients
-    are excluded from each tested block.
-    """
-    if results.X_true.size == 0:
-        values = np.full((len(results.effects), len(results.causes)), np.nan, dtype=np.float64)
-        return results.make_matrix(values, name="wald_test", metadata={"removed_signal_value": 0.0})
-    values = np.empty((len(results.effects), len(results.causes)), dtype=np.float64)
-    for cause_col, cause in enumerate(results.causes):
-        snapshot = results._snapshot_for(cause, "unrestricted")
-        if snapshot.weights is None or snapshot.active_slope_mask is None:
-            values[:, cause_col] = np.nan
+def wald_test(results):
+    """Evaluate slope restrictions in a consistent coefficient coordinate system."""
+    values = np.full((len(results.effects), len(results.causes)), np.nan)
+    covariance_cache = {}
+    for col, cause in enumerate(results.causes):
+        u = results.get_snapshot(cause, "unrestricted")
+        r = results.get_snapshot(cause, "restricted")
+        um = results._require_snapshot_mask(u)
+        rm = results._require_snapshot_mask(r)
+        if um.shape != rm.shape or np.any(rm & ~um):
+            raise ResultsError("Restricted mask must be a subset of the unrestricted mask")
+        if u.bias_enabled != r.bias_enabled:
+            raise ResultsError("Compared snapshots must use matching intercept settings")
+        if u.weights is None:
             continue
-        unrestricted = results._snapshot_for(cause, "unrestricted")
-        restricted = results._snapshot_for(cause, "restricted")
-        tested_mask = unrestricted.active_slope_mask & ~restricted.active_slope_mask
-        covariance = estimate_masked_weight_covariance(
-            x_train=results.X_true,
-            y_true=results.y_true,
-            y_pred=unrestricted.predictions,
-            coefficient_mask=unrestricted.active_slope_mask,
-            fit_intercept=unrestricted.bias_enabled,
-        )
-        weights = results._weights_as_feature_output(snapshot.weights)
-        if cause not in results.cause_slices:
-            raise ValueError(
-                f"Missing feature slice for tested cause: {cause!r}"
+        tested = um & ~rm
+        if results.dof_method == "active_support":
+            tested &= np.abs(u.weights) > results.active_support_tolerance
+        if not tested.any():
+            continue
+        space = u.metadata.get("coefficient_space")
+        if space == "model":
+            if results.preparation_context is None:
+                raise ResultsError("Model-space Wald coefficients require preparation context")
+            prepared = results.preparation_context.prepared_data
+            x = np.asarray(prepared.X_scaled, dtype=float)
+            y = np.asarray(prepared.y_scaled, dtype=float)
+            if "model_predictions" not in u.metadata:
+                raise ResultsError("Snapshot lacks model-space predictions; refit the analysis")
+            predictions = np.asarray(u.metadata["model_predictions"], dtype=float)
+        elif space == "raw" or (space is None and results.preparation_context is None):
+            x, y, predictions = results.X_true, results.y_true, u.predictions
+        else:
+            raise ResultsError("Ambiguous coefficient scale in legacy snapshot; refit the analysis")
+        key = id(u)
+        if key not in covariance_cache:
+            covariance_cache[key] = estimate_masked_weight_covariance(
+                x_train=x, y_true=y, y_pred=predictions,
+                coefficient_mask=um, fit_intercept=u.bias_enabled,
             )
-
-        values[:, cause_col] = wald_test_value(
-            weights=weights,
-            covariance=covariance,
-            coefficient_mask=unrestricted.active_slope_mask,
-            start=0,
-            end=weights.shape[1],
-            tested_mask=tested_mask,
+        values[:, col] = wald_test_value(
+            weights=results._weights_as_feature_output(u.weights),
+            covariance=covariance_cache[key], coefficient_mask=um,
+            start=0, end=um.shape[1], tested_mask=tested,
         )
     return results.make_matrix(values, name="wald_test", metadata={"removed_signal_value": 0.0})
 
