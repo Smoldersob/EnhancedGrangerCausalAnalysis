@@ -18,12 +18,15 @@ from textwrap import dedent
 from types import MappingProxyType, SimpleNamespace
 from unittest.mock import Mock
 
+import sys
+
+from pathlib import Path
 import numpy as np
 import pytest
 
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 ROOT = "enhanced_granger_analysis"
 BACKEND = f"{ROOT}.backends.numpy"
-
 
 @pytest.fixture(scope="module")
 def api():

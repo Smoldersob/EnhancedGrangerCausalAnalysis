@@ -8,20 +8,20 @@ import numpy as np
 import pandas as pd
 import pytest
 
-from enhanced_granger_analysis.core.exceptions import DataValidationError
-from enhanced_granger_analysis.core.lag_config import (
+from ..core.exceptions import DataValidationError
+from ..core.lag_config import (
     LagEngineConfig,
     LagFittedConfig,
     LaggedData,
     LagPreparationResult,
 )
-from enhanced_granger_analysis.preprocessing.lag import LagEngine
-from enhanced_granger_analysis.preprocessing.pipeline import (
+from ..preprocessing.lag import LagEngine
+from ..preprocessing.pipeline import (
     DataPreparationConfig,
     DataPreparer,
 )
-from enhanced_granger_analysis.preprocessing.prepare_data import VariableRoles
-from enhanced_granger_analysis.preprocessing.splitting import (
+from ..preprocessing.prepare_data import VariableRoles
+from ..preprocessing.splitting import (
     DataSplit,
     RandomRowSplitter,
     StratifiedRandomRowSplitter,

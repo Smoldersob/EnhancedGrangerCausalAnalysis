@@ -1,21 +1,17 @@
 import numpy as np
 import pandas as pd
 import pytest
-import sys
 
-from pathlib import Path
-sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
-   
-from enhanced_granger_analysis.core.exceptions import DataValidationError
-from enhanced_granger_analysis.preprocessing.missing import (
+from ..core.exceptions import DataValidationError
+from ..preprocessing.missing import (
     ConstantImputer,
     ForwardFillImputer,
     MeanImputer,
 )
-from enhanced_granger_analysis.preprocessing.prepare_data import prepare_data
-from enhanced_granger_analysis.preprocessing.sampling import StridedSampling
-from enhanced_granger_analysis.preprocessing.pipeline import DataPreparer
-from enhanced_granger_analysis.preprocessing.scaling import StandardScaler
+from ..preprocessing.prepare_data import prepare_data
+from ..preprocessing.sampling import StridedSampling
+from ..preprocessing.pipeline import DataPreparer
+from ..preprocessing.scaling import StandardScaler
 
 
 def _dataframe() -> pd.DataFrame:

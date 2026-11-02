@@ -16,12 +16,13 @@ from unittest.mock import Mock, call
 
 import pytest
 
-from enhanced_granger_analysis.backends.numpy import numpy_backend as backend_module
-from enhanced_granger_analysis.backends.numpy.numpy_backend import NumpyBackendStrategy
-from enhanced_granger_analysis.core.exceptions import BackendNotAvailableError, UnknownComponentError
-from enhanced_granger_analysis.core.models.input_spec import ModelInputSpec
-from enhanced_granger_analysis.core.models.model_registry import ModelClassRegistry
+from ..backends.numpy import numpy_backend as backend_module
+from ..backends.numpy.numpy_backend import NumpyBackendStrategy
+from ..core.exceptions import BackendNotAvailableError, UnknownComponentError
+from ..core.models.input_spec import ModelInputSpec
+from ..core.models.model_registry import ModelClassRegistry
 
+sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 ROOT = "enhanced_granger_analysis.backends.numpy"
 SUPPORTED = ("callbacks", "regularizer", "constraint")
 IGNORED = ("optimizer", "loss")

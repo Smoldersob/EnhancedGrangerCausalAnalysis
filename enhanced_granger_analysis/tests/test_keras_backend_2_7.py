@@ -18,12 +18,16 @@ from unittest.mock import Mock
 
 import pytest
 
-from enhanced_granger_analysis.backends.keras import keras_backend as strategy_module
-from enhanced_granger_analysis.backends.keras.keras_backend import KerasBackendStrategy
-from enhanced_granger_analysis.core.exceptions import BackendNotAvailableError
-from enhanced_granger_analysis.core.models.input_spec import ModelInputSpec
-from enhanced_granger_analysis.core.models.model_registry import ModelClassRegistry
+import sys
 
+from pathlib import Path
+from ..backends.keras import keras_backend as strategy_module
+from ..backends.keras.keras_backend import KerasBackendStrategy
+from ..core.exceptions import BackendNotAvailableError
+from ..core.models.input_spec import ModelInputSpec
+from ..core.models.model_registry import ModelClassRegistry
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 ROOT = "enhanced_granger_analysis.backends.keras"
 COMPONENT_NAMES = ("optimizer", "loss", "callbacks", "regularizer", "constraint")
 
@@ -430,7 +434,7 @@ class TestModelConstruction:
             strategy.build_model(spec)
 
     def test_unknown_name_rejected(self, strategy, model_registry):
-        from enhanced_granger_analysis.core.exceptions import UnknownComponentError
+        from ..core.exceptions import UnknownComponentError
 
         with pytest.raises(UnknownComponentError):
             strategy.build_model("not_registered")

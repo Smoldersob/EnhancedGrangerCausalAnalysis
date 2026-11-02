@@ -3,18 +3,19 @@ from __future__ import annotations
 import numpy as np
 import pandas as pd
 import pytest
+import importlib
 
 import sys
-
 from pathlib import Path
-sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
-from enhanced_granger_analysis.api import builder
-from enhanced_granger_analysis.core.models.training_result import TrainingResult
-from enhanced_granger_analysis.api import orchestrator as orchestrator_module
-from enhanced_granger_analysis.api.builder import MultiTaskGrangerBuilder
-from enhanced_granger_analysis.core.exceptions import DataValidationError
-from enhanced_granger_analysis.preprocessing.prepare_data import PreparedData, VariableRoles
+from ..core.models.training_result import TrainingResult
+from ..api.builder import MultiTaskGrangerBuilder
+from ..core.exceptions import DataValidationError
+from ..preprocessing.prepare_data import PreparedData, VariableRoles
 
+sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
+builder = importlib.import_module(
+    "enhanced_granger_analysis.api.builder"
+)
 
 class _IdentityScaler:
     def inverse_transform(self, values):

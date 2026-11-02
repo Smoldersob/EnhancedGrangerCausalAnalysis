@@ -23,9 +23,13 @@ from textwrap import dedent
 from types import SimpleNamespace
 from unittest.mock import Mock
 
+import sys
+
+from pathlib import Path
 import numpy as np
 import pytest
 
+sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 ROOT = "enhanced_granger_analysis"
 BACKEND = f"{ROOT}.backends.keras"
 
@@ -65,7 +69,7 @@ def input_spec(api):
 
 @pytest.fixture
 def regularizer_data(input_spec):
-	from enhanced_granger_analysis.core.components.regularizer_spec import (
+	from ..core.components.regularizer_spec import (
 		PreparedRegularizerData, RegularizationLayout,
 	)
 
@@ -80,7 +84,7 @@ def regularizer_data(input_spec):
 
 @pytest.fixture
 def constraint_data(input_spec):
-	from enhanced_granger_analysis.core.components.constraint_spec import PreparedConstraintData
+	from ..core.components.constraint_spec import PreparedConstraintData
 
 	return PreparedConstraintData(
 		output_names=input_spec.effects,
@@ -248,8 +252,8 @@ class TestRegularizerConstruction:
 
 	@pytest.mark.parametrize("selector", ["name", "mapping", "class", "normalized"])
 	def test_project_regularizer(self, strategy, regularizer_data, selector):
-		from enhanced_granger_analysis.backends.keras.regularizers import L1Regularizer
-		from enhanced_granger_analysis.core.components.regularizer_spec import RegularizerSpec
+		from ..backends.keras.regularizers import L1Regularizer
+		from ..core.components.regularizer_spec import RegularizerSpec
 
 		spec = {
 			"name": "l1", "mapping": {"type": "l1", "params": {"l1": 0.025}},
@@ -265,7 +269,7 @@ class TestRegularizerConstruction:
 		assert result.l1 == pytest.approx(0.025)
 
 	def test_lag_regularizer(self, strategy, regularizer_data):
-		from enhanced_granger_analysis.backends.keras.regularizers import LagDependentL1Regularizer
+		from ..backends.keras.regularizers import LagDependentL1Regularizer
 
 		result = strategy.build_regularizer("lag_dependent_l1", data=regularizer_data)
 		assert isinstance(result, LagDependentL1Regularizer)
@@ -284,7 +288,7 @@ class TestConstraintConstruction:
 
 	@pytest.mark.parametrize("selector", ["name", "alias", "class", "mapping"])
 	def test_project_constraint(self, strategy, constraint_data, selector):
-		from enhanced_granger_analysis.backends.keras.constraints import MaskConstraint
+		from ..backends.keras.constraints import MaskConstraint
 
 		spec = {"name": "mask", "alias": "MaskConstraint", "class": MaskConstraint,
 				"mapping": {"type": "mask", "params": {}}}[selector]
@@ -297,7 +301,7 @@ class TestConstraintConstruction:
 		assert not np.shares_memory(result.mask, constraint_data.mask)
 
 	def test_algorithm_params(self, strategy, constraint_data):
-		from enhanced_granger_analysis.backends.keras.constraints import MaskAndMinAbsSumConstraint
+		from ..backends.keras.constraints import MaskAndMinAbsSumConstraint
 
 		result = strategy.build_constraint(
 			{"type": "mask_and_min_abs_sum", "params": {"eps": 1e-5}}, data=constraint_data,

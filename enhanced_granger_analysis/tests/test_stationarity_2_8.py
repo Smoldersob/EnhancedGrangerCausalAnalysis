@@ -6,17 +6,20 @@ import numpy as np
 import pandas as pd
 import pytest
 from pandas.testing import assert_frame_equal
+import sys
 
-from enhanced_granger_analysis.core.exceptions import (
+from pathlib import Path
+
+from ..core.exceptions import (
     StationarityNotFittedError,
     StationarityTestError,
 )
-from enhanced_granger_analysis.core.registry import Registry
-from enhanced_granger_analysis.preprocessing.pipeline import (
+from ..core.registry import Registry
+from ..preprocessing.pipeline import (
     DataPreparationConfig,
     DataPreparer,
 )
-from enhanced_granger_analysis.preprocessing.stationarity import (
+from ..preprocessing.stationarity import (
     ADFStationarityEnforcer,
     BaseStationarityEnforcer,
     KPSSStationarityEnforcer,
@@ -24,7 +27,7 @@ from enhanced_granger_analysis.preprocessing.stationarity import (
     resolve_stationarity_enforcer,
 )
 
-
+sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 enforcers_module = importlib.import_module(
     "enhanced_granger_analysis.preprocessing.stationarity.enforcers"
 )

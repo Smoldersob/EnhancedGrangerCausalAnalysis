@@ -9,28 +9,28 @@ import pytest
 import sys
 
 from pathlib import Path
-sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
-from enhanced_granger_analysis.api.builder import MultiTaskGrangerBuilder
-from enhanced_granger_analysis.configuration.loader import (
+
+from ..api.builder import MultiTaskGrangerBuilder
+from ..configuration.loader import (
     AnalysisConfigLoader,
 )
-from enhanced_granger_analysis.experiments.config_iterator import (
+from ..experiments.config_iterator import (
     TestGroupConfigIterator as GroupConfigIterator,
 )
-from enhanced_granger_analysis.core.components.constraint_parsing import (
+from ..core.components.constraint_parsing import (
     parse_relations_spec,
 )
-from enhanced_granger_analysis.core.components.constraint_preparation import (
+from ..core.components.constraint_preparation import (
     prepare_constraint_data,
 )
-from enhanced_granger_analysis.core.components.constraint_spec import (
+from ..core.components.constraint_spec import (
     MinAbsSumRelationRule,
     PreparedConstraintData,
     RelationConstraint,
     RelationConstraintsSpec,
     ZeroRelationRule,
 )
-from enhanced_granger_analysis.core.exceptions import (
+from ..core.exceptions import (
     ConstraintConfigurationError,
     DataValidationError,
 )
