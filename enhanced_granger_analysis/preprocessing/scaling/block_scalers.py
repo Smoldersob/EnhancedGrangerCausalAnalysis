@@ -5,7 +5,7 @@ from typing import Any, Optional
 import numpy as np
 from numpy.typing import NDArray
 
-from .registy import resolve_scaler
+from .registry import resolve_scaler
 from ...core.exceptions import DataShapeError, ScalerNotFittedError
 
 def _as_2d_float64(data: NDArray[np.float64]) -> NDArray[np.float64]:

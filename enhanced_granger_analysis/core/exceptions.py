@@ -163,6 +163,26 @@ class ConvergenceError(TrainingError):
 class NumericalStabilityError(TrainingError):
 	"""Numerical instability detected (NaN/Inf/singular behavior)."""
 
+# ---------------------------------------------------------------------------
+# Registry / component management
+# ---------------------------------------------------------------------------
+
+class RegistryError(ValueError):
+    """Base error raised by component registries."""
+
+
+class InvalidRegistryNameError(RegistryError):
+    """A component name is invalid."""
+
+
+class DuplicateRegistrationError(RegistryError):
+    """A name or alias is already registered or repeated."""
+
+
+class UnknownComponentError(RegistryError):
+    """A requested component is not registered."""
+
+
 
 # ---------------------------------------------------------------------------
 # Results / post-processing
@@ -200,4 +220,8 @@ __all__ = [
 	"StationarityTestError",
 	"TrainingConfigurationError",
 	"TrainingError",
+	"RegistryError",
+	"InvalidRegistryNameError",
+	"DuplicateRegistrationError",
+	"UnknownComponentError",
 ]

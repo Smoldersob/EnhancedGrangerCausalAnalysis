@@ -1,709 +1,179 @@
-# API Usage Guide
+# API Usage
 
-This document provides a comprehensive guide to the main API elements available in `enhanced_granger_analysis` for building, configuring, and running Granger causality tests. It covers available components, their applications, simple test patterns, and the key distinctions between the builder, orchestrator, and simple Granger implementations.
+The standard multi-output workflow has three entry points: a fluent builder, a convenience orchestrator, and explicit `AnalysisSpec`/`AnalysisRunner` execution. They share execution services; they are not separate model implementations.
 
-## Overview
-
-The library provides three analysis entry points:
-
-1. `MultiTaskGrangerBuilder` — a stateful builder that stores configuration
-   and executes individual analysis stages.
-2. `MultiTaskGrangerAPI` — a coordinator for the standard analysis workflow
-   implemented by the builder.
-3. `SimpleGrangerAPI` — an independent pair-wise statsmodels baseline.
-
-`MultiTaskGrangerBuilder` is a compatibility alias of
-`MultiTaskGrangerBuilder`.
-
-Related utilities:
-
-- `BuilderConfigLoader`: loads and normalizes JSON/YAML configuration.
-- `TestGroupConfigIterator`: expands grouped experiment configurations.
-- `GrangerAnalysisResults`: stores model snapshots and evaluates metrics.
-
-Configuration chaining and execution are separate operations. Configuration
-methods update settings; execution methods immediately perform a stage and
-store its artifacts.
-
-## Detailed Component Overview
-
-### 1. MultiTaskGrangerAPI (Orchestrator)
-
-**Purpose:** The standard orchestration entry point for multitask Granger causality
-analysis.
-
-**Scope:** Creates a builder, invokes the standard preparation, component, model, base-fit, and restricted-fit stages, then returns the accumulated results. It does not maintain a second model implementation.
-
-**Key Method:**
+## 1. Fluent builder
 
 ```python
-output = api.fit(
-    data: DataFrame | Sequence[DataFrame],
-    causes: Optional[Sequence[str]] = None,
-    effects: Optional[Sequence[str]] = None,
-    tested_causes: Optional[Sequence[str]] = None,
-    relations: Optional[Mapping[Tuple[str, str], Any]] = None,
-    lag_config: Optional[LagConfiguration] = None,
-    regularizer: Optional[Any] = None,
-    callbacks: Optional[Sequence[Any]] = None,
-    model_config: Optional[Dict[str, Any]] = None,
-    ...
-) -> GrangerAnalysisResults
-```
+from enhanced_granger_analysis.api.builder import MultiTaskGrangerBuilder
 
-**Variable Selection Parameters:**
-
-- **`causes`** — Predictor variables available to the model. If `None`, all columns are used.
-- **`effects`** — Target variables to predict. If `None`, all columns are used.
-- **`tested_causes`** — A subset of `causes` for which Granger causality is formally tested. If `None`, defaults to all of `causes`.
-
-The distinction is important: `causes` define what the model can *see*, while `tested_causes` define which relationships are *analyzed*. This allows you to include contextual variables without explicitly testing their causality, reducing computation while maintaining model fidelity.
-
-**Output:**
-```python
-results: GrangerAnalysisResults
-```
-
-**Features:**
-- One model object is reused for the base and restricted runs.
-- Each restricted run starts from an independent copy of the base weights.
-- Relation-based constraint specification (e.g., `{"y->x1": {"zero": true}}`).
-- Backend abstraction via `BackendFactory` strategy pattern.
-- Optional initializer support through the builder.
-
-`hiperoptimalization_state` and `hiperoptimalization_conf` are accepted for
-configuration compatibility, but hyperoptimization is not currently executed by the
-standard pipeline.
-
-**When to use:**
-- Production analyses requiring fine-grained control.
-- Complex causal structures with constraints or regularization.
-- Multi-effect or multi-tested-cause scenarios.
-
----
-
-### 2. MultiTaskGrangerBuilder
-
-**Purpose:** Fluent builder for configuring and running MultiTaskGrangerAPI workflows.
-
-**Scope:** Provides method chaining for configuration and executable pipeline stages. Each stage runs immediately and stores its artifacts, so an analysis can be inspected or paused before training.
-
-**Configuration and execution**
-
-Configuration methods return the builder and can be chained:
-
-```python
 builder = (
-    MultiTaskGrangerBuilder(backend="pytorch")
-    .data(df)
-    .variables(
-        causes=["x1", "x2"],
-        effects=["y"],
-        tested_causes=["x2", "x1"],
-    )
-    .lag(LagConfiguration(max_lag=5, use_lag_zero=False))
-    .model({"epochs": 20, "batch_size": 16})
-    .scaling(x_scaler="standard", y_scaler="standard")
+    MultiTaskGrangerBuilder(backend="numpy")
+    .data(frame)
+    .variables(causes=["x", "y"], effects=["y"], tested_causes=["x"])
+    .stationarity(None)
+    .lag(lag_config={"max_lag": 2, "use_lag_zero": False})
+    .model({"model": "conditional_linear", "epochs": 100})
 )
-```
-
-The order of `tested_causes` controls restricted-run order, not feature-block
-positions. Blocks are selected by name from prepared data.
-
-Run the complete pipeline:
-
-```python
 results = builder.fit()
 ```
 
-`run()` is an alias of `fit()`. Both execute the complete pipeline from data
-preparation; they do not resume a partially completed analysis.
+Examples assume an existing numeric, time-ordered DataFrame named `frame`. Own output history is available only if that variable is also included among `causes`.
 
-For explicit execution:
+- `causes`: available model inputs.
+- `effects`: jointly predicted outputs.
+- `tested_causes`: inputs tested by restricted fits; must be a subset of causes.
+
+Omitted roles use preprocessing defaults. Effective roles may differ after redundancy cleanup and lag selection.
+
+`fit()` and its alias `run()` execute a complete analysis; they do not resume intermediate work. `fit(fit_restricted=False)` fits only the full model. Metrics requiring reference snapshots remain unavailable until the relevant restricted fits exist.
+
+### Configuration updates and replacement
+
+```python
+builder.from_config({"model_config": {"epochs": 200}})
+builder.replace_config({"backend": "numpy", "model_config": {"epochs": 100}})
+```
+
+`from_config()` updates supplied top-level fields. It is not a recursive merge: supplying `model_config` replaces that whole field. Unspecified settings and source data remain as configured.
+
+`replace_config()` resets configuration and execution artifacts using a fresh builder. Source data is not retained unless explicitly supplied in the mapping; call `.data(frame)` again when needed. It is designed for the concrete builder, not as a generic reconstruction protocol for subclasses.
+
+### Create a specification
+
+```python
+spec = builder.to_spec()
+```
+
+A specification excludes source data, prepared data, live models, weights, and analysis results. Creating it does not execute the analysis. Frozen dataclasses are not a promise of deep immutability of component instances or nested mappings.
+
+### Explicit stages
 
 ```python
 prepared = builder.prepare_data()
 builder.prepare_components()
 model = builder.build_model()
 builder.initialize_weights()
-builder.fit_base()
+base_weights = builder.fit_base()
 builder.fit_restricted_models()
 results = builder.get_results()
 ```
 
-Execution methods do not share one fluent return contract:
-
-| Method | Return value |
+| Method | Return |
 | --- | --- |
 | `prepare_data()` | `PreparedData` |
 | `prepare_components()` | Builder |
+| `prepare_backend()` | Backend strategy |
+| `prepare_constraint_data()` | `PreparedConstraintData` |
+| `prepare_constraint()` | Backend constraint |
+| `prepare_regularizer_data()` | `PreparedRegularizerData` or `None` |
+| `prepare_regularizer()` | Backend regularizer or `None` |
+| `prepare_callbacks()` | Resolved callback list |
 | `build_model()` | Working model |
-| `initialize_weights()` | Assigned initial weights, or `None` |
-| `fit_base()` | Copied base-model weights |
-| `fit_restricted(cause)` | `None` |
-| `fit_restricted_models()` | Result container |
-| `get_results()` | Current result container |
+| `initialize_weights()` | Copied assigned weights or `None` |
+| `fit_base()` | Copied fitted full-model weights |
+| `fit_restricted(cause, ...)` | `None` |
+| `fit_restricted_models()` | `GrangerAnalysisResults` |
+| `get_results()` | Existing result container; no additional fit |
 
-Prepare components individually when needed:
+`fit_restricted()` defaults to restoring full-model weights. `start_with_initial=True` takes precedence when initial weights exist; otherwise `start_with_base=True` restores full-model weights. If neither restoration applies, current weights remain in use. A completed base fit is required regardless of the chosen start policy.
 
-```python
-builder.prepare_backend()
-builder.prepare_constraint()
-builder.prepare_regularizer()
-builder.prepare_callbacks()
-```
+Configuration changes invalidate dependent builder artifacts. Prepare data again when a setter has discarded the result context. Do not assume an existing result container means a model has already been fitted.
 
-`fit_restricted(cause)` requires a completed base fit. In normal use, `cause`
-should be one of the effective `prepared.tested_causes`.
+Complete `fit()` delegates directly to the runner. Overriding stage methods in a builder subclass is not a supported way to customize that complete workflow.
 
-Every restricted run restores the base weights, selects the cause's input
-block, resets callbacks for that run, fits the working model, and saves a
-reference snapshot.
-
-`get_results()` does not fit a model or evaluate all metrics. A result container
-is created during data preparation, so its availability does not imply that
-base and restricted fitting have completed.
-
-**In Practice:**
+## 2. Convenience orchestrator
 
 ```python
-from enhanced_granger_analysis.api import MultiTaskGrangerBuilder
-from enhanced_granger_analysis.core.lag_config import LagConfiguration
-import pandas as pd
+from enhanced_granger_analysis.api.orchestrator import MultiTaskGrangerAPI
 
-df = pd.read_csv("data.csv", index_col=0)
-
-output = (MultiTaskGrangerBuilder(backend="pytorch")
-    .data(df)
-    .variables(causes=["x1", "x2"], effects=["y"], tested_causes=["x1", "x2"])
-    .lag(lag_config=LagConfiguration(max_lag=5, use_lag_zero=False))
-    .model(model_config={"epochs": 20, "batch_size": 16})
-    .scaling(x_scaler="standard", y_scaler="standard")
-    .fit()
-)
-
-causality = output.result(threshold=0.01, with_sign=True)
-print(causality)  # DataFrame with signed causality indicators
-```
-
-
-**Configuration changes and current caveats**
-
-Data, variable, lag, scaling, relation, regularization, callback, initializer,
-and model changes invalidate different dependent runtime artifacts.
-
-After changing settings in a partially executed analysis, rerun the affected
-stages. In the current implementation, invalidation may also remove the result
-container; rerunning the full pipeline is the simplest way to rebuild a
-consistent result context.
-
-Create a new builder when changing backends after execution has started.
-The current `.backend(...)` setter does not invalidate existing runtime
-artifacts.
-
-The builder configures a `StationarityTransformer` by default.
-Calling `.stationarity()` currently disables stationarity.
-
-Hyperoptimization can be configured through `.hyperoptimization(...)`, but
-`fit()` does not currently execute an optimization stage.
-
-**When to use:**
-- Simpler, more readable configuration workflows.
-- When building from YAML/JSON config files.
-- When chaining configuration steps is clearer than inline dicts.
-- When building you on granger tests pipeline 
-
----
-
-### 3. SimpleGrangerAPI
-
-**Purpose:** Quick pair-wise Granger causality analysis using statsmodels.
-
-**Scope:** Tests causality for each (cause, effect) pair independently without multi-output regression or backend abstraction.
-
-**Key Method:**
-
-```python
-from enhanced_granger_analysis.api import SimpleGrangerAPI
-
-api = SimpleGrangerAPI()
-output = api.fit(
-    data: pd.DataFrame,
-    causes: Optional[Sequence[str]] = None,
-    effects: Optional[Sequence[str]] = None,
-    test: str = "ssr_chi2test",
-    lag: Optional[int] = None,  # inferred via AIC if None
-    lag_max: int = 20,
-    threshold: float = 0.01,
-) -> SimpleGrangerOutput
-```
-
-**Output:**
-```python
-SimpleGrangerOutput(
-    causality_matrix: CausalityMatrix,  # signed causality (1, 0, -1)
-    p_value: pd.DataFrame,              # p-values for each pair
-    sign: pd.DataFrame,                 # sign of strongest lag coefficient
-)
-```
-
-**In Practice:**
-
-```python
-from enhanced_granger_analysis.api import SimpleGrangerAPI
-import pandas as pd
-
-df = pd.read_csv("data.csv", index_col=0)
-
-output = SimpleGrangerAPI().fit(
-    data=df,
-    causes=["x1", "x2"],
+results = MultiTaskGrangerAPI(backend="numpy").fit(
+    data=frame,
+    causes=["x", "y"],
     effects=["y"],
-    lag=2,
-    threshold=0.01,
-)
-
-print(output.causality_matrix.data)
-print(output.p_value)
-```
-
-**When to use:**
-- Exploratory analysis to quickly test causality hypotheses.
-- Benchmarking or validation against statsmodels baseline.
-- Simple pair-wise models without regularization or multi-output constraints.
-- When stationarity and constant lag order suffice.
-
----
-
-### 4. BuilderConfigLoader
-
-**Purpose:** Loads YAML/JSON configuration files and normalizes them for the builder.
-
-**What it does:**
-- Reads JSON/YAML files.
-- Normalizes `lag_config` dict into `LagConfiguration` objects.
-- Resolves backend aliases (e.g., `"torch"` → `"pytorch"`).
-- Preserves callback specs for backend-native resolution.
-- Validates component types (lag selectors, regularizers).
-- Moves backend-specific defaults into `model_config`.
-
-**Given Example Config:**
-```json
-{
-  "backend": "pytorch",
-  "lag_config": {
-    "max_lag": 8,
-    "use_lag_zero": false
-  },
-  "callbacks": [
-    {"type": "early_stopping", "patience": 5}
-  ],
-  "relations": {
-    "y->x1": {"zero": true}
-  },
-  "model_config": {
-    "epochs": 50,
-    "learning_rate": 0.001
-  }
-}
-```
-
-**In Practice:**
-
-```python
-from enhanced_granger_analysis.api import BuilderConfigLoader, MultiTaskGrangerBuilder
-import pandas as pd
-
-df = pd.read_csv("data.csv", index_col=0)
-
-cfg = BuilderConfigLoader.load_file("config.json")
-output = MultiTaskGrangerBuilder().from_config(cfg).data(df).fit()
-```
-
-For details on configuration structure, see [Configuration File Usage](config_file_usage.md).
-
----
-
-### 5. TestGroupConfigIterator
-
-**Purpose:** Expands test sweeps into individual builder configurations and iterates over them.
-
-**Given Sweep File:**
-```json
-{
-  "reuse_data": true,
-  "base_config": {
-    "backend": "tensorflow",
-    "lag_config": { "max_lag": 8 },
-    "model_config": { "epochs": 20 }
-  },
-  "sweep": {
-    "param_names": ["model_config.epochs", "lag_config.max_lag"],
-    "cases": [[5, 8], [10, 10], [20, 12]]
-  }
-}
-```
-
-**In Practice:**
-
-```python
-from enhanced_granger_analysis.api import TestGroupConfigIterator, MultiTaskGrangerBuilder
-import pandas as pd
-
-df = pd.read_csv("data.csv", index_col=0)
-it = TestGroupConfigIterator.from_file("group_config.json")
-
-results = []
-for cfg in it:
-    print(f"Running: epochs={cfg['model_config']['epochs']}, max_lag={cfg['lag_config'].max_lag}")
-    
-    output = MultiTaskGrangerBuilder().from_config(cfg).data(df).fit()
-    results.append(output)
-```
-
-**Features:**
-- Expands cartesian product of parameter values.
-- Preserves top-level metadata (e.g., `reuse_data`) across sweeps.
-- Each config is normalized via `BuilderConfigLoader`.
-- Dotted keys (e.g., `"model_config.epochs"`) update nested config.
-
-For details, see [Configuration File Usage](config_file_usage.md).
-
----
-
-### 6. GrangerAnalysisResults
-
-**Purpose:** Aggregates causality test results into matrices of p-values, test statistics, and signed indicators.
-
-**Scope:** Compares base model predictions/weights against restricted snapshots (one per
-tested cause) to derive causality signatures.
-
-**Key Information:**
-```python
-results = builder.fit()
-
-# Populated by fit_base() and fit_restricted_models().
-# Metrics are exposed as DataFrames:
-results.p_value                  # p-values
-results.f_test                    # F-test statistics
-results.sign                      # sign of the strongest contribution
-```
-
-**Accessible After Fit:**
-```python
-results = builder.fit()
-causality = results.result(threshold=0.01, with_sign=True)
-print(causality)
-# Output example:
-#      x1   x2
-# y1  1.0 -1.0
-# y2  0.0  1.0
-```
-
----
-
-### Result access
-
-```python
-results = builder.fit()
-
-# Convenience properties return DataFrames:
-p_values = results.p_value
-f_values = results.f_test
-signs = results.sign
-
-# evaluate() returns a CausalityMatrix:
-f_matrix = results.evaluate("f_statistic")
-sign_matrix = results.evaluate("sign")
-
-print(f_matrix.data)
-print(sign_matrix.data)
-
-# result() returns a thresholded DataFrame:
-binary = results.result(threshold=0.05)
-signed = results.result(threshold=0.05, with_sign=True)
-```
-
-Do not append `.data` to `results.result(...)`: it already returns a
-`pandas.DataFrame`.
-
-Use `.data` for the `CausalityMatrix` returned by `evaluate(...)`.
-
-Metric evaluation restores removed variables by default when a preparation
-context is available. This also applies to the `sign` metric.
-
-To inspect only effective fitted variables:
-
-```python
-fitted_signs = results.evaluate(
-    "sign",
-    restore_removed=False,
-).data
-```
-
-`results.sign` is equivalent to:
-
-```python
-results.evaluate("sign", restore_removed=True).data
-```
-
-`result()` applies the comparison `metric_value < threshold`. Use a p-value
-metric for significance thresholding; passing a raw statistic does not
-automatically select an appropriate upper-tail critical value.
-
-### Signed results
-
-A signed result is calculated in three steps:
-
-1. Evaluate and restore the selected metric to the requested effect and
-   tested-cause axes.
-2. Evaluate and restore the sign metric to the same axes.
-3. Multiply thresholded significance indicators by the restored signs.
-
-```python
-signed = results.result(
-    threshold=0.05,
-    metric="f_test_p_value",
-    with_sign=True,
+    tested_causes=["x"],
+    stationarity=None,
+    lag_config={"max_lag": 2, "use_lag_zero": False},
+    model_config={"model": "conditional_linear", "epochs": 100},
+    fit_restricted=True,
 )
 ```
 
-The implementation checks that both matrices have identical row and column
-labels before multiplication. An axis mismatch raises `ValueError` rather
-than relying on implicit pandas alignment.
+The orchestrator creates an `AnalysisSpec` and calls `AnalysisRunner.run_analysis()`. It does not create a builder or expose intermediate models. Its existing public `fit()` signature is retained. Do not assume optional convenience methods discussed during design are implemented.
 
-The sign is derived from the sum of base-model coefficients in the feature
-block belonging to each cause. It is not the direction of the tested causal
-arrow.
-
-For effective fitted variables, sums with absolute value below `1e-12`
-retain the existing convention of sign `+1`.
-
-During removed-variable restoration:
-
-- duplicate effects copy the sign row of an available fitted representative;
-- duplicate tested causes copy the sign column of an available tested
-  representative;
-- entries without an available representative use the sign metric's
-  fill value, `0`.
-
-A restored sign of `0` is a reconstruction convention, not an independently
-estimated coefficient sign.
-
-If a removed duplicate cause's representative was an input but was not
-formally tested, no representative result column is available to copy.
-
-## Key Distinctions: Builder vs. Orchestrator vs. Simple Granger
-
-| Aspect | **Builder** | **Orchestrator** | **Simple Granger** |
-|--------|-----------|-----------------|-------------------|
-| **Purpose** | Configuration and executable stages | Standard pipeline coordinator | Pair-wise statsmodels |
-| **API Complexity** | Fluent or explicit stages | One fit() call | Simple fit() call |
-| **Multi-output** | ✓ Yes | ✓ Yes (primary) | ✗ No (per pair) |
-| **Constraints** | ✓ Yes (via relations) | ✓ Yes | ✗ No |
-| **Regularization** | ✓ Yes (L1, lag-dependent) | ✓ Yes | ✗ No |
-| **Callbacks** | ✓ Yes | ✓ Yes | ✗ No |
-| **Config files** | ✓ Yes (from_file, from_config) | ✗ Manual dicts | ✗ Manual dicts |
-| **Backend choice** | "pytorch" \ "tensorflow" \ "sklearn" | "pytorch" \ "tensorflow" \ "sklearn" | Fixed (statsmodels) |
-| **Hyperopt** | Configuration accepted; execution deferred | Configuration accepted; execution deferred | ✗ No |
-| **Use case** | Config-driven workflows | Fine-grained control | Quick exploration |
-
-**In Summary:**
-- **Use Builder** when you have YAML/JSON configs or prefer method chaining.
-- **Use Orchestrator** when you want the standard pipeline through one `fit()` call.
-- **Use explicit builder stages** when you need to inspect or pause between preparation,
-  model construction, base fitting, and restricted fitting.
-- **Use Simple Granger** for rapid pair-wise tests, validation, or when statsmodels is preferred.
-
----
-
-## Simple Test Examples
-
-### Minimal example with a lagged dependency
+## 3. Specification and runner
 
 ```python
-import numpy as np
-import pandas as pd
+from enhanced_granger_analysis.configuration import AnalysisSpec
+from enhanced_granger_analysis.execution import AnalysisRunner
 
-from enhanced_granger_analysis.api import MultiTaskGrangerBuilder
-from enhanced_granger_analysis.core.lag_config import LagConfiguration
-
-rng = np.random.default_rng(42)
-n_samples = 400
-x = rng.normal(size=n_samples)
-y = np.zeros(n_samples)
-
-for t in range(1, n_samples):
-    y[t] = (
-        0.4 * y[t - 1]
-        + 0.8 * x[t - 1]
-        + rng.normal(scale=0.5)
-    )
-
-df = pd.DataFrame({"x": x, "y": y})
-
-results = (
-    MultiTaskGrangerBuilder(backend="sklearn")
-    .data(df)
-    .variables(
-        causes=["x", "y"],
-        effects=["y"],
-        tested_causes=["x"],
-    )
-    .from_config({"stationarity_transformer": None})
-    .lag(LagConfiguration(max_lag=2, use_lag_zero=False))
-    .fit()
-)
-
-print(results.result(threshold=0.01))
-print(results.p_value)
+spec = AnalysisSpec.from_mapping({
+    "backend": "numpy",
+    "causes": ["x", "y"],
+    "effects": ["y"],
+    "tested_causes": ["x"],
+    "stationarity": None,
+    "lag_config": {"max_lag": 2, "use_lag_zero": False},
+    "model_config": {"model": "conditional_linear", "epochs": 100},
+})
+results = AnalysisRunner().run_analysis(spec=spec, data=frame)
 ```
 
-Here `y` is included in `causes` so that its own lagged history is available
-to the model. Only `x` is tested through a restricted run.
+Use `run_analysis()` for a complete analysis. The lower-level `run()` accepts an already prepared model and internal progress object; it is not an alias of `run_analysis()`.
 
-This example illustrates the API and data construction; it is not an
-automated validation test.
+A standalone runner does not update a builder from which `spec` was obtained. The runner does not retain the last model or cache preparation between calls.
 
-### Test with Config File
+## 4. Prepared data reuse
 
 ```python
-from enhanced_granger_analysis.api import BuilderConfigLoader, MultiTaskGrangerBuilder
-import pandas as pd
-
-df = pd.read_csv("data.csv", index_col=0)
-
-# Load from config file
-cfg = BuilderConfigLoader.load_file("config.json")
-
-# Run analysis
-output = MultiTaskGrangerBuilder().from_config(cfg).data(df).fit()
-
-# Examine results
-print("Causality Matrix:")
-print(output.result(threshold=0.01, with_sign=True))
-print("\nP-values:")
-print(output.p_value)
+prepared = builder.prepare_data()
+results = AnalysisRunner().run_analysis(spec=builder.to_spec(), prepared_data=prepared)
 ```
 
-### Test with Sweep (Multiple Configurations)
+A supplied `prepared_data` artifact takes precedence over source data. The caller must ensure it is appropriate for the intended configuration. The runner does not re-run lag selection or scaling to reconcile it with changed preparation settings.
+
+The `reuse_data` field does not create an internal runner/orchestrator cache. Explicit reuse and the experiment script's external cache are different mechanisms.
+
+## 5. Constraints, regularization, and initialization
 
 ```python
-from enhanced_granger_analysis.api import TestGroupConfigIterator, MultiTaskGrangerBuilder
-import pandas as pd
-
-df = pd.read_csv("data.csv", index_col=0)
-it = TestGroupConfigIterator.from_file("group_config.json")
-
-for i, cfg in enumerate(it):
-    output = MultiTaskGrangerBuilder().from_config(cfg).data(df).fit()
-    print(f"Test {i}:\n{output.result(threshold=0.01, with_sign=True)}")
+builder.relations([
+    {"cause": "x", "effect": "y", "rule": {"type": "zero"}},
+])
+builder.constraint("mask_and_min_abs_sum")
+builder.regularization({"type": "l1", "params": {"l1": 0.01}})
+builder.initializer("zeros")
 ```
 
-### Test with Relations (Constraints)
+This illustrates configuration placement, not a scientifically useful combination of rules for every experiment. `relations` describes rules; `constraint_spec` selects their implementation. Empty relations preserve the preparation mask. `constraint_spec=None` is rejected. `regularizer_spec=None` disables regularization.
+
+Initializers use the existing registry: names, supported mappings, classes, or `None`; not arbitrary instances/factories. `initialize_weights(None)` uses the stored specification; it is not a per-call disable override.
+
+See [Components](components_loading.md) for family-specific contracts.
+
+## 6. Results
 
 ```python
-from enhanced_granger_analysis.api import MultiTaskGrangerBuilder
-from enhanced_granger_analysis.core.lag_config import LagConfiguration
-import pandas as pd
-
-df = pd.read_csv("data.csv", index_col=0)
-
-output = (MultiTaskGrangerBuilder(backend="pytorch")
-    .data(df)
-    .variables(causes=["x1", "x2"], effects=["y"], tested_causes=["x1", "x2"])
-    .lag(LagConfiguration(max_lag=5))
-    .model({"epochs": 30})
-    .relations({
-    ("y", "x1"): {"zero": True},
-    ("y", "x2"): {"min_abs_sum": 0.5},
-    })
-    .fit()
-)
-
-print(output.result(threshold=0.01, with_sign=True))
+statistics = results.evaluate("f_statistic").data
+p_values = results.evaluate("f_test_p_value").data
+binary = results.result(threshold=0.01, metric="f_test_p_value")
+signed = results.result(threshold=0.01, metric="f_test_p_value", with_sign=True)
 ```
 
-### Quick Exploration with SimpleGrangerAPI
+`evaluate()` returns a `CausalityMatrix`; `result()` returns a DataFrame. Sign summarizes full-model coefficient sums within a cause's lagged block, not the direction of the causal arrow. Removed-variable restoration is a reporting operation, not an extra hypothesis test.
 
-```python
-from enhanced_granger_analysis.api import SimpleGrangerAPI
-import pandas as pd
+`FitOutcome` is not the public return of builder/orchestrator fitting. It contains one fit's model-scale predictions, complete copied weights, diagnostics, and timings. The runner converts it to inverse-scaled analysis snapshots. See [Execution architecture](execution_architecture.md).
 
-df = pd.read_csv("data.csv", index_col=0)
+## 7. Errors and builder state
 
-output = SimpleGrangerAPI().fit(
-    data=df,
-    causes=["x1", "x2"],
-    effects=["y1", "y2"],
-    lag=2,
-    threshold=0.05,
-)
+Full builder execution synchronizes completed artifacts in a `finally` block. A failed restricted fit does not erase the completed full-model snapshot or its saved weights. Exceptions are propagated; partial results do not imply a successful complete analysis.
 
-print("Causality Matrix (signed):")
-print(output.causality_matrix.data)
-print("\nP-values:")
-print(output.p_value)
-```
+`AnalysisRunProgress` is internal bookkeeping, not a resumable session API. Exact intermediate private state is not guaranteed to match every historical builder failure path.
 
----
+## 8. Separate baseline and future work
 
-## Typical Analysis Workflow
+`SimpleGrangerAPI` remains a separate pair-wise statsmodels baseline. It does not use the standard multi-output runner described here.
 
-1. **Prepare Data**
-   ```python
-   import pandas as pd
-   df = pd.read_csv("data.csv", index_col=0)
-   ```
+Automatic HPO remains inactive. Existing HPO fields do not trigger search. Future HPO is intended to optimize model quality, not causal-analysis scores. Sessions and interchangeable high-level procedures remain future development, not current APIs.
 
-2. **Choose Configuration Method**
-   - Option A: Load from file
-     ```python
-     cfg = BuilderConfigLoader.load_file("config.json")
-     ```
-   - Option B: Build in code
-     ```python
-     cfg = {
-         "backend": "pytorch",
-         "lag_config": {"max_lag": 5},
-         "model_config": {"epochs": 20},
-     }
-     ```
-
-3. **Create Builder**
-   ```python
-   builder = MultitaskGrangerBuilder().from_config(cfg).data(df)
-   ```
-
-4. **Run Analysis**
-   ```python
-   output = builder.fit()
-   ```
-
-5. **Extract Results**
-   ```python
-   causality = output.result(threshold=0.01, with_sign=True)
-   p_values = output.p_value
-   print(causality)
-   ```
-
----
-
-## When to Use Each Component
-
-| Task | Recommended | Why |
-|------|-------------|-----|
-| Load config from JSON | `BuilderConfigLoader` | Clean separation of concerns |
-| Standard analysis through one call | `MultiTaskGrangerAPI` | Coordinates the standard builder workflow |
-| Inspect or customize execution stages | `MultiTaskGrangerBuilder` | Exposes preparation, construction, and fitting stages |
-| Quick pair-wise test | `SimpleGrangerAPI` | Simple, no backends needed |
-| Run multiple configs | `TestGroupConfigIterator` | Automatic sweep expansion |
-| Extract causality results | `GrangerAnalysisResults` | Aggregates p-values, statistics |
-
----
-
-## References
-
-- [Configuration File Usage](config_file_usage.md) — Detailed config structure reference.
-- [Configuration File Usage](config_file_usage.md) — Sweep expansion and iteration.
-- [Components Loading](components_loading.md) — Backend-specific component formats.
+Related: [Configuration](config_file_usage.md), [Migration](api_refactor_migration.md), [Results](results_and_metrics.md), [Lag selection](lag_selection.md).

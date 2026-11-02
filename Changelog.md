@@ -241,3 +241,762 @@ Calling `.stationarity()`, which is the default for the stage, will disable the 
   indicators by signs.
 - Updating the base snapshot invalidates cached sign evaluations through
   the existing metric-cache invalidation mechanism.
+
+### 2.3.1
+
+Old test files have been move to new directory, and new test naming startegy has been introduced were test have digist of version and 
+subversion of packege - to know for which verision they were made. 
+
+Additonaly registry mechanizm have been generalized and slightly updated. New core class of `Registry` is now the base class for all registries, and it provides a more flexible and robust way to manage components. Already existing registries have been updated to use the new registry mechanism.
+
+## Version Changes 2.4
+
+### Added
+- Added the optional `fit_restricted` parameter to the builder and
+  orchestrator `fit()` methods, allowing the analysis to run without
+  fitting restricted models.
+
+### Changed
+- Updated `run_group_causality_tests.py` to automatically skip restricted-model
+  training when `--test wald` is selected, reducing computation time by
+  fitting only the base model.
+- Preserved the full fitting workflow for F and LR tests and for default
+  `fit()` calls (`fit_restricted=True`).
+
+### Notes
+- This optimization does not change the calculation of the Wald statistic,
+  its p-values, or the thresholding procedure.
+- The change applies to the current Wald test implementation. Variants
+  intended for regularized and multilayer models are outside the scope
+  of this release and may be introduced as separate metrics in the future.
+
+## Version Changes 2.5
+### Added
+- Added an `Initializer` protocol and a class registry with decorator-based
+  registration and alias support.
+- Added YAML/JSON initializer configuration using `type` and `params`.
+- Added `InitializationContext` to provide data, the optional mask, and
+  current model weights to initializers.
+
+### Changed
+- Moved initializer resolution from the configuration loader to the builder.
+- Replaced the fixed `(A, B)` return contract with a list of weight arrays,
+  allowing custom initializers to support multilayer models.
+- Removed `LinearARXInitializer`; constructors now receive strategy parameters,
+  while execution context is passed to `__call__()`.
+- Delegated weight validation and assignment to models, removing
+  initializer-specific transposition and shape checks from the builder.
+- Updated zeros and random-normal initializers to use model weight templates.
+- Updated OLS to infer dimensions from data, fit only mask-enabled
+  coefficients, and return `[kernel, bias]`. Added a warning when the model
+  exposes more than two weight arrays.
+- Restricted initializer specifications to names, configuration mappings,
+  classes, or `None`; instances and factory functions are not supported.
+
+### Fixed
+- Unified initializer name handling across file-based and programmatic configuration.
+- Removed the `TypeError` fallback that could mask initializer execution errors.
+
+## Version Changes 2.6
+
+This version introduces a staged configuration and construction workflow
+for constraints and regularizers.
+
+User specifications, backend-independent preparation data, class
+resolution, and backend-native component instances are handled separately.
+The builder integrates these stages into the analysis pipeline and exposes
+them individually for inspection and custom execution.
+
+This release also updates backend package organization, component import
+paths, and staged builder tests to match the new construction contract.
+
+### Added
+
+#### Backend-independent component preparation
+
+- Added `core/components/` with constraint and regularizer specifications,
+  parsing, preparation, class registries, and serialization utilities.
+- Added `RelationConstraintsSpec`, `RelationConstraint`,
+  `ZeroRelationRule`, and `MinAbsSumRelationRule` for named relation
+  declarations.
+- Added `PreparedConstraintData` for compiled masks and indexed
+  minimum-absolute-sum rules.
+- Added `RegularizerSpec`, `RegularizationLayout`, and
+  `PreparedRegularizerData` for regularizer selection, feature metadata,
+  and constructor parameters.
+- Added backend-specific class registries with decorator-based
+  registration and alias support. Registry resolution selects a class
+  without constructing its instance.
+- Added serialization of regularizer specifications and prepared data.
+  Prepared regularizer data includes an explicit schema version.
+
+#### Builder stages and configuration
+
+- Added `.constraint(...)` for selecting the constraint implementation
+  independently of the named rules supplied through `.relations(...)`.
+- Added `prepare_constraint_data()` and `prepare_regularizer_data()` for
+  inspecting backend-independent component inputs before construction.
+- Added a default `mask_and_min_abs_sum` constraint selection, including
+  when no explicit relation rules are supplied.
+- Added validation preventing constraint and regularizer configuration
+  from being supplied through `model_config`.
+
+#### Explicit lag metadata
+
+- Added `PreparedData.feature_lags`, containing the actual lag associated
+  with each input-feature column.
+- Extended `LagEngine.prepare()` to return
+  `(X, y, block_boundaries, feature_lags)`.
+- Propagated feature-lag metadata through the preparation pipeline.
+- Added lag-dependent L1 parameter preparation using actual feature lags,
+  with absolute or relative lag indexing.
+
+#### Tests
+
+- Added tests for canonical relation parsing, invalid declarations,
+  feature-layout validation, mask preservation, infeasible rules,
+  JSON/YAML references, and builder integration.
+
+### Changed
+
+#### Component organization and construction
+
+- Moved backend-specific constraints and regularizers into
+  `backends/keras/`, `backends/pytorch/`, and `backends/scikit/`.
+- Introduced backend-specific constraint and regularizer base classes.
+- Replaced strategy-level `build_constraint_from_relations(...)` with
+  explicit preparation followed by `build_constraint(spec, data=...)`.
+- Changed regularizer construction to
+  `build_regularizer(selector, data=...)`.
+- Removed constraint and regularizer resolution from the backend object
+  loaders. Those components now use their dedicated class registries.
+- Introduced an explicit NumPy regularizer penalty-and-gradient contract.
+- Added diagnostic messages for backend import failures.
+
+#### Relation declarations
+
+- Replaced legacy relation mappings and shorthand values with a strict
+  list of declarations containing `cause`, `effect`, and `rule`.
+- Restricted rule types to `zero` and `min_abs_sum`.
+- Added rejection of duplicate cause/effect declarations.
+- Changed `min_abs_sum=0` to mean no additional lower-bound restriction;
+  it does not force the relation to zero.
+- Changed infeasible positive minimum-sum rules to raise an error by
+  default when no active coefficients remain. The preparation utility
+  also supports an explicit warning policy.
+
+#### Builder invalidation
+
+- Changing the backend through `.backend(...)` now clears the selected
+  strategy and invalidates dependent component and model artifacts.
+- Backend and regularization setters preserve an existing preparation
+  result context while clearing model snapshots.
+- Preparing data invalidates previously constructed components before
+  creating the new result context.
+
+### Breaking changes and migration
+
+- Replace the top-level `regularizer` field with `regularizer_spec`.
+- Replace `.regularization(regularizer=...)` with
+  `.regularization(regularizer_spec=...)`.
+- Put regularizer parameters inside `params`; flattened parameter
+  mappings and the `name`/`kind` alternatives are not supported by the
+  new regularizer parser.
+- Replace legacy relation mappings, tuple keys, and shorthand rule values
+  with canonical relation declarations.
+- Use `[]` or `RelationConstraintsSpec()` for no explicit relation rules.
+  `relations=None` is not accepted by the new parser.
+- Resolve relation-file references through `BuilderConfigLoader` or
+  `.from_file(...)`; `.relations(...)` does not perform file I/O.
+- Do not pass `mask`, indexed `rules`, or layout metadata through
+  `constraint_spec.params`; these belong to prepared constraint data.
+- Constraint selection does not accept `None`, instances, or factory
+  functions. Regularizer selection accepts `None` to disable
+  regularization, but does not accept instances or factory functions.
+- Update imports from the removed shared `backends/constraints/` and
+  `backends/regularizers/` packages to the backend-specific packages.
+- Update callers unpacking the former three-value return from
+  `LagEngine.prepare()`.
+
+### Current integration limitations
+
+- The builder still contains a legacy `prepare_regularizer()` definition
+  that overrides the new implementation.
+- Backend import, component registration, and model-construction paths
+  still contain inconsistencies introduced during the refactor.
+- The new interfaces and added tests do not establish that the complete
+  analysis pipeline works across all backends.
+- End-to-end validation is required before treating this version as a
+  stable release.
+
+  ### Fixed
+
+- Removed the legacy `prepare_regularizer()` definition that overrode the
+  new staged implementation in `MultiTaskGrangerBuilder`.
+- Corrected PyTorch dependency detection and the import/export name of
+  `BasePyTorchRegularizer`.
+- Replaced the repository-dependent absolute import in the orchestrator
+  with a package-relative import.
+- Removed obsolete component-resolution calls from PyTorch model
+  construction. Prepared constraint and regularizer instances are now
+  passed directly to the model.
+- Removed an undefined legacy regularizer variable from scikit model
+  construction.
+- Aligned the scikit regularizer abstract interface with the built-in
+  `value_and_grad()` implementations.
+- Removed the import of the deleted `constraints_config` module from
+  core package initialization.
+- Updated staged builder tests to use the new component construction
+  signatures and nested regularizer parameters.
+
+## Version Changes 2.7
+
+This section describes the backend refactor and its integration into the standard
+builder pipeline. The analysis script and unit tests were successfully executed
+after the integration changes. Validation is limited to the exercised environment,
+configurations, and test cases; numerical equivalence and statistical calibration
+across backends are not implied.
+
+### Added
+
+- Added `ModelInputSpec` for immutable structural input/output metadata,
+  including named feature blocks and per-feature lags.
+- Added `GrangerModelProtocol`, separating the model lifecycle contract
+  from backend-specific implementations.
+- Added `TrainingResult` for optional training history and diagnostics.
+- Added backend-local model registries supporting registered names,
+  specification mappings, concrete classes, and ready model instances.
+- Added backend-local conditional linear adapters and separate
+  `LinearGrangerNetwork` implementations for NumPy, PyTorch, and Keras.
+- Added explicit strategy builders for optimizers, losses, and callbacks.
+- Added a PyTorch optimizer adapter for model-owned optimizer construction
+  and independent optimizer-state reset.
+- Added backend-local callback registries for NumPy and PyTorch and shared
+  callback lifecycle utilities.
+- Added NumPy solver selection through `auto`, `restricted_lstsq`, and
+  `coefficient`, with the selected solver exposed as `solver_used_`.
+- Added proximal operators for the built-in NumPy L1 and lag-dependent L1
+  regularizers.
+- Added shared prepared-constraint validation and configuration conversion.
+- Added ground-truth evaluation options:
+  `evaluate_only_known_gt`, `gt_nan_means_unknown`, and `drop_diagonal`.
+- Added `n_evaluated` to ground-truth evaluation output.
+- Added `docs/numpy_backend_optimization.md`.
+- Added backend construction and component test modules for NumPy,
+  PyTorch, and Keras.
+
+### Changed
+
+- Changed model construction to:
+  `build_model(spec=None, *, components=None, config=None)`.
+- Separated ready component objects from ordinary constructor settings.
+- Changed model construction to require `ModelInputSpec` instead of
+  receiving training observations through model initialization.
+- Changed fitting to explicit `fit(X, y, ...)` calls returning
+  `TrainingResult`.
+- Added explicit lifecycle separation between predictor rebuilding,
+  weight restoration, input omission, and training-component reset.
+- Replaced `backends/scikit/` with `backends/numpy/`.
+  The selection aliases `sklearn`, `scikit`, and `scikit-learn` remain
+  accepted and resolve to the NumPy strategy.
+- Moved model and component construction responsibilities from shared
+  object loaders into backend strategies and dedicated resolvers.
+- Strengthened validation of model specifications, constructor arguments,
+  training arrays, coefficients, constraints, and regularizers.
+- Changed ground-truth alignment from axis intersection to separate
+  row/column unions with an explicit evaluation mask.
+- Revised SHD calculation for reciprocal edge pairs and rectangular
+  effect-by-cause matrices.
+- Replaced staged-builder test definitions with tests targeting the new
+  construction and explicit-data fitting interfaces.
+- Renamed `test_scalers_2_3.py` to `test_scalers_2_7.py` without changing
+  its contents (tested to be stil valid).
+
+### Removed
+
+- Removed the shared `backends/models/` implementations and
+  `BaseGrangerModel`.
+- Removed `backends/object_loaders/`.
+- Removed the former scikit backend implementation package.
+- Removed the implementation from the former shared Keras callback-reset
+  module. An empty file remains; new adapters use backend-local helpers.
+
+### Breaking Changes
+
+- Replace imports from removed model, object-loader, and scikit packages
+  with the corresponding backend-local or `core/models/` modules.
+- Replace dimension-keyword model construction with the new
+  `spec` / `components` / `config` interface.
+- Replace model-level `initialize(X, targets=y)` with structural
+  construction through `ModelInputSpec`.
+- Pass prepared observations explicitly to each `fit(X, y, ...)` call.
+- Do not rely on silent fallback from an unknown model name to a default
+  model.
+- For PyTorch, place native optimizer options such as `lr` in optimizer
+  `params`; keep `gradient_accumulation_steps` in model configuration.
+- Custom NumPy regularizers should implement `_value_and_grad()` through
+  the validated `BaseNumpyRegularizer` interface.
+- Update direct access to `MetricCalculator` working attributes to the
+  new raw, aligned, binary, and evaluation-mask attributes.
+- Recalculate benchmark baselines when adopting the new evaluation-domain
+  and SHD conventions.
+
+### Builder integration
+
+- Migrated `MultiTaskGrangerBuilder` to the new backend construction contract:
+  `build_model(spec=None, *, components=None, config=None)`.
+- Added construction of `ModelInputSpec` from effective prepared-data metadata,
+  including ordered causes/effects, named feature slices, and actual feature lags.
+- Routed callback specifications through backend-specific callback construction.
+- Added explicit optimizer and loss preparation before model construction.
+- Separated ready backend components from non-component model configuration.
+- Replaced observation-based model initialization and parameterless fitting
+  with explicit `fit(X, y)` calls.
+- Added independent optimizer and callback resets for base and restricted runs
+  without rebuilding predictor parameters.
+- Preserved explicit weight restoration and named feature-block omission for
+  restricted fits.
+- Avoided duplicate component resets by resetting components before fitting and
+  calling `fit(..., reset_components=False)`.
+
+### Validation
+
+- Successfully ran the analysis script and unit tests after migrating the
+  builder to the new backend/model interface.
+- These checks validate the exercised execution paths and test cases; they do
+  not establish exhaustive coverage of every backend, device, component, or
+  configuration combination.
+- No new performance, cross-backend numerical equivalence, or statistical
+  calibration claim is made.
+
+### Known limitations
+
+- Hyperoptimization remains disabled in the standard builder pipeline, as in
+  the previous implementation. This update neither enables automatic parameter
+  search nor introduces a hyperoptimization regression.
+- Backend-specific optimizer parameters and training diagnostics are not
+  interchangeable merely because they share a common construction interface.
+
+## Version Changes 2.8
+
+This update redesigns lag selection and preparation around explicit
+output/predictor lag specifications.
+
+Lag selectors are auxiliary preprocessing heuristics. Their purpose is
+to propose a manageable set of lagged inputs for subsequent modeling,
+not to establish causality or reproduce the assumptions and architecture
+of the final model.
+
+The final model may apply additional constraints, regularization, or a
+different predictive architecture.
+
+### Added
+
+#### Selector interfaces and resolution
+
+- Added registry-based lag-selector registration, discovery, and resolution.
+- Added selector specifications using registered names and canonical
+  `type`/`params` mappings.
+- Added separate forwarding of selector constructor parameters through
+  `lag_selector_params`.
+- Added `resolve_lag_engine_config()` for resolving declarative engine
+  configuration during preprocessing.
+
+#### Selection methods
+
+- Added a shared cumulative-expansion and backward-pruning implementation
+  for `ICLagSelector` and `CVLagSelector`.
+- Added independent `initial` and `current` reference policies for
+  addition and pruning.
+- Added `CommonOrderICLagSelector`, which selects one common order by
+  aggregating auxiliary IC scores across requested outputs.
+- Added `CommonOrderCVLagSelector`, which selects one common order by
+  aggregating time-series validation losses across requested outputs.
+- Added optional output weights for common-order selection.
+- Added training-fold response normalization for common-order CV.
+- Added a NumPy-only forward-chaining splitter with configurable validation
+  size, gap, and maximum training-window length.
+
+#### Preparation results and provenance
+
+- Added union, intersection, and selection-frequency aggregation across
+  independently processed datasets.
+- Added explicit predictor-wide and output/predictor lag overrides.
+- Added `LagPreparationResult` and `LagSegmentInfo` in `core/lag_config.py`.
+- Added direct result fields for feature identities, actual lags,
+  predictor-block boundaries, and the output-by-feature mask.
+- Added `PreparedData.lag_result`.
+- Added active and removed predictor reporting.
+- Added the removal reason `"no_selected_lags"` and metric-dependent
+  restoration of excluded tested causes.
+
+#### Diagnostics
+
+- Added reporting of numerically unsuccessful candidates.
+- Added diagnostics for rank-deficient auxiliary fits and use of the
+  residual-variance floor.
+- Added per-order scores for common-order selectors.
+- Added criterion tables and criterion-specific optimal orders for the
+  historical VAR selector.
+
+### Changed
+
+#### Shared lag contracts
+
+- Changed `BaseLagSelector` into an abstract interface without imposing
+  constructor parameters, a specific search procedure, or mask construction.
+- Changed selector outputs to nested dictionaries of explicit lag tuples.
+- Moved shared lag configuration and result contracts to
+  `core/lag_config.py`.
+- Flattened feature-layout fields into `LagPreparationResult` instead of
+  maintaining a separate `LagFeatureLayout` object.
+
+#### IC/CV selection
+
+- Changed initial selection to evaluate cumulative lag ranges rather than
+  isolated delays.
+- Changed pruning to remove the largest active lag while retaining the
+  remaining selected terms.
+- Changed candidate comparisons to use identical response timestamps.
+- Allowed rank-deficient auxiliary regressions to be fitted using
+  least-squares solutions rather than rejecting them unconditionally.
+- Separated candidate admissibility for IC and CV.
+- Added a choice between column-count and numerical-rank complexity
+  penalties for IC.
+- Added an explicit residual-variance floor for IC scoring.
+- Changed numerically equivalent score comparisons to favor smaller
+  candidate representations.
+- Changed expected candidate-specific numerical failures to reject the
+  candidate rather than immediately abort the complete search.
+- Kept configuration and programming errors distinct from candidate
+  failures.
+
+#### CV scoring
+
+- Changed intercept-only validation to estimate its prediction from
+  training responses within each fold.
+- Removed the fallback from CV loss to information-criterion scoring.
+- Kept validation observations consistent across candidate models.
+- Allowed rank-deficient and underdetermined training regressions when
+  their validation predictions remain computable.
+- Removed the scikit-learn splitter dependency from the CV implementation.
+
+#### Engine and pipeline integration
+
+- Changed parallel selection to operate across independent datasets.
+- Changed feature construction to derive data columns, masks, block
+  boundaries, and lag metadata from the same ordered feature identities.
+- Changed `LagEngine.prepare()` to return a structured result.
+- Moved selector construction and engine-configuration resolution into
+  `DataPreparer.lag()`.
+- Removed selector construction and lag-specific default injection from
+  the configuration loader.
+- Updated effective predictor and tested-cause roles after lag exclusion
+  while preserving requested roles.
+- Preserved output roles for variables excluded only as predictors.
+
+### Historical VAR compatibility
+
+- Retained the historical VAR selection procedure as
+  `NaiveVARLagSelector`.
+- Preserved `VARLagSelector` as a Python alias.
+- Preserved `"var"` as a registered selection name and added `"naive_var"`.
+- Preserved optional centering, separate `VAR.fit(p)` calls, the four
+  AIC/BIC/HQIC/FPE criteria, and the maximum/minimum combination of their
+  selected orders.
+- Changed the return value to the current `LagSpec` contract.
+- Added explicit reporting of failed candidate orders.
+- Rejected non-finite criterion results and the case where no candidate
+  produces four finite criteria.
+- Removed the accidental selection of the first order when all criterion
+  values are invalid.
+
+The historical selector retains its original candidate-dependent sample
+trimming. The new common-order selectors compare orders on a shared
+response window.
+
+### Fixed
+
+- Corrected the mismatch between isolated-delay scoring and cumulative
+  lag interpretation.
+- Prevented unsuccessful predictor screening from automatically including
+  the initialized minimum lag.
+- Corrected pruning so reducing an order removes a feature instead of
+  replacing one isolated delay with another.
+- Prevented rank deficiency alone from aborting IC/CV selection.
+- Prevented unsuccessful candidate evaluations from being mistaken for
+  valid optimal orders.
+- Made self-lag-0 exclusion explicit.
+- Preserved earlier removal metadata when adding lag-exclusion records.
+- Supported neutral restoration of duplicate tested causes whose
+  representatives were subsequently excluded by lag preparation.
+
+### Breaking changes and migration
+
+- Replace `LagConfiguration` with `LagEngineConfig`.
+- Replace `custom_lags` with `predictor_overrides`.
+- Replace tuple-keyed `custom_pair_lags` with nested `pair_overrides`.
+- Treat lag lists and tuples as explicit lag values, not interval endpoints.
+- Replace the old selector result with
+  `fit(data, outputs=...) -> LagSpec`.
+- Replace positional unpacking of `LagEngine.prepare()` with named access
+  to `LagPreparationResult`.
+- Replace `result.layout.*` access with direct result fields.
+- Configure automatic search bounds on the selector. Engine `max_lag`
+  defines the fixed baseline when no selector is enabled.
+- Use `lag_selector.params.*` or `lag_selector_params.*` for selector
+  parameter sweeps.
+- Do not replace the historical `"var"` selection with a common-order
+  selector when reproducing earlier experiments without recording the
+  methodological change.
+
+### Interpretation and limitations
+
+- All selectors are preprocessing heuristics; none guarantees the best
+  lag specification for the final model.
+- Linear auxiliary scoring can overlook terms useful to a different
+  final architecture or in interactions with other predictors.
+- Initial per-pair screening is conditional on the selected AR component,
+  not on all other external predictors.
+- Tail pruning does not remove arbitrary interior lags.
+- Rank-deficient fitting does not make individual coefficients identifiable.
+- Column-count IC penalization is an explicit representation-size
+  heuristic when the design is rank deficient.
+- Common-order IC is an aggregate of equation-wise scores, not the
+  classical joint VAR information criterion.
+- Historical VAR selection may remain unavailable when its residual
+  covariance requirements are not satisfied.
+- Restored neutral results for lag-excluded causes are reporting
+  conventions, not independently calculated hypothesis-test results.
+- Zero-feature designs require compatible scaling and backend handling.
+- Integration tests and numerical regression checks are required before
+  treating these changes as a validated release.
+
+## Version Changes 2.8.1 - Stationarity preprocessing refactor
+
+### Changed
+
+- Replaced `StationarityTransformer` with independent registry-selected
+  `ADFStationarityEnforcer` and `KPSSStationarityEnforcer` implementations.
+- Added a shared `BaseStationarityEnforcer` interface and reusable
+  differencing workflow.
+- Unified configuration under `stationarity`; the loader and builder
+  preserve selections, and the preparation stage resolves them.
+- Made stationarity processing disabled by default, with explicit
+  `None` support across preparation and public APIs.
+- Renamed fitted-state access to `stationarity_enforcer` in `PreparedData`
+  and `PreparationContext`.
+- Added validation of input schema and finite values, fitted-state
+  isolation, and explicit `exclude` configuration.
+
+### Removed
+
+- Removed the legacy transformer API, `test_name` selection,
+  `fit_stationarity()`, and `prepare_static()`.
+
+### Tests and documentation
+
+- Added unit-test code for enforcers, registry resolution, validation,
+  state isolation, and pipeline handling.
+- Updated preprocessing, API, configuration, component-loading, and
+  project-structure documentation.
+- Tests were not executed as part of this change preparation.
+  Numerical helper search and fallback behavior remain unchanged.
+
+## Version Changes 2.8.2 — Shared analysis execution and configuration refactor
+
+This entry describes the adopted architecture refactor. No new package version
+is assigned here. Implementation examples and this documentation update are not
+a report of executed regression tests or cross-backend validation.
+
+### Added
+
+- Added `AnalysisSpec` and `ModelingSpec`, reusing the existing preparation
+  configuration and variable-role contracts rather than duplicating them.
+- Added `ModelAssembler`, `ModelInitializer`, and `FitExecutor` as focused services.
+- Added `FitOutcome` for one fit's model-scale predictions, copied full weights,
+  existing `TrainingResult`, and timing information.
+- Added `AnalysisRunner` for full execution and standard fit coordination.
+- Added internal `AnalysisRunProgress` for publishing artifacts and synchronizing
+  builder state after successful stages, including partial failures.
+- Added document-only `AnalysisConfigLoader` and an `experiments` package for
+  explicit configuration-case expansion.
+- Added architecture and migration documentation.
+
+### Changed
+
+- Both the builder and orchestrator execute the shared runner. The orchestrator
+  no longer constructs a builder or mutates its private configuration mapping.
+- Extracted standard full/restricted fitting into `GrangerTrainer`; it returns
+  fit artifacts instead of modifying `GrangerAnalysisResults`.
+- Moved outcome-to-snapshot conversion to the runner, preserving target inverse
+  scaling, current first-weight-array coefficient extraction, and snapshot metadata.
+- Retained `TrainingResult` as the training diagnostics contract; diagnostics are
+  not automatically added to final snapshot metadata or script summary columns.
+- Centralized backend aliases and mapping-form declaration handling in the
+  existing `BackendFactory`, without adding another backend resolver.
+- Kept the external analysis mapping flat; specifications group configuration
+  internally and exclude source/prepared data and live model state.
+- Clarified `from_config()` as a top-level update and `replace_config()` as a
+  reset/replacement; nested maps are not recursively merged.
+- Device values are interpreted by existing Keras/PyTorch managers. NumPy ignores
+  `device` at strategy model construction, including resolved model params, to
+  support shared experiment configuration and automatic backend selection.
+- Group iteration returns mappings, expands explicit case rows, and resolves
+  document references without component normalization or Cartesian expansion.
+
+### Removed
+
+- Removed transitional configuration normalization through `configuration/legacy.py`.
+- Removed normalizing loader helpers `normalize_builder_config()` and
+  `normalize_relations()`; existing domain parsers remain available directly.
+- Removed duplicate backend-alias/device-value handling from document loading.
+
+### Compatibility and migration
+
+- `BuilderConfigLoader` remains an alias of `AnalysisConfigLoader`; it no longer
+  has the former normalizing behavior. Relation-file loading returns raw data.
+- `MultitaskGrangerBuilder` remains an alias of `MultiTaskGrangerBuilder`.
+- Explicit builder stages and public builder fit return values are retained.
+  Complete fit does not dispatch through overridden builder stage methods.
+- `run_analysis()` is the full runner entry point; lower-level `run()` has a
+  different contract and is not a public resume operation.
+- Prepared data is an explicit runtime input. `reuse_data` alone does not create
+  a runner cache; the script's external cache retains its own limitations.
+- Backend mapping params retain their role as model defaults, not arbitrary
+  strategy-constructor options. Explicit model settings take precedence.
+
+### Not included
+
+- Automatic HPO remains inactive despite retained compatibility fields. Future
+  HPO targets model quality, not Granger statistics or ground-truth causal scores.
+- No interchangeable high-level procedure registry, resumable session API,
+  universal component resolver, or new training-device manager is introduced.
+
+## 2.9 - Data splitting and source-aware preparation
+
+### Added
+- Prepared-row splitting globally or independently within each series.
+- Source split plans for whole-series and within-series temporal holdout.
+- Row-index partition artifacts without storing separate train,
+  validation, and test matrices.
+- Original-target provenance in source-aware lag-segment metadata.
+- Source-aware preparation with training-only redundancy decisions,
+  stationarity fitting, and automatic lag selection.
+- Leakage warnings for random prepared-row splitting.
+
+### Changed
+- Proposed ordinary and block scaling fit on training rows when a split is active.
+- Proposed lag preparation accepts separate datasets for lag selection
+  and final matrix construction.
+
+### Restrictions
+- Source-aware imputation is not implemented.
+- Unsupported internal row gaps and incompatible workload reduction
+  raise errors.
+- Downstream fitting and HPO must explicitly consume split indices.
+
+### Verification
+- Implementation patches and tests were proposed in conversation.
+- Repository integration and test execution remain to be confirmed.
+
+## Version Changes 2.10.0 — Standalone Hyperparameter Optimization
+
+Proposed development version following the 2.9 splitting work. It does not claim
+that all backends have been validated or that a release has been published.
+
+### Added
+
+- Added standalone model-quality hyperparameter search through
+  `execution/model_search_runner.py::ModelSearchRunner`.
+- Added `ModelSearchSpec` and `SearchBudget` for declarative search settings,
+  candidate-count limits, trial epoch limits, and training seeds.
+- Added a dedicated `SearchSpaceParser`, normalized parameter paths, discrete
+  choices, integer ranges, and linear or logarithmic floating-point ranges.
+- Added decorator-registered grid and random strategies using the shared
+  `Registry`. Grid enumerates discrete combinations; random samples domains
+  with replacement. The runner owns the maximum number of trials.
+- Added the `hiperopt/objectives/` package with `BaseObjective`,
+  `ObjectiveResult`, registry-based resolution, MSE, MAE, RMSE, named output
+  weights, and an explicit-direction `CallableObjective` adapter.
+- Added `modeling/search_evaluator.py::ModelCandidateEvaluator`, reusing
+  `ModelAssembler`, `ModelInitializer`, and `FitExecutor` to evaluate one
+  multi-output candidate on an existing training/validation split.
+- Added candidate configuration application without mutation of baseline
+  declarations, including copying configuration containers and numeric arrays.
+- Added `TrialResult`, `TrialError`, `ModelSearchResult`, and
+  `ModelSearchFailedError` with trial history, selected modeling settings,
+  split snapshots, budget metadata, and search stop reasons.
+- Added shared input validation, explicit error recording, deterministic
+  first-successful-trial tie breaking, and finite-score checks.
+
+### Changed
+
+- Extended `ModelInitializer.compute_weights()` with optional training-row
+  selection and an explicit initialization mask. Existing calls remain valid.
+- Each HPO trial constructs a fresh model and fresh model-specific components;
+  prepared data and fitted preprocessing transformations remain fixed during
+  the search. No trained trial objects are transferred to another trial.
+- Trial-only epoch limits are applied separately from selected final-training
+  settings. Fixed epoch budgets reject conflicting search dimensions.
+- Normalized prepared split artifacts to include `training`, `validation`,
+  and `test`. Without a splitter, all prepared rows are training rows and the
+  other two parts are empty.
+
+### Compatibility notes
+
+- Code expecting `PreparedData.split is None` must inspect the explicit split
+  instead. Empty optional parts are now valid; malformed or overlapping
+  assignments remain invalid.
+- Random strategy declarations use `seed`; candidate limits belong to
+  `SearchBudget.max_trials`, not a strategy-level `n_trials` parameter.
+- Ready model, optimizer, loss, callback, constraint, regularizer, and
+  initializer instances are not supported as training-component inputs by
+  this initial evaluator. Use supported names, classes, or declarations.
+- Existing configuration parsers still define which forms each component
+  accepts. The evaluator does not make all component formats interchangeable.
+
+### Scope and limitations
+
+- Search is available through the standalone Python interface. Automatic
+  integration with the standard analysis runner, builder, orchestrator, and
+  file-based analysis configuration is not included in this change.
+- HPO requires a non-empty training part and a non-empty validation part.
+  It does not run restricted Granger models, select by p-values, evaluate a
+  test part, or automatically fit the selected final analysis.
+- Separate HPO and Granger preprocessing contexts are an integration design,
+  not an automatically executed workflow in this release.
+- No claim is made that the implementation or the revised tests were executed.
+- The explicit split representation changes the earlier low-level contract.
+  Review release numbering if that contract is already a stable public API.
+
+## Version Changes 2.11.0 — Integrated Model Search
+
+### Added
+
+- Integrated model-quality hyperparameter optimization with
+  `AnalysisRunner`, `MultiTaskGrangerAPI`, and
+  `MultiTaskGrangerBuilder`.
+- Added declarative `search` parsing to `AnalysisSpec`, including
+  `SearchBudget`, validation-part selection, error policy, training seed,
+  and collection of trial history.
+- Added independent HPO preparation overrides for `splitter` and
+  `random_state`, while preserving a separate final-analysis preparation
+  context.
+- Added `search_prepared_data` for callers that already own a compatible HPO
+  preparation artifact.
+- Added HPO metadata to `GrangerAnalysisResults`, including the selected
+  modeling declaration and search history.
+- Added configuration-file examples for JSON/YAML HPO declarations.
+- Added unit coverage for API propagation, search-space parsing, grid
+  candidate generation, and candidate application.
+
+### Compatibility and behavior
+
+- `search: null` or an omitted `search` section preserves the existing
+  workflow.
+- Enabled HPO requires non-empty `training` and validation parts.
+- Trial models and components remain isolated; the final analysis constructs
+  fresh components from `best_modeling`.
+- Legacy `hiperoptimalization_state` and `hiperoptimalization_conf` settings
+  are rejected with an actionable migration message.

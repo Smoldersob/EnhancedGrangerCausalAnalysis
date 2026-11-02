@@ -6,14 +6,42 @@ import pandas as pd
 
 from pathlib import Path
 from typing import Any, Dict, List, Mapping, Optional, Sequence
-from time import perf_counter
+
+from ..configuration.analysis_spec import AnalysisSpec
+from ..configuration.modeling_spec import ModelingSpec
+from ..configuration.loader import AnalysisConfigLoader
+
+from ..modeling.assembler import ModelAssembler
+from ..modeling.initialization import ModelInitializer
+from ..modeling.executor import FitExecutor
+from ..modeling.artifacts import FitOutcome
+
+from ..execution.granger_trainer import GrangerTrainer
+from ..execution.runner import (
+    AnalysisRunner,
+    AnalysisRunProgress,
+)
+
+from ..core.exceptions import DataValidationError, ConstraintConfigurationError
+from ..core.components.constraint_parsing import (
+    RelationsInput,
+    parse_relations_spec,
+)
+from ..core.components.constraint_spec import (
+    PreparedConstraintData,
+    RelationConstraintsSpec,
+)
+from ..core.components.regularizer_parsing import (
+    parse_regularizer_spec,
+)
+from ..core.components.regularizer_spec import (
+    PreparedRegularizerData,
+)
 
 from ..backends import BackendFactory
-from ..core.exceptions import DataValidationError
-from ..preprocessing.prepare_data import PreparedData, prepare_data as run_prepare_data
-from ..preprocessing.stationarity import StationarityTransformer
-from ..results.granger_results import GrangerAnalysisResults, PreparationContext
-from .config_loader import BuilderConfigLoader
+from ..backends.base_backend import BackendStrategy
+from ..preprocessing.prepare_data import PreparedData
+from ..results.granger_results import GrangerAnalysisResults
 
 
 def _normalize_optional_name_list(
@@ -64,20 +92,48 @@ class MultiTaskGrangerBuilder:
         self._reuse_data = bool(reuse_data)
         self._fit_kwargs: Dict[str, Any] = {
             "causes": None, "effects": None, "tested_causes": None,
-            "relations": None, "lag_config": None, "lag_selector": None,
-            "stationarity_transformer": StationarityTransformer(),
-            "missing_value_imputer": None, "schema_policy": "union",
-            "backend_sample_fraction": 1.0, "backend_max_samples": None,
-            "random_state": None, "sampling_strategy": None,
+            "schema_policy": "union",
+            "constraint_spec": {
+                            "type": "mask_and_min_abs_sum",
+                            "params": {},
+                        },
+            "relations": RelationConstraintsSpec(),
+            "lag_config": None,
+            "lag_selector": None,
+            "lag_selector_params": {},
+            "lag_n_jobs": 1,
+            "stationarity": "adf",
+            "missing_value_imputer": None, 
+            "sampling_strategy": None, "backend_sample_fraction": 1.0, "backend_max_samples": None,
+            "random_state": None, 
             "x_scaler": "standard", "y_scaler": "standard",
-            "regularizer": None, "regularizer_spec": None, "callbacks": None,
+            "regularizer_spec": None,
+            "callbacks": None,
             "hiperoptimalization_state": None, "hiperoptimalization_conf": None,
-            "initializer": None, "model_config": None,
+            "initializer": None, 
+            "model_config": None,
+            "prepared_data": None,
+            "search": None,
+            "search_prepared_data": None,
         }
+        self._model_assembler = ModelAssembler()
+        self._model_initializer = ModelInitializer()
+        self._fit_executor = FitExecutor()
+        self._granger_trainer = GrangerTrainer(
+            executor=self._fit_executor,
+        )
+        self._analysis_runner = AnalysisRunner(
+            trainer=self._granger_trainer,
+        )
+
+        self._device_config: Dict[str, Any] = {}
+
         self._prepared_data: Optional[PreparedData] = None
-        self._strategy: Any = None
+        self._strategy: BackendStrategy | None = None
         self._constraint: Any = None
+        self._constraint_data: Optional[PreparedConstraintData] = None
         self._regularizer: Any = None
+        self._regularizer_data: Optional[PreparedRegularizerData] = None
         self._callbacks: Optional[List[Any]] = None
         self._model_config: Dict[str, Any] = {}
         self._model: Any = None
@@ -85,7 +141,10 @@ class MultiTaskGrangerBuilder:
         self._base_weights: Optional[List[np.ndarray]] = None
         self._results: Optional[GrangerAnalysisResults] = None
         self._hyperopt_result: Any = None
+        self._model_search_result: Any = None
+        self._effective_modeling: ModelingSpec | None = None
 
+    
     # Configuration methods remain deliberately side-effect free.
     def backend(self, backend_name: Optional[str]) -> "MultiTaskGrangerBuilder":
         """
@@ -98,6 +157,12 @@ class MultiTaskGrangerBuilder:
             Self for method chaining
         """
         self._backend = backend_name
+        self._strategy = None
+
+        self._invalidate_from(
+            "components",
+            preserve_results=True,
+        )
         return self
 
     def data(self, data: pd.DataFrame | Sequence[pd.DataFrame]) -> "MultiTaskGrangerBuilder":
@@ -133,48 +198,108 @@ class MultiTaskGrangerBuilder:
         })
         self._invalidate_from("data")
         return self
+    
+    def relations(
+        self,
+        relations: RelationsInput,
+    ) -> "MultiTaskGrangerBuilder":
+        """Store a RelationConstraintsSpec or a list of canonical declarations.
 
-    def relations(self, relations):
+        Accepts only:
+            - RelationConstraintsSpec instance;
+            - list of relation rules [...].
+
+        File references are resolved only by the configuration loader.
         """
-        Configure explicit causal relations for the analysis.
+        spec = parse_relations_spec(relations)
 
-        Args:
-            relations: A dictionary mapping cause variables to lists of effect variables
-
-        Returns:
-            Self for method chaining
-        """
-        self._fit_kwargs["relations"] = dict(relations) if relations is not None else None
+        self._fit_kwargs["relations"] = spec
         self._invalidate_from("components")
         return self
 
-    def lag(self, lag_config=None, lag_selector=None):
-        """
-        Configure the lag structure for the analysis.
+    def constraint(
+        self,
+        constraint_spec: Any,
+    ) -> "MultiTaskGrangerBuilder":
+        """Configure constraint selection.
 
-        Args:
-            lag_config: Configuration for the lag structure
-            lag_selector: Selector for the lag structure
+        Accepted by the backend resolver:
+            - registered name;
+            - {"type": name, "params": {...}};
+            - concrete backend constraint class.
 
-        Returns:
-            Self for method chaining
+        Instances and None are not supported.
         """
-        self._fit_kwargs["lag_config"] = lag_config
-        self._fit_kwargs["lag_selector"] = lag_selector
-        self._invalidate_from("data")
+        if constraint_spec is None:
+            raise ConstraintConfigurationError(
+                "constraint_spec cannot be None. "
+                "Use the default constraint to preserve the base mask."
+            )
+
+        self._fit_kwargs["constraint_spec"] = (
+            copy.deepcopy(dict(constraint_spec))
+            if isinstance(constraint_spec, Mapping)
+            else constraint_spec
+        )
+
+        self._invalidate_from("components")
         return self
 
-    def stationarity(self, transformer=StationarityTransformer()):
-        """
-        Configure the stationarity transformation for the analysis.
+    def lag(
+        self,
+        lag_config=None,
+        lag_selector=None,
+        *,
+        lag_selector_params: Optional[Mapping[str, Any]] = None,
+        n_jobs: int = 1,
+    ) -> "MultiTaskGrangerBuilder":
+        """Store lag specifications for later resolution by the pipeline.
 
-        Args:
-            transformer: The transformer to use for stationarity adjustment
-
-        Returns:
-            Self for method chaining
+        Calling this method replaces the complete stored lag setup.
+        No selector or engine is constructed here.
         """
-        self._fit_kwargs["stationarity_transformer"] = transformer
+        if (
+            lag_selector_params is not None
+            and not isinstance(lag_selector_params, Mapping)
+        ):
+            raise TypeError(
+                "lag_selector_params must be a mapping or None."
+            )
+
+        self._fit_kwargs.update({
+            "lag_config": copy.deepcopy(lag_config),
+            "lag_selector": (
+                copy.deepcopy(dict(lag_selector))
+                if isinstance(lag_selector, Mapping)
+                else lag_selector
+            ),
+            "lag_selector_params": (
+                {}
+                if lag_selector_params is None
+                else copy.deepcopy(dict(lag_selector_params))
+            ),
+            "lag_n_jobs": n_jobs,
+        })
+
+        self._invalidate_from("data")
+        return self
+    
+    def stationarity(
+        self,
+        spec: Any = None,
+    ) -> "MultiTaskGrangerBuilder":
+        """Store a stationarity selection for later pipeline resolution.
+
+        None disables stationarity processing.
+
+        Registered names, mapping specifications, classes, and instances
+        are interpreted by the stationarity resolver during preparation.
+        """
+        self._fit_kwargs["stationarity"] = (
+            copy.deepcopy(dict(spec))
+            if isinstance(spec, Mapping)
+            else spec
+        )
         self._invalidate_from("data")
         return self
 
@@ -221,22 +346,28 @@ class MultiTaskGrangerBuilder:
         self._invalidate_from("data")
         return self
         
-    def regularization(self, regularizer=None, regularizer_spec=None):
+    def regularization(
+            self,
+            regularizer_spec: Any = None,
+    ) -> "MultiTaskGrangerBuilder":
         """
-        Configure the regularization for the analysis.
-
+        Store a parsed specification; None disables regularization.
         Args:
-            regularizer: The regularizer to use
-            regularizer_spec: The specification for the regularizer
+            regularizer_spec: Specification for the regularizer, which can be a registered name, a dictionary with type and parameters, or a concrete backend regularizer class.
 
         Returns:
             Self for method chaining
         """
-        self._fit_kwargs["regularizer"] = regularizer
-        self._fit_kwargs["regularizer_spec"] = copy.deepcopy(regularizer_spec)
-        self._invalidate_from("components")
-        return self
+        spec = parse_regularizer_spec(regularizer_spec)
 
+        self._fit_kwargs["regularizer_spec"] = spec
+
+        self._invalidate_from(
+            "components",
+            preserve_results=True,
+        )
+
+        return self
     def callbacks(self, callbacks=None):
         """
         Configure the callbacks for the analysis.
@@ -252,28 +383,31 @@ class MultiTaskGrangerBuilder:
         return self
 
     def hyperoptimization(self, state=None, config=None):
-        """
-        Configure hyperparameter optimization for the analysis.
+        """Store reserved hyperoptimization settings.
 
-        Args:
-            state: The state of the hyperparameter optimization
-            config: The configuration for the hyperparameter optimization
-        Returns:
-            Self for method chaining
+        Hyperoptimization is disabled in the standard builder pipeline.
+        These settings do not trigger optimization or modify model selection.
         """
         self._fit_kwargs["hiperoptimalization_state"] = state
         self._fit_kwargs["hiperoptimalization_conf"] = copy.deepcopy(config)
         return self
+        return self
 
     def initializer(self, initializer):
         """
-        Configure the initializer for model weights.
+        Store an initializer name, specification, class, or instance.
+        
         Args:
-            initializer: The initializer to use for model weights
+           initializer: The initializer name, specification, class
+                or instance to use for weight initialization.        
         Returns:
             Self for method chaining
         """
-        self._fit_kwargs["initializer"] = initializer
+        self._fit_kwargs["initializer"] = (
+            copy.deepcopy(dict(initializer))
+            if isinstance(initializer, Mapping)
+            else initializer
+        )
         self._invalidate_from("model")
         return self
 
@@ -304,298 +438,433 @@ class MultiTaskGrangerBuilder:
         self._invalidate_from("model")
         return self
 
-    def from_config(self, config: Mapping[str, Any]) -> "MultiTaskGrangerBuilder":
-        """
-        Configure the builder from a configuration dictionary.
-        Args:
-            config: The configuration dictionary
-        Returns:
-            Self for method chaining
-        """
+    def from_config(
+        self,
+        config: Mapping[str, Any],
+    ) -> "MultiTaskGrangerBuilder":
+        """Update supplied configuration fields without resolving components."""
+
+        if "regularizer" in config:
+            raise DataValidationError(
+                "The 'regularizer' configuration field is not supported. "
+                "Use 'regularizer_spec'."
+            )
+
+        if "constraint_spec" in config and config["constraint_spec"] is None:
+            raise ConstraintConfigurationError(
+                "constraint_spec cannot be None."
+            )
+
         if "backend" in config:
             self._backend = config["backend"]
+
         if "reuse_data" in config:
             self._reuse_data = bool(config["reuse_data"])
+
         if "data" in config:
             self._data = config["data"]
+
         for key in self._fit_kwargs:
-            if key not in config:
-                continue
-            value = config[key]
-            if key in {"regularizer_spec", "hiperoptimalization_conf", "model_config"} and value is not None:
-                value = dict(value)
-            elif key in {"causes", "effects", "tested_causes"}:
-                value = _normalize_optional_name_list(value)
-            elif key == "relations" and value is not None:
-                value = dict(value)
-            self._fit_kwargs[key] = value
+            if key in config:
+                self._fit_kwargs[key] = config[key]
+
+        if "compute_device" in config:
+            self._device_config = {
+                "compute_device": config["compute_device"]
+            }
+        elif "device" in config:
+            self._device_config = {
+                "device": config["device"]
+            }
+
         self._invalidate_from("data")
+
         return self
 
-    def from_file(self, path: str | Path) -> "MultiTaskGrangerBuilder":
-        """
-        Configure the builder from a configuration file.
-        Args:
-           path (str | Path): Path to the configuration file (JSON, YAML, etc.)
-        Returns:
-            Self for method chaining
-        """
-        return self.from_config(BuilderConfigLoader.load_file(path))
+    def from_file(
+        self,
+        path: str | Path,
+    ) -> "MultiTaskGrangerBuilder":
+        """Update configuration from a document with resolved file references."""
+
+        config = AnalysisConfigLoader.load_file(path)
+        return self.from_config(config)
+
+    def replace_config(
+        self,
+        config: Mapping[str, Any],
+    ) -> "MultiTaskGrangerBuilder":
+        """Replace configuration and discard previous execution artifacts."""
+
+        replacement = MultiTaskGrangerBuilder()
+        replacement.from_config(config)
+
+        self.__dict__.clear()
+        self.__dict__.update(replacement.__dict__)
+
+        return self
+
+    def to_spec(self) -> AnalysisSpec:
+        """Create an analysis specification without execution artifacts."""
+
+        config = dict(self._fit_kwargs)
+        config["backend"] = self._backend
+        config["reuse_data"] = self._reuse_data
+        config.update(self._device_config)
+
+        return AnalysisSpec.from_mapping(config)
 
     # Executable stages.
-    def prepare_data(self, prepared_data: Optional[PreparedData] = None) -> PreparedData:
-        """
-        Prepare the data for the analysis.
-        Args:
-            prepared_data: The prepared data, if available.
+    def prepare_constraint_data(self) -> PreparedConstraintData:
+        """Prepare constraint data using the final prepared feature layout."""
 
-        Returns:
-            The prepared data.
-        """
+        self._require_prepared()
+
+        compiled = self._model_assembler.prepare_constraint_data(
+            prepared=self._prepared_data,
+            relations=self._current_modeling().relations,
+        )
+
+        self._constraint_data = compiled
+        return compiled
+
+    def prepare_regularizer_data(
+        self,
+    ) -> Optional[PreparedRegularizerData]:
+        """Prepare backend-independent input for optional regularization."""
+
+        self._require_prepared()
+
+        spec = parse_regularizer_spec(
+            self._current_modeling().regularizer_spec
+        )
+
+        self._invalidate_from(
+            "model",
+            preserve_results=True,
+        )
+        self._regularizer = None
+        self._regularizer_data = None
+
+        if spec is None:
+            return None
+
+        self._regularizer_data = (
+            self._model_assembler.prepare_regularizer_data(
+                prepared=self._prepared_data,
+                regularizer_spec=spec,
+            )
+        )
+
+        return self._regularizer_data
+    
+    
+    def prepare_data(
+        self,
+        prepared_data: Optional[PreparedData] = None,
+    ) -> PreparedData:
+        """Prepare data or accept an explicitly supplied preparation artifact."""
+
         if prepared_data is None:
             prepared_data = self._fit_kwargs.get("prepared_data")
+
         if prepared_data is None:
             if self._data is None:
-                raise DataValidationError("Builder requires data(...) before prepare_data()")
-            prepared_data = run_prepare_data(data=self._data, **{
-                k: v for k, v in self._fit_kwargs.items()
-                if k in {"causes", "effects", "tested_causes", "lag_config", "lag_selector",
-                         "stationarity_transformer", "missing_value_imputer", "schema_policy",
-                         "backend_sample_fraction", "backend_max_samples", "random_state",
-                         "sampling_strategy", "x_scaler", "y_scaler"}
-            })
+                raise DataValidationError(
+                    "Builder requires data(...) before prepare_data()"
+                )
+
+            prepared_data = self._analysis_runner.prepare_data(
+                spec=self.to_spec(),
+                data=self._data,
+            )
+
+        self._invalidate_from("components")
         self._prepared_data = prepared_data
-        self._results = GrangerAnalysisResults(
-            effects=prepared_data.effects,
-            causes=prepared_data.tested_causes,
-            mask=prepared_data.base_mask,
-            cause_slices=prepared_data.cause_slices,
-            y_true=prepared_data.y_raw,
-            X_true=prepared_data.X_raw,
+
+        self._results = self._analysis_runner.create_results(
+            prepared_data
         )
-        self._results.set_preparation_context(PreparationContext(
-            prepared_data=prepared_data,
-            metadata={"requested_roles": prepared_data.requested_roles,
-                      "effective_roles": prepared_data.effective_roles,
-                      "removed_variables": prepared_data.removed_variables},
-        ))
+
+        return prepared_data
+
         return prepared_data
 
     def prepare_backend(self):
-        """
-        Prepare the backend for the analysis.
-        Returns:
-            The prepared backend.
-        """
+        """Select the backend using the shared analysis specification."""
+
         self._require_prepared()
-        self._strategy = BackendFactory.get_strategy(self._backend)
+
+        modeling = self._current_modeling()
+
+        self._strategy = BackendFactory.get_strategy(
+            modeling.backend
+        )
+
         return self._strategy
 
     def prepare_constraint(self):
-        """
-        Prepare the constraint for the analysis.
-        Returns:
-            The prepared constraint.
-        """
+        """Prepare constraint data and construct a backend implementation."""
+
         self._require_components_data()
-        prepared = self._prepared_data
-        self._constraint = self._strategy.build_constraint_from_relations(
-            relations=dict(self._fit_kwargs["relations"] or {}),
-            predictor_names=list(prepared.causes),
-            output_names=list(prepared.effects),
-            col_offsets=np.asarray(
-                [prepared.cause_slices[name].start for name in prepared.causes],
-                dtype=int,
-            ),
-            n_features=prepared.X_scaled.shape[1],
-            base_mask=prepared.base_mask,
+
+        data = self.prepare_constraint_data()
+
+        constraint = self._model_assembler.build_constraint(
+            strategy=self._strategy,
+            constraint_spec=self._current_modeling().constraint_spec,
+            data=data,
         )
-        if self._results is not None and hasattr(self._constraint, "mask"):
-            self._results.mask = np.asarray(self._constraint.mask, dtype=bool).copy()
-        return self._constraint
 
-    def prepare_regularizer(self):
-        """
-        Prepare the regularizer for the analysis.
-        Returns:
-            The prepared regularizer.
-        """
+        self._constraint = constraint
+
+        if self._results is not None:
+            self._results.mask = data.mask.copy()
+
+        return constraint
+
+    def prepare_regularizer(self) -> Any:
+        """Prepare and construct optional backend regularization."""
+
         self._require_components_data()
-        spec = dict(self._fit_kwargs.get("regularizer_spec") or {})
-        if str(spec.get("type", "")).lower() == "lag_dependent_l1":
-            selection = getattr(self._prepared_data.lag_engine, "selection_result_", None)
-            if selection is not None:
-                spec.setdefault("max_lags_per_pred", list(selection.max_lags_per_pred))
-                spec.setdefault("col_offsets", list(selection.col_offsets))
-        if spec:
-            self._regularizer = self._strategy.build_regularizer(spec)
-        else:
-            self._regularizer = self._fit_kwargs.get("regularizer")
+
+        spec = parse_regularizer_spec(
+            self._current_modeling().regularizer_spec
+        )
+
+        self._invalidate_from(
+            "model",
+            preserve_results=True,
+        )
+        self._regularizer = None
+
+        if spec is None:
+            self._regularizer_data = None
+            return None
+
+        if self._regularizer_data is None:
+            self.prepare_regularizer_data()
+
+        self._regularizer = self._model_assembler.build_regularizer(
+            strategy=self._strategy,
+            regularizer_spec=spec,
+            data=self._regularizer_data,
+        )
+
         return self._regularizer
-
+    
     def prepare_callbacks(self):
-        """
-        Prepare the callbacks for the analysis.
-        returns:
-            The list of prepared callbacks.
-        """
-        callbacks = self._fit_kwargs.get("callbacks")
-        self._callbacks = list(callbacks) if callbacks is not None else None
-        return self._callbacks
+        """Construct callbacks using the selected backend strategy."""
 
+        self._require_components_data()
+
+        self._callbacks = self._model_assembler.build_callbacks(
+            strategy=self._strategy,
+            callbacks=self._current_modeling().callbacks,
+        )
+
+        return self._callbacks
+    
     def prepare_components(self):
         """Prepare all components for the analysis."""
         self.prepare_backend()
+
         self.prepare_constraint()
+
+        self.prepare_regularizer_data()
         self.prepare_regularizer()
+
         self.prepare_callbacks()
+
         return self
 
-    def build_model(self, model_config: Optional[Mapping[str, Any]] = None):
+
+    def build_model(
+        self,
+        model_config: Optional[Mapping[str, Any]] = None,
+    ):
+        """Construct a model from prepared data and ready components.
+
+        Configuration overrides apply only to this build operation.
+        Weight initialization, fitting, and hyperoptimization are not
+        performed during model assembly.
         """
-        Build the Granger model for the analysis.
-        Args:
-            model_config: Optional configuration for the model
-        Returns:
-            The built model.
-        """
+
         self._require_components_data()
-        config = dict(self._fit_kwargs.get("model_config") or {})
+
+        if self._constraint is None:
+            self.prepare_constraint()
+
+        if self._current_modeling().regularizer_spec is not None and self._regularizer is None:
+            self.prepare_regularizer()
+
+        modeling = self._current_modeling()
+        config = dict(modeling.model_config)
         if model_config is not None:
             config.update(model_config)
-        if self._callbacks is not None:
-            config["callbacks"] = list(self._callbacks)
-        self._model_config = config
-        self._model = self._strategy.build_model(
-            n_features=self._prepared_data.X_scaled.shape[1],
-            n_outputs=self._prepared_data.y_scaled.shape[1],
-            regularizer=self._regularizer,
+
+        assembly = self._model_assembler.assemble(
+            strategy=self._strategy,
+            prepared=self._prepared_data,
+            model_config=config,
+            callbacks=modeling.callbacks,
             constraint=self._constraint,
-            **config,
+            regularizer=self._regularizer,
         )
-        self._model.initialize(self._prepared_data.X_scaled, targets=self._prepared_data.y_scaled)
+
+        self._callbacks = assembly.callbacks
+        self._model_config = assembly.model_config
+        self._model = assembly.model
+
         self._initial_weights = None
         self._base_weights = None
+
         if self._results is not None:
             self._results.base_snapshot = None
             self._results.reference_snapshots.clear()
+
         return self._model
 
-    
     def initialize_weights(self, initializer=None):
+        """Compute and assign initial weights using the configured initializer.
+
+        When initializer is None, use the stored initializer specification.
+        Weight assignment follows the existing builder and model contract.
         """
-        Initialize the weights of the model.
-        Args:
-            initializer: Optional initializer object or class. If None, uses the one from fit_kwargs.
-        Returns:
-            The initialized weights.
-        """
+
         self._require_model()
-        initializer = initializer if initializer is not None else self._fit_kwargs.get("initializer")
-        if initializer is None:
+
+        spec = (
+            initializer
+            if initializer is not None
+            else self._current_modeling().initializer
+        )
+
+        weights = self._model_initializer.compute_weights(
+            model=self._model,
+            prepared=self._prepared_data,
+            initializer_spec=spec,
+        )
+
+        if weights is None:
             return None
-        init_obj = initializer(n_targets=self._prepared_data.y_scaled.shape[1],
-                               n_features_eff=self._prepared_data.X_scaled.shape[1]) if isinstance(initializer, type) else initializer
-        try:
-            A, B = init_obj(Y=self._prepared_data.y_scaled, X_lagged=self._prepared_data.X_scaled,
-                            mask=self._prepared_data.base_mask)
-        except TypeError:
-            A, B = init_obj()
-        self._initial_weights = [np.asarray(A, dtype=float).T.copy(), np.asarray(B, dtype=float).copy()]
-        self.set_weights(self._initial_weights)
+
+        self.set_weights(weights)
+
+        self._initial_weights = [
+            np.asarray(weight).copy()
+            for weight in self._model.get_weights()
+        ]
+
         return self._initial_weights
 
     def set_weights(self, weights):
         """
-        Set the weights of the model.
+        Delegate weight validation and assignment to the model.
         Args:
             weights: The weights to set.
         """
         self._require_model()
-        self._model.set_weights([np.asarray(w, dtype=float).copy() for w in weights])
+        self._model.set_weights([
+            np.asarray(weight).copy()
+            for weight in weights
+        ])
 
     def reset_callbacks(self, run_name: str, callback_updates=None):
-        """
-        Reset the callbacks of the model for a new run.
-        Args:
-            run_name: The name of the run (e.g., 'base_model', 'reference_cause_X')            
-            callback_updates: Optional updates to the callbacks.
-        """
+        """Reset callbacks without changing optimizer state or model weights."""
         self._require_model()
-        self._model.reset_callbacks(run_name=run_name, callback_updates=callback_updates)
+
+        self._model.reset_components(
+            reset_optimizer=False,
+            reset_callbacks=True,
+            run_name=run_name,
+            callback_updates=callback_updates,
+        )
 
     def fit_base(self):
-        """
-        Fit the base model for the analysis.
-        Returns:
-            The weights of the fitted base model.
-        """
+        """Fit the unrestricted model and store its fitted weight state."""
+
         self._require_model()
-        self._model.omit_variables([])
-        if self._initial_weights is not None:
-            self.set_weights(self._initial_weights)
-        self.reset_callbacks("base_model")
-        self._model.fit()
-        self._base_weights = [np.asarray(w, dtype=float).copy() for w in self._model.get_weights()]
-        self._save_snapshot(None)
+        self._require_prepared()
+
+        self._base_weights = self._analysis_runner.fit_base(
+            model=self._model,
+            prepared=self._prepared_data,
+            results=self._results,
+            initial_weights=self._initial_weights,
+            backend=self._backend,
+        )
+
         return self._base_weights
 
-    def fit_restricted(self, cause: str, start_with_base: bool = True, start_with_initial: bool = False):
-        """
-        Fit a restricted model for a specific cause.
-        Args:
-            cause: The cause for which to fit the restricted model.
-            use_hot_start: Whether to use the base model weights as a starting point.
-        """
-        if self._base_weights is None:
-            raise DataValidationError("fit_base() must be completed before fit_restricted()")
-        if cause not in self._prepared_data.cause_slices:
-            raise DataValidationError(f"Unknown tested cause: {cause!r}")
+    def fit_restricted(
+        self,
+        cause: str,
+        start_with_base: bool = True,
+        start_with_initial: bool = False,
+    ):
+        """Fit and store one restricted model through the analysis runner."""
+
         self._require_model()
-        timings = {}
-        t0 = perf_counter()
-        if start_with_initial and self._initial_weights is not None:
-            self.set_weights(self._initial_weights)
-        elif start_with_base and self._base_weights is not None:
-            self.set_weights(self._base_weights)
-        timings["restore_weights"] = perf_counter() - t0
+        self._require_prepared()
 
-        t0 = perf_counter()
-        block = self._prepared_data.cause_slices[cause]
-        self._model.omit_variables(list(range(block.start, block.stop)))
-        timings["update_mask"] = perf_counter() - t0
-        
-        t0 = perf_counter()
-        self.reset_callbacks(f"reference_cause_{cause}")
-        timings["reset_callbacks"] = perf_counter() - t0
-
-        t0 = perf_counter()
-        self._model.fit()
-        timings["fit_model"] = perf_counter() - t0
-        self._save_snapshot(cause, additional_metadata={"timings": timings})
+        self._analysis_runner.fit_restricted(
+            model=self._model,
+            prepared=self._prepared_data,
+            results=self._results,
+            cause=cause,
+            base_weights=self._base_weights,
+            initial_weights=self._initial_weights,
+            start_with_base=start_with_base,
+            start_with_initial=start_with_initial,
+            backend=self._backend,
+        )
 
     def fit_restricted_models(self):
-        """Fit restricted models for all tested causes."""
-        self._require_model()
-        for cause in self._prepared_data.tested_causes:
-            self.fit_restricted(cause)
-        return self._results
+        """Fit and store restricted models for all tested causes."""
 
-    def _save_snapshot(self, cause: Optional[str], additional_metadata: Optional[Mapping[str, Any]] = None):
-        """
-        Save the predictions and weights of the model for a specific cause.
-        Args:
-            cause: The cause for which to save the snapshot. If None, saves the base model
-        """
-        predictions = self._prepared_data.y_scaler.inverse_transform(
-            np.asarray(self._model.predict(self._prepared_data.X_scaled), dtype=float))
-        weights = np.asarray(self._model.get_weights()[0], dtype=float).copy()
-        additional_metadata = dict(additional_metadata or {})
-        additional_metadata["backend"] = self._backend  
-        if cause is None:
-            self._results.set_base_snapshot(predictions, weights, additional_metadata)
-        else:
-            self._results.set_reference_snapshot(cause, predictions, weights, additional_metadata)
+        self._require_model()
+        self._require_prepared()
+
+        return self._analysis_runner.fit_restricted_models(
+            model=self._model,
+            prepared=self._prepared_data,
+            results=self._results,
+            base_weights=self._base_weights,
+            initial_weights=self._initial_weights,
+            backend=self._backend,
+        )
+
+    def _store_fit_outcome(
+        self,
+        cause: Optional[str],
+        outcome: FitOutcome,
+    ) -> None:
+        """Store fit artifacts through the analysis runner."""
+
+        self._analysis_runner.store_fit_outcome(
+            prepared=self._prepared_data,
+            results=self._results,
+            cause=cause,
+            outcome=outcome,
+            backend=self._backend,
+        )
+
+    def _save_snapshot(
+        self,
+        cause: Optional[str],
+        additional_metadata: Optional[Mapping[str, Any]] = None,
+    ):
+        """Store the current model state through the analysis runner."""
+
+        self._analysis_runner.save_snapshot(
+            model=self._model,
+            prepared=self._prepared_data,
+            results=self._results,
+            cause=cause,
+            backend=self._backend,
+            additional_metadata=additional_metadata,
+        )
 
     @property
     def results(self):
@@ -614,18 +883,60 @@ class MultiTaskGrangerBuilder:
             raise DataValidationError("No results are available; prepare_data() has not run")
         return self._results
 
-    def fit(self):
-        """Execute the Granger causality analysis pipeline.
-        
-        Performs all configuration steps and computes causality relationships.
-        """
+    def fit(self, *, fit_restricted: bool = True):
+        """Prepare the analysis and execute the standard fitting workflow."""
+
+        spec = self.to_spec()
+        self._effective_modeling = spec.modeling
+        self._model_search_result = None
+        if spec.search is not None:
+            if (
+                self._data is None
+                and self._fit_kwargs.get("search_prepared_data") is None
+            ):
+                raise DataValidationError(
+                    "Builder requires data(...) or search_prepared_data "
+                    "before fitting model search."
+                )
+            self._effective_modeling, self._model_search_result = (
+                self._analysis_runner.run_model_search(
+                    spec=spec,
+                    data=self._data,
+                    search_prepared_data=self._fit_kwargs.get(
+                        "search_prepared_data"
+                    ),
+                )
+            )
+
+        selected_modeling = self._effective_modeling
+        search_result = self._model_search_result
+
         self.prepare_data()
+        self._effective_modeling = selected_modeling
+        self._model_search_result = search_result
         self.prepare_components()
         self.build_model()
         self.initialize_weights()
-        self.fit_base()
-        self.fit_restricted_models()
-        return self.get_results()
+
+        progress = AnalysisRunProgress(
+            results=self._results,
+            base_weights=self._base_weights,
+        )
+
+        try:
+            result = self._analysis_runner.run(
+                model=self._model,
+                prepared=self._prepared_data,
+                progress=progress,
+                initial_weights=self._initial_weights,
+                backend=self._backend,
+                fit_restricted=fit_restricted,
+            )
+            result.model_search_result = self._model_search_result
+            result.effective_modeling = self._current_modeling()
+            return result
+        finally:
+            self._base_weights = progress.base_weights
 
     run = fit
 
@@ -637,6 +948,14 @@ class MultiTaskGrangerBuilder:
         """
         if self._prepared_data is None:
             raise DataValidationError("prepare_data() must be completed first")
+
+    def _current_modeling(self) -> ModelingSpec:
+        """Return the selected modeling declaration for the current run."""
+        return (
+            self._effective_modeling
+            if self._effective_modeling is not None
+            else self.to_spec().modeling
+        )
 
     def _require_components_data(self):
         """
@@ -666,17 +985,36 @@ class MultiTaskGrangerBuilder:
             preserve_results: If True, preserve the results.
         """
         if stage == "data":
+            self._regularizer_data = None
             self._prepared_data = None
-            self._strategy = self._constraint = self._regularizer = None
+            self._constraint_data = None
+            self._strategy = None
+            self._constraint = None
+            self._regularizer = None
             self._model = None
+            self._effective_modeling = None
+            self._model_search_result = None
+
         elif stage == "components":
-            self._constraint = self._regularizer = None
+            self._regularizer_data = None
+            self._constraint_data = None
+            self._constraint = None
+            self._regularizer = None
             self._model = None
+            self._effective_modeling = None
+            self._model_search_result = None
+
         elif stage == "model":
             self._model = None
-        self._initial_weights = self._base_weights = None
+
+        self._initial_weights = None
+        self._base_weights = None
+
         if not preserve_results:
             self._results = None
-
+        elif self._results is not None:
+            # Keep preparation context, but discard results of the old model.
+            self._results.base_snapshot = None
+            self._results.reference_snapshots.clear()
 
 MultitaskGrangerBuilder = MultiTaskGrangerBuilder

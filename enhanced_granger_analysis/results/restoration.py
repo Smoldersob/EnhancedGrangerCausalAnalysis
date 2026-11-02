@@ -19,14 +19,11 @@ def restore_removed_matrix(
     causes: Iterable[str],
     removed_variables: Mapping[str, RemovedVariable],
 ) -> pd.DataFrame:
-    """Restore requested axes using typed removal metadata.
+    """Restore requested axes using role-specific removal metadata.
 
-    effects:
-        Requested output variables, in their original order.
-    causes:
-        Requested tested causes, in their original order.
-    removed_variables:
-        Mapping of removed variable names to their removal metadata.
+    Lag-excluded tested causes receive the metric's neutral removal
+    value. This denotes structural exclusion by the selected model,
+    not an independently computed hypothesis-test result.
     """
     frame = (
         matrix.data
@@ -39,16 +36,24 @@ def restore_removed_matrix(
         else {}
     )
 
-    missing_value = metadata.get("removed_signal_value", np.nan)
+    missing_value = metadata.get(
+        "removed_signal_value",
+        np.nan,
+    )
+
     full_effects = list(effects)
     full_causes = list(causes)
 
     if len(full_effects) != len(set(full_effects)):
-        raise ValueError("Requested effects contain duplicated names.")
+        raise ValueError(
+            "Requested effects contain duplicated names."
+        )
+
     if len(full_causes) != len(set(full_causes)):
         raise ValueError(
             "Requested tested causes contain duplicated names."
         )
+
     if not frame.index.is_unique or not frame.columns.is_unique:
         raise ValueError(
             "The input matrix must have unique row and column names."
@@ -67,22 +72,43 @@ def restore_removed_matrix(
             and "effect" in info.removed_roles
             and removed_name in result.index
             and info.retained_variable in frame.index
+            and info.retained_variable in result.index
         ):
             result.loc[removed_name, :] = result.loc[
                 info.retained_variable, :
             ].to_numpy(copy=True)
 
-    # Restore duplicate tested causes after restoring effect rows.
-    # A representative that was only an input has no computed test column.
+    # Restore lag-excluded tested causes as neutral columns.
+    # Do not touch rows: these variables may remain valid effects.
+    lag_excluded_causes: set[str] = set()
+
     for removed_name, info in removed_variables.items():
+        if (
+            info.reason == "no_selected_lags"
+            and "tested_cause" in info.removed_roles
+            and removed_name in result.columns
+        ):
+            result.loc[:, removed_name] = missing_value
+            lag_excluded_causes.add(removed_name)
+
+    # Duplicate tested causes can copy either a computed column or
+    # a representative restored after lag exclusion.
+    available_cause_columns = (
+        set(frame.columns) | lag_excluded_causes
+    )
+
+    for removed_name, info in removed_variables.items():
+        representative = info.retained_variable
+
         if (
             info.reason == "duplicate"
             and "tested_cause" in info.removed_roles
             and removed_name in result.columns
-            and info.retained_variable in frame.columns
+            and representative in available_cause_columns
+            and representative in result.columns
         ):
             result.loc[:, removed_name] = result.loc[
-                :, info.retained_variable
+                :, representative
             ].to_numpy(copy=True)
 
     return result

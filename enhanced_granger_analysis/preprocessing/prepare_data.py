@@ -2,14 +2,16 @@ import numpy as np
 import pandas as pd
 
 from dataclasses import dataclass, field
-from typing import Any, Literal, Optional, Sequence
+from typing import Any, Literal, Mapping, Optional, Sequence
 
-from .lag import LagEngine, LagConfiguration, BaseLagSelector
-from .stationarity import StationarityTransformer
+from .lag.lag_engine import LagEngine
+from .splitting.base import DataSplit
+from .stationarity import BaseStationarityEnforcer
 from .missing import BaseImputer
 from .sampling import NoSampling, SamplingStrategy
 
-_DEFAULT_STATIONARITY = object()
+from ..core.lag_config import LagFittedConfig
+from ..core.exceptions import DataValidationError
 
 @dataclass(frozen=True)
 class VariableRoles:
@@ -25,14 +27,14 @@ class RemovedVariable:
 	"""Description of a variable removed during redundant-column cleanup."""
 
 	name: str
-	reason: Literal["constant", "duplicate"]
+	reason: Literal["constant", "duplicate","no_selected_lags"]
 	removed_roles: tuple[Literal["effect", "cause", "tested_cause"], ...]
 	retained_variable: Optional[str] = None
 
 
 @dataclass
 class PreparedData:
-	stationarity_transformer: Any = _DEFAULT_STATIONARITY,
+	stationarity_enforcer: Optional[BaseStationarityEnforcer] = None
 	lag_engine: Optional[LagEngine] = None
 	x_scaler: Any = None
 	y_scaler: Any = None
@@ -48,10 +50,17 @@ class PreparedData:
 		default_factory=lambda: VariableRoles((), (), ())
 	)
 	cause_slices: dict[str, slice] = field(default_factory=dict)
-	removed_variables: dict[str, RemovedVariable] = field(default_factory=dict)
+	feature_lags: np.ndarray = field(
+		default_factory=lambda: np.empty(0, dtype=np.int64)
+	)
+	removed_variables: dict[str, RemovedVariable] = field(
+		default_factory=dict
+	)
 	sample_indices: np.ndarray = field(
 		default_factory=lambda: np.empty(0, dtype=int)
 	)
+	lag_fitted: Optional[LagFittedConfig] = None
+	split: Optional[DataSplit] = None
 
 	@property
 	def causes(self) -> tuple[str, ...]:
@@ -81,7 +90,7 @@ class PreparedData:
 	def empty(cls) -> "PreparedData":
 		"""Create an empty stage container that can be filled progressively."""
 		return cls(
-			stationarity_transformer=_DEFAULT_STATIONARITY,
+			stationarity_enforcer=None,
 			lag_engine=None,
 			x_scaler=None,
 			y_scaler=None,
@@ -93,8 +102,78 @@ class PreparedData:
 			requested_roles=VariableRoles((), (), ()),
 			effective_roles=VariableRoles((), (), ()),
 			cause_slices={},
+						feature_lags=np.empty(0, dtype=np.int64),
 			removed_variables={},
 			sample_indices=np.empty(0, dtype=int),
+			lag_fitted=None,
+			split=None,
+		)
+	
+	def resolved_split(self) -> DataSplit:
+		"""Return validated assignments without changing this artifact."""
+		n_rows = self.X_raw.shape[0]
+
+		if self.y_raw.shape[0] != n_rows:
+			raise DataValidationError(
+				"X_raw and y_raw have different row counts."
+			)
+
+		if self.split is None:
+			return DataSplit.all_training(n_rows)
+
+		return self.split.validate(n_rows)
+
+	def finalize_split(self) -> DataSplit:
+		"""Store explicit assignments after preparation is complete."""
+		split = self.resolved_split()
+		self.split = split
+		return split
+
+	def indices_for(
+		self,
+		part: str,
+		*,
+		require_nonempty: bool = False,
+	) -> np.ndarray:
+		"""Return indices into the current prepared matrices."""
+		return self.resolved_split().indices_for(
+			part,
+			require_nonempty=require_nonempty,
+		)
+
+	def arrays_for(
+		self,
+		part: str,
+		*,
+		scaled: bool = True,
+		require_nonempty: bool = True,
+	) -> tuple[np.ndarray, np.ndarray]:
+		"""Select aligned predictors and targets for one part."""
+		X = self.X_scaled if scaled else self.X_raw
+		y = self.y_scaled if scaled else self.y_raw
+		n_rows = self.X_raw.shape[0]
+
+		if (
+			X.ndim != 2
+			or y.ndim != 2
+			or X.shape[0] != n_rows
+			or y.shape[0] != n_rows
+		):
+			raise DataValidationError(
+				"Prepared matrices are not aligned."
+			)
+
+		indices = self.indices_for(
+			part,
+			require_nonempty=require_nonempty,
+		)
+
+		return X[indices], y[indices]
+
+	def split_snapshot(self) -> dict:
+		"""Return a serializable copy of the row assignments."""
+		return self.resolved_split().to_dict(
+			n_rows=self.X_raw.shape[0],
 		)
 
 
@@ -103,9 +182,11 @@ def prepare_data(
 		causes: Optional[Sequence[str]] = None,
 		tested_causes: Optional[Sequence[str]] = None,
 		effects: Optional[Sequence[str]] = None,
-		lag_config: Optional[LagConfiguration] = None,
-		lag_selector: Optional[BaseLagSelector] = None,
-		stationarity_transformer: Optional[StationarityTransformer] = None,
+		lag_config: Any = None,
+		lag_selector: Any = None,
+		lag_selector_params: Optional[Mapping[str, Any]] = None,
+		lag_n_jobs: int = 1,
+		stationarity: Any = None,
 		missing_value_imputer: Optional[BaseImputer] = None,
 		schema_policy: str = "error",
 		backend_sample_fraction: float = 1.0,
@@ -114,6 +195,7 @@ def prepare_data(
 		sampling_strategy: Optional[SamplingStrategy] = NoSampling(),
 		x_scaler: Optional[Any] = "standard",
 		y_scaler: Optional[Any] = "standard",
+		splitter: Any = None,
 ) -> PreparedData:
 	from .pipeline import DataPreparer, DataPreparationConfig
 
@@ -129,9 +211,16 @@ def prepare_data(
 		y_scaler=y_scaler,
 		lag_config=lag_config,
 		lag_selector=lag_selector,
-		stationarity_transformer=stationarity_transformer,
+		lag_selector_params=(
+			{}
+			if lag_selector_params is None
+			else dict(lag_selector_params)
+		),
+		lag_n_jobs=lag_n_jobs,
+		stationarity=stationarity,
 		missing_value_imputer=missing_value_imputer,
 		sampling_strategy=sampling_strategy,
+		splitter=splitter,
 	)
 	preparer = DataPreparer(config=config)
 	roles = VariableRoles(

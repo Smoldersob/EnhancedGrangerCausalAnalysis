@@ -1,13 +1,12 @@
 from __future__ import annotations
-
-from typing import Optional, Sequence
+from typing import Any, Optional, Sequence
 
 import numpy as np
 import pandas as pd
 
 from ..core.exceptions import BackendNotAvailableError, DataValidationError
 from ..core.outputs import SimpleGrangerOutput
-from ..preprocessing.stationarity import StationarityTransformer
+from ..preprocessing.stationarity import resolve_stationarity_enforcer
 from ..results.causality_matrix import CausalityMatrix
 
 
@@ -44,7 +43,7 @@ class SimpleGrangerAPI:
 		test: str = "ssr_chi2test",
 		lag: Optional[int] = None,
 		lag_max: int = 20,
-		stationarity_transformer: Optional[StationarityTransformer] = None,
+		stationarity: Any = "adf",
 		threshold: float = 0.01,
 	) -> SimpleGrangerOutput:
 		if not isinstance(data, pd.DataFrame):
@@ -61,9 +60,13 @@ class SimpleGrangerAPI:
 				f"Unknown variables detected. causes={unknown_causes}, effects={unknown_effects}"
 			)
 
-		transformer = stationarity_transformer or StationarityTransformer()
-		stationary = transformer.fit_transform([data])[0]
-
+		enforcer = resolve_stationarity_enforcer(stationarity)
+		stationary = (
+            data.copy()
+            if enforcer is None
+            else enforcer.fit_transform([data.copy()])[0]
+        )
+		
 		lag_order = _resolve_lag_order(stationary[columns], lag=lag, lag_max=lag_max)
 
 		try:

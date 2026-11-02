@@ -1,33 +1,46 @@
 """Factory for instantiating backend strategies."""
 
-import importlib.util
-from typing import Dict, List, Optional, Set
+import importlib
+from collections.abc import Mapping
+from typing import Dict, List, Optional, Set, Any
 
 from .base_backend import BackendStrategy
 from ..core.exceptions import BackendNotAvailableError, BackendSelectionError
 
-try:
-	from .keras_backend import KerasBackendStrategy
-except Exception:  # pragma: no cover - optional backend module
-	KerasBackendStrategy = None  # type: ignore[assignment]
 
-try:
-	from .pytorch_backend import PyTorchBackendStrategy
-except Exception:  # pragma: no cover - optional backend module
-	PyTorchBackendStrategy = None  # type: ignore[assignment]
+if importlib.util.find_spec("keras") is not None:
+	try:
+		from . import keras as  keras_backend
+	except Exception as e:  # pragma: no cover - optional backend module
+		print(f"Error importing keras backend: {e}")
+		keras_backend = None  # type: ignore[assignment]
+else:
+	keras_backend = None  # type: ignore[assignment]
 
-try:
-	from .scikit_backend import ScikitBackendStrategy
-except Exception:  # pragma: no cover - optional backend module
-	ScikitBackendStrategy = None  # type: ignore[assignment]
+if importlib.util.find_spec("torch") is not None:
+	try:
+		from . import pytorch as pytorch_backend
+	except Exception as e:  # pragma: no cover - optional backend module
+		print(f"Error importing PyTorch backend: {e}")
+		pytorch_backend = None  # type: ignore[assignment]
+else:
+	pytorch_backend = None  # type: ignore[assignment]
 
+if importlib.util.find_spec("numpy") is not None:
+	try:
+		from . import numpy as numpy_backend
+	except Exception as e:  # pragma: no cover - optional backend module
+		print(f"Error importing Numpy backend: {e}")
+		numpy_backend = None  # type: ignore[assignment]
+else:
+	numpy_backend = None  # type: ignore[assignment]
 
 class BackendFactory:
 	"""
 	Factory for obtaining and managing backend strategies.
 
 	Traits:
-	- Enumerates all available backends (TensorFlow, PyTorch, scikit-learn).
+	- Enumerates all available backends (TensorFlow, PyTorch, Numpy).
 	- Provides lazy instantiation of strategies.
 	- Returns preferred backend if multiple are available.
 	- Validates backend availability before use.
@@ -41,31 +54,33 @@ class BackendFactory:
 		"keras": "keras",
 		"pytorch": "pytorch",
 		"torch": "pytorch",
-		"sklearn": "sklearn",
-		"scikit": "sklearn",
-		"scikit-learn": "sklearn",
+		"sklearn": "numpy",
+		"scikit": "numpy",
+		"scikit-learn": "numpy",
+		"numpy": "numpy",
 	}
-	if importlib.util.find_spec("keras") is not None and KerasBackendStrategy is not None:
+	if keras_backend is not None:
 		_BACKEND_REGISTRY.update(
 			{
-				"tensorflow": KerasBackendStrategy,
-				"tf": KerasBackendStrategy,
-				"keras": KerasBackendStrategy,
+				"tensorflow": keras_backend.KerasBackendStrategy,
+				"tf": keras_backend.KerasBackendStrategy,
+				"keras": keras_backend.KerasBackendStrategy,
 			}
 		)
-	if importlib.util.find_spec("torch") is not None and PyTorchBackendStrategy is not None:
+	if pytorch_backend is not None:
 		_BACKEND_REGISTRY.update(
 			{
-				"pytorch": PyTorchBackendStrategy,
-				"torch": PyTorchBackendStrategy,
+				"pytorch": pytorch_backend.PyTorchBackendStrategy,
+				"torch": pytorch_backend.PyTorchBackendStrategy,
 			}
 		)
-	if importlib.util.find_spec("sklearn") is not None and ScikitBackendStrategy is not None:
+	if numpy_backend is not None:
 		_BACKEND_REGISTRY.update(
 			{
-				"sklearn": ScikitBackendStrategy,
-				"scikit": ScikitBackendStrategy,
-				"scikit-learn": ScikitBackendStrategy,
+				"sklearn": numpy_backend.NumpyBackendStrategy,
+				"scikit": numpy_backend.NumpyBackendStrategy,
+				"scikit-learn": numpy_backend.NumpyBackendStrategy,
+				"numpy": numpy_backend.NumpyBackendStrategy,
 			}
 		)
 
@@ -84,7 +99,7 @@ class BackendFactory:
 		Parameters
 		----------
 		backend_name : str or None
-			Name of backend: 'tensorflow'/'tf'/'keras', 'pytorch'/'torch', 'sklearn'/'scikit-learn'.
+			Name of backend: 'tensorflow'/'tf'/'keras', 'pytorch'/'torch', 'numpy'/'scikit'/'scikit-learn'.
 			If None, returns the first available backend in preference order.
 
 		Returns
@@ -103,8 +118,7 @@ class BackendFactory:
 			# Return first available backend in preference order
 			backend_name = cls._get_preferred_available_backend()
 
-		backend_name_lower = backend_name.lower()
-		canonical_name = cls._CANONICAL_ALIASES.get(backend_name_lower, backend_name_lower)
+		canonical_name = cls.canonical_name(backend_name)
 		if canonical_name not in cls._BACKEND_REGISTRY:
 			available = cls.list_available_backends()
 			raise BackendSelectionError(
@@ -129,7 +143,7 @@ class BackendFactory:
 			cls._STRATEGY_CACHE[canonical_name] = None
 			raise BackendNotAvailableError(
 				f"Backend '{backend_name}' is not available. "
-				f"Please install the required package (keras, torch, or scikit-learn)."
+				f"Please install the required package (keras, torch, or numpy)."
 			)
 
 		cls._STRATEGY_CACHE[canonical_name] = strategy
@@ -150,8 +164,7 @@ class BackendFactory:
 		bool
 			True if backend is available, False otherwise.
 		"""
-		backend_name_lower = backend_name.lower()
-		canonical_name = cls._CANONICAL_ALIASES.get(backend_name_lower, backend_name_lower)
+		canonical_name = cls.canonical_name(backend_name)
 		if canonical_name not in cls._BACKEND_REGISTRY:
 			return False
 
@@ -180,7 +193,7 @@ class BackendFactory:
 		list of str
 			Backend names that are installed and usable.
 		"""
-		preferred_order = ["pytorch", "keras", "sklearn"]
+		preferred_order = ["pytorch", "keras", "numpy"]
 		available: List[str] = []
 		seen: Set[str] = set()
 		for backend_name in preferred_order:
@@ -197,7 +210,7 @@ class BackendFactory:
 		"""
 		Return the name of the first available backend in preference order.
 
-		Preference order: PyTorch > Keras > scikit-learn
+		Preference order: PyTorch > Keras > Numpy
 
 		Returns
 		-------
@@ -209,7 +222,7 @@ class BackendFactory:
 		BackendNotAvailableError
 			If no backends are available.
 		"""
-		preference_order = ["pytorch", "keras", "sklearn"]
+		preference_order = ["pytorch", "keras", "numpy"]
 
 		for backend_name_pref in preference_order:
 			if cls.is_backend_available(backend_name_pref):
@@ -217,10 +230,100 @@ class BackendFactory:
 
 		raise BackendNotAvailableError(
 			"No machine learning backends are available. "
-			"Install at least one optional dependency: keras, torch, scikit-learn."
+			"Install at least one optional dependency: keras, torch, numpy."
 		)
 
 	@classmethod
 	def reset_cache(cls) -> None:
 		"""Clear the strategy cache (useful for testing)."""
 		cls._STRATEGY_CACHE.clear()
+
+	@classmethod
+	def canonical_name(
+		cls,
+		name: str | None,
+	) -> str | None:
+		"""Normalize a backend name without checking its availability."""
+
+		if name is None:
+			return None
+
+		if not isinstance(name, str) or not name.strip():
+			raise BackendSelectionError(
+				"Backend name must be a non-empty string or None."
+			)
+
+		normalized = name.strip().lower()
+
+		return cls._CANONICAL_ALIASES.get(
+			normalized,
+			normalized,
+		)
+
+	@classmethod
+	def resolve_configuration(
+		cls,
+		backend_spec: Any,
+		*,
+		model_config: Mapping[str, Any] | None = None,
+	) -> tuple[str | None, dict[str, Any]]:
+		"""Resolve a backend declaration and model configuration defaults.
+
+		This preserves the existing mapping-based backend format.
+		Explicit model configuration overrides backend-provided defaults.
+
+		No strategy is instantiated and no component is constructed.
+		"""
+
+		if model_config is None:
+			explicit_config: dict[str, Any] = {}
+		elif isinstance(model_config, Mapping):
+			explicit_config = dict(model_config)
+		else:
+			raise BackendSelectionError(
+				"model_config must be a mapping or None."
+			)
+
+		if backend_spec is None or isinstance(backend_spec, str):
+			return (
+				cls.canonical_name(backend_spec),
+				explicit_config,
+			)
+
+		if not isinstance(backend_spec, Mapping):
+			raise BackendSelectionError(
+				"Backend specification must be a string, mapping, or None."
+			)
+
+		name = backend_spec.get(
+			"type",
+			backend_spec.get(
+				"name",
+				backend_spec.get("kind"),
+			),
+		)
+
+		if not isinstance(name, str) or not name.strip():
+			raise BackendSelectionError(
+				"Backend mapping requires a non-empty type name."
+			)
+
+		raw_params = backend_spec.get("params", {})
+
+		if raw_params is None:
+			raw_params = {}
+
+		if not isinstance(raw_params, Mapping):
+			raise BackendSelectionError(
+				"Backend params must be a mapping."
+			)
+
+		defaults = dict(raw_params)
+
+		for key, value in backend_spec.items():
+			if key not in {"type", "name", "kind", "params"}:
+				defaults[key] = value
+
+		defaults.update(explicit_config)
+
+		return cls.canonical_name(name), defaults

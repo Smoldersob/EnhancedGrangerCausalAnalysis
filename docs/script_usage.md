@@ -1,29 +1,26 @@
-# Running Group Granger Tests (Script Guide)
+# Running Group Granger Experiments
 
-This document explains how to use `run_group_causality_tests.py` to run multiple Granger analysis configurations and generate summarized results with metrics.
+`enhanced_granger_analysis/scripts/run_group_causality_tests.py` reads datasets and explicitly configured cases, runs each analysis, exports matrices, and compares completed analysis output with ground truth.
 
-## Overview
+The script may still call `MultiTaskGrangerBuilder`; full builder execution now delegates to the shared runner. This documentation does not assume an additional script rewrite or an internal HPO stage.
 
-The script performs the following workflow:
+## Invocation
 
-1. **Load Configuration** — reads script config file specifying data paths, ground truth, and output directory
-2. **Load Data** — reads CSV files into a list of DataFrames
-3. **Iterate Test Cases** — expands parameter sweep from group_config.json file
-4. **Run Analysis** — for each configuration, executes Granger analysis via `MultitaskGrangerBuilder`
-5. **Save Results** — stores outputs according to `--save` mode:
-  - `minimum` (default): binary causality matrix + `summary.csv`
-  - `matrices`: binary, p-values, F-test, sign, ... + `summary.csv`
-  - `--test` selects the statistical test (`f`, `wald`, `lr`) used for thresholding and p-value output.
-6. **Compute Metrics** — evaluates predictions against ground truth (TP, FP, FN, accuracy, F1, precision, recall, etc.)
-7. **Generate Summary** — outputs summary.csv with timing and metrics across all test cases
+From the repository root:
 
-## Configuration Structure
+```bash
+python enhanced_granger_analysis/scripts/run_group_causality_tests.py --config enhanced_granger_analysis/scripts/run_group_causality_tests.config.json --save matrices --test f
+```
 
-### Script Configuration File
+- `--save minimum`: causality matrix and summary.
+- `--save matrices`: causality, selected test's p-value/statistic, sign matrix, and summary.
+- `--test f` / `wald` / `lr`: select reporting/decision metric.
+- `--sign`: include coefficient-derived signs in thresholded results.
 
-**Location:** `scripts/run_group_causality_tests.config.json`
+For the current Wald path the script skips restricted-model fits. This is a property of that selected metric path, not an assertion that every future Wald variant requires no restricted fitting. Matrix mode saves the selected statistic, not all three test statistics at once.
 
-**Structure:**
+## Script document
+
 ```json
 {
   "output_dir": "./results",
@@ -37,393 +34,85 @@ The script performs the following workflow:
 }
 ```
 
-**Parameters:**
+Script paths are resolved relative to the script configuration document. These path rules are implemented by the script; `AnalysisConfigLoader` does not recursively reinterpret every path-like string.
 
-| Field | Type | Description |
-|-------|------|-------------|
-| `output_dir` | string (path) | Folder where results are saved (causality matrices, summary.csv) |
-| `ground_truth_path` | string (path) | CSV file with reference causality matrix (for metric computation) |
-| `group_config_path` | string (path) | Group test configuration file (with base config + sweep params) |
-| `threshold` | float | P-value threshold for binary causality classification (default: 0.01) |
-| `data.csv_paths` | array of paths | List of CSV files to load as input data |
-| `data.index_col` | int or null | Column index/name to use as row index (null = integer index) |
+## Group document
 
-**Path Resolution:**
-- All paths are resolved relative to the script config directory.
-- Absolute paths are used as-is.
-- Example: if config is in `scripts/`, then `"./data.csv"` resolves to `scripts/data.csv`
-
-### Group Test Configuration File
-
-**Location:** Specified via `group_config_path` in script config (default: `scripts/group_config.json`)
-
-**Structure:**
 ```json
 {
+  "device": "cpu",
   "base_config": {
-    "backend": "pytorch",
-    "lag_config": { "max_lag": 8 },
-    "model_config": { "epochs": 50, "batch_size": 32 },
-    "callbacks": [ ... ],
-    "relations": [ ... ]
+    "backend": "numpy",
+    "stationarity": null,
+    "lag_config": {"max_lag": 2, "use_lag_zero": false},
+    "relations": [],
+    "model_config": {"epochs": 100}
   },
   "sweep": {
-    "param_names": ["model_config.epochs", "lag_config.max_lag"],
-    "cases": [
-      [5, 8],
-      [10, 10],
-      [20, 12]
-    ]
+    "param_names": ["model_config.epochs"],
+    "cases": [[100], [200]]
   }
 }
 ```
 
-**Components:**
+Each row defines one experiment, not a Cartesian expansion. Dotted paths traverse mappings only. Replace whole callback/relation lists rather than indexing them. Group relation-file references are resolved relative to the group file after expansion.
 
-- **`base_config`** — Starting configuration merged with each sweep case. Supports all builder parameters:
-  - `backend`, `lag_config`, `lag_selector`, `model_config`, `regularizer`, `callbacks`, `relations`, etc.
-  - See [Configuration File Usage](config_file_usage.md) for the full builder/group config format and the supported sweep fields.
+Preferred imports for script maintenance:
 
-- **`sweep.param_names`** — List of dotted parameter names to vary (e.g., `"model_config.epochs"`)
-
-- **`sweep.cases`** — Array of cases; each case is an array of values matching `param_names` order
-
-**Example Interpretation:**
-```
-base_config: epochs=50, max_lag=8
-sweep cases:
-  [1] epochs=5,  max_lag=8   (vary only epochs from base)
-  [2] epochs=10, max_lag=10  (vary both)
-  [3] epochs=20, max_lag=12  (vary both)
+```python
+from enhanced_granger_analysis.configuration.loader import AnalysisConfigLoader
+from enhanced_granger_analysis.experiments import TestGroupConfigIterator
 ```
 
-For details on sweep expansion, supported sweep fields, and `reuse_data` / `compute_device` / `initializer` handling, see [Configuration File Usage](config_file_usage.md).
+Old loader/iterator import paths remain compatibility exports. The loader reads documents; it does not turn initializer strings into classes or modify runtime environment variables for devices. Those responsibilities belong to existing execution/backend paths.
 
-**Automatic Normalization:**
-- String `initializer` specs (e.g., `"ols"`, `"zeros"`, `"random_normal"`) are automatically normalized to initializer classes by `BuilderConfigLoader`.
-- String `compute_device` specs (e.g., `"cpu"`, `"gpu"`) are automatically normalized to backend-specific device configuration.
-- This means you can use string values in the group config file without any script-level mapping.
+## Pipeline
 
-## Usage
+1. Read script and group documents.
+2. Load CSVs as ordered DataFrames.
+3. Expand explicit cases and resolve each case's document references.
+4. Execute one analysis per case.
+5. Evaluate selected metric and threshold decisions.
+6. Export the requested matrices.
+7. Compare the exported decisions with ground truth and write summary rows.
 
-### Basic Invocation
+The existing script aligns multiple input column sets to their union and fills missing columns with zero before library preparation. This script behavior is separate from the preparation pipeline's schema/imputation policy and must be considered when interpreting an experiment.
 
-```bash
-cd scripts
-python run_group_causality_tests.py --config run_group_causality_tests.config.json --save minimum
-```
+## Outputs
 
-### With Custom Config
+Typical matrix-mode files:
 
-```bash
-python run_group_causality_tests.py --config my_custom_config.json --save matrices
-```
-
-### Save Mode
-
-```bash
-# Default: minimum (binary + summary)
-python run_group_causality_tests.py --config run_group_causality_tests.config.json
-
-# Full matrices
-python run_group_causality_tests.py --config run_group_causality_tests.config.json --save matrices
-```
-
-Allowed values:
-- `minimum` — saves only `case_NNN_*_causality.csv` and `summary.csv`
-- `matrices` — saves `causality`, selected `p_value`, `f_test`, `wald_test`, `lr_test`, `sign`, and `summary.csv`
-
-Test selection:
-- `--test f` (default) — thresholding and `p_value` use the F-test p-values
-- `--test wald` — thresholding and `p_value` use Wald-test p-values
-- `--test lr` — thresholding and `p_value` use likelihood-ratio p-values
-
-### Default Behavior
-
-If `--config` is omitted, the script looks for `run_group_causality_tests.config.json` in the same directory.
-If `--save` is omitted, default mode is `minimum`:
-If `--test` is omitted, default test is `f`:
-
-```bash
-python run_group_causality_tests.py
-```
-
-## Output
-
-### Directory Structure
-
-After running, the output directory contains different artifacts depending on `--save` mode.
-
-`--save minimum`:
-
-```
+```text
 results/
-├── summary.csv
-├── case_000_*_causality.csv
-├── case_001_*_causality.csv
-└── ...
+  summary.csv
+  case_000_..._causality.csv
+  case_000_..._p_value.csv
+  case_000_..._f_test.csv
+  case_000_..._sign.csv
 ```
 
-`--save matrices`:
+The statistic suffix is `f_test`, `wald_test`, or `lr_test` according to selection. Filename details depend on case index, backend declaration, and swept parameter values.
 
-```
-results/
-├── summary.csv                          # Aggregated metrics for all test cases
-├── case_000_causality.csv               # Binary causality matrix (threshold: 0.01)
-├── case_000_p_value.csv                 # P-value matrix
-├── case_000_f_test.csv                  # F-test statistics matrix
-├── case_000_sign.csv                    # Sign of strongest coefficient
-├── case_001_pytorch_adam_0.001_causality.csv
-├── case_001_pytorch_adam_0.001_p_value.csv
-├── case_001_pytorch_adam_0.001_f_test.csv
-├── case_001_pytorch_adam_0.001_sign.csv
-└── ... (additional cases)
-```
+Current summary fields include `case_id`, `backend`, `test_type`, `causality_file`, `signed_result`, `p_value_file`, `test_file`, `sign_file`, `execution_time_seconds`, `restricted_models_fitted`, swept values, and ground-truth metrics. Failed cases record an error and failed file markers; subsequent cases continue.
 
-**Filename Pattern:**
+A reported backend may be the requested declaration rather than the canonical actually selected runtime. Do not infer actual device placement from the filename or case label alone.
 
-Each result set has four matrix files:
-- `case_NNN_*_causality.csv` — Binary/signed causality (1/-1/0)
-- `case_NNN_*_p_value.csv` — P-value for each (effect, cause) pair
-- `case_NNN_*_f_test.csv` — F-test statistic
-- `case_NNN_*_sign.csv` — Sign of the strongest lag coefficient
+Sign is based on sums of full-model coefficients in cause blocks, not the single strongest lag. A row's order in `summary.csv` is case order, not an automatic ranking by accuracy.
 
-Optional suffix in filename:
-- `case_000_causality.csv` — Case 0, no backend/param info (when sweep is empty or minimal)
-- `case_001_pytorch_adam_0.001_causality.csv` — Case 1, pytorch backend, adam optimizer, learning_rate=0.001
+## Prepared-data cache and timing
 
-### Summary CSV
+The script maintains its own preparation cache when `reuse_data` is requested. The runner has no cross-call cache. The existing script signature is lightweight and does not constitute a complete fingerprint of data contents and all preparation settings. Do not rely on it for arbitrary changes of causes, tested roles, stationarity, imputation, lag-selector parameters, sampling, or source contents without extending the cache key.
 
-**Location:** `results/summary.csv`
+Timing excludes matrix file writes in the measured analysis interval. On cache hits the script may add recorded preparation time for reporting. Read summary timing as the script's accounting convention, not necessarily pure wall time per cached call.
 
-**Columns:**
-- `case_id` — Numeric index of the test case (0, 1, 2, ...)
-- `backend` — Backend used (pytorch, tensorflow, sklearn)
-- `causality_file` — Filename of the binary causality matrix
-- `p_value_file` — Filename of the p-value matrix (`NOT_SAVED` in `minimum` mode)
-- `f_test_file` — Filename of the F-test matrix (`NOT_SAVED` in `minimum` mode)
-- `sign_file` — Filename of the sign matrix (`NOT_SAVED` in `minimum` mode)
-- `execution_time_seconds` — Time of one test case excluding CSV file-save time
-- `param_names...` — Parameter values for this case (e.g., `model_config.epochs`, `lag_config.max_lag`)
-- `tp`, `fp`, `tn`, `fn` — Confusion matrix components (True Positive, False Positive, etc.)
-- `accuracy` — $(TP + TN) / N$
-- `precision` — $TP / (TP + FP)$
-- `recall` (TPR) — $TP / (TP + FN)$
-- `f1` — Harmonic mean of precision and recall
-- `tpr` — True Positive Rate = recall
-- `fpr` — False Positive Rate
-- `fdr` — False Discovery Rate
-- `shd` — Structural Hamming Distance (number of differing edges)
+## Ground truth and HPO
 
-Example row:
-```
-case_id,backend,causality_file,...,epochs,max_lag,tp,fp,accuracy,f1
-0,pytorch,case_000_causality.csv,...,5,8,8,2,0.833,0.89
-1,pytorch,case_001_causality.csv,...,10,10,9,1,0.909,0.92
-```
+Ground-truth scoring measures analysis output after fitting. It does not choose hyperparameters inside a case. Existing HPO configuration is inactive. Future model-quality tuning must not consume causal F1/accuracy as its objective.
 
-## Data Format Requirements
+## Data requirements and interpretation
 
-### Input CSV Files
+CSV columns name variables; rows preserve time order. Ground-truth rows represent effects and columns represent causes. See [Ground-truth evaluation](ground_truth_evaluation.md) for alignment and unknown-value semantics.
 
-- **Format:** Standard pandas DataFrame CSV (comma-separated by default)
-- **Index Column:** Specified in config via `data.index_col` (default: 0 = first column)
-- **Columns:** Variable names (causes, effects, etc.)
-- **Values:** Numeric (float or int)
-- **Rows:** Time-ordered observations (first row = earliest time)
+Ensure requested variables exist, data and references point to intended files, and selected backend dependencies/devices are available. Starting with one small case is useful for checking configuration; successful execution does not establish statistical validity or cross-backend equivalence.
 
-Example `data.csv`:
-```
-time,x1,x2,y
-0,1.0,0.5,1.5
-1,1.1,0.6,1.6
-2,1.2,0.7,1.7
-...
-```
-
-### Ground Truth CSV
-
-- **Format:** Same as input CSVs (comma-separated)
-- **Rows:** Effect variables
-- **Columns:** Cause variables
-- **Values:** Causality indicators (typically 0 = no relation, 1 = causal relation)
-- **Note:** Script compares binarized predictions (0/1) against this matrix
-
-Example `ground_truth.csv`:
-```
-,x1,x2
-y,1,0
-x1,0,1
-```
-
-Meaning:
-- y is caused by x1 ✓ and not by x2 ✗
-- x1 is caused by x2 ✓
-
-## Example Workflow
-
-### Step 1: Prepare Data
-
-```bash
-cd scripts
-# Ensure these files exist:
-# - data.csv (time series with x1, x2, y columns)
-# - ground_truth.csv (reference causality matrix)
-# - group_config.json (test sweep configuration)
-```
-
-### Step 2: Configure Test Sweep
-
-Edit `group_config.json`:
-```json
-{
-  "base_config": {
-    "backend": "sklearn",
-    "causes": ["x1", "x2"],
-    "effects": ["y"],
-    "tested_causes": ["x1", "x2"],
-    "lag_config": { "max_lag": 5 },
-    "model_config": { "max_iter": 100 }
-  },
-  "sweep": {
-    "param_names": ["model_config.max_iter"],
-    "cases": [[50], [100], [200]]
-  }
-}
-```
-
-### Step 3: Run Script
-
-```bash
-python run_group_causality_tests.py --config run_group_causality_tests.config.json --save matrices
-```
-
-Output:
-```
-======================================================================
-Loading script config from: /home/user/my_pro/enhanced_granger_analysis/scripts/run_group_causality_tests.config.json
-Output directory: /home/user/my_pro/enhanced_granger_analysis/scripts/results
-Loading data from CSV files...
-  ✓ Loaded 1 DataFrame(s)
-Loading group config from: /home/user/my_pro/enhanced_granger_analysis/scripts/group_config.json
-  Sweep: 3 configuration case(s)
-    - max_iter
-
-======================================================================
-Running test cases...
-======================================================================
-
-[Case   0] sklearn         | max_iter=50
-        ✓ Completed in 0.85s | Accuracy: 0.800 | F1: 0.857
-[Case   1] sklearn         | max_iter=100
-        ✓ Completed in 1.23s | Accuracy: 0.850 | F1: 0.889
-[Case   2] sklearn         | max_iter=200
-        ✓ Completed in 1.95s | Accuracy: 0.900 | F1: 0.923
-
-======================================================================
-Saved summary to: /home/user/my_pro/enhanced_granger_analysis/scripts/results/summary.csv
-Total execution time: 4.03s across 3 case(s)
-Average time per case: 1.34s
-======================================================================
-
-✓ SUCCESS: Results saved to results/summary.csv
-```
-
-### Step 4: Analyze Results
-
-```bash
-# View summary
-cat results/summary.csv
-
-# Examine best-performing case
-head -1 results/summary.csv  # header
-head -2 results/summary.csv | tail -1  # best case by accuracy
-cat results/case_001_causality.csv  # causality matrix for case 1
-```
-
-## Error Handling
-
-### Failed Cases
-
-If a test case fails:
-- The script prints `✗ FAILED` with the error message.
-- A row is still added to summary.csv with `causality_file = "FAILED"` and an error description.
-- Execution continues to the next test case.
-
-Example:
-```
-[Case   3] pytorch         | epochs=50, lr=0.0001
-        ✗ FAILED after 2.15s: CUDA out of memory
-```
-
-In `summary.csv`:
-```
-case_id,backend,causality_file,...
-3,pytorch,FAILED,...,error="CUDA out of memory"
-```
-
-### Missing Config/Data
-
-If required files are not found:
-- Script prints error message to stderr and exits with status 1.
-- Example:
-
-```
-✗ ERROR: CSV input file not found: ./data.csv
-```
-
-## Troubleshooting
-
-### "FileNotFoundError: Ground-truth CSV not found"
-
-Check:
-1. `ground_truth_path` in script config is correct and file exists.
-2. Path is relative to script config directory.
-
-### "Unknown cause/effect" errors
-
-Check:
-1. Variable names in `base_config.causes`/`effects` match column names in data CSV.
-2. Data CSV has the required columns.
-
-### "Unsupported backend"
-
-Check:
-1. `backend` in base config is one of: `pytorch`, `tensorflow`, `sklearn`.
-2. Required dependencies are installed (tensorflow, torch, scikit-learn).
-
-### Very slow execution
-
-Check:
-1. `model_config.epochs` or `model_config.max_iter` is set very high.
-2. Dataset is very large; consider reducing `lag_config.max_lag` or upsampling less frequently.
-3. Backend is using CPU; for GPU-based backends, ensure CUDA/GPU is configured.
-
-## Tips & Best Practices
-
-1. **Start Small** — Begin with a minimal group config (one or few sweep cases) to validate configuration.
-
-2. **Monitor Timing** — Check the execution timings in summary.csv. If they increase significantly across cases, investigate the backend or data size.
-
-3. **Validate Ground Truth** — Ensure `ground_truth.csv` matches the true causal structure. Inaccurate ground truth leads to misleading metrics.
-
-4. **Use Stable Backend** — For reproducible results, fix `random_seed` or equivalent in `model_config` if your backend supports it.
-
-5. **Organize Results** — Keep dated or tagged output directories to avoid overwriting previous runs:
-   ```bash
-   python run_group_causality_tests.py --config configs/exp_2025_04_10.json
-   ```
-
-6. **Inspect Matrices** — Examine individual causality/p_value matrices in addition to summary metrics:
-   ```python
-   import pandas as pd
-   df = pd.read_csv("results/case_000_causality.csv", index_col=0)
-   print(df)
-   ```
-
-## References
-
-- [API Usage Guide](api_usage.md) — Detailed API documentation
-- [Configuration File Usage](config_file_usage.md) — How to structure builder and group configs
-- [Backend Usage](backend_usage.md) — Backend-specific setup and components
-
+See [Configuration](config_file_usage.md), [API](api_usage.md), [Backend usage](backend_usage.md), and [HPO status](hipero_optimization_documentation.md).

@@ -1,399 +1,345 @@
-# Configuration File Usage
+# Configuration Files
 
-This document explains how to load a builder configuration file and pass it into the builder/orchestrator pipeline.
+The external analysis format remains a flat JSON/YAML mapping. Internal `AnalysisSpec.preparation`, `.roles`, and `.modeling` fields do not introduce matching nested document sections.
 
-For the generic component spec format used by callbacks, regularizers, and constraints, see [components loading](components_loading.md).
+## Responsibilities
 
-## What the loader does
+1. `AnalysisConfigLoader` reads documents and resolves relation-file references.
+2. `AnalysisSpec.from_mapping()` constructs configuration sections and delegates backend declaration handling to `BackendFactory`.
+3. Existing preprocessing and backend resolvers interpret component declarations.
+4. `AnalysisRunner` executes the standard analysis.
 
-`BuilderConfigLoader` is responsible for normalization only. It does not run training and does not create the final analysis result.
+The loader does not normalize backend aliases, parse relations, resolve callbacks, instantiate selectors, train models, or evaluate results.
 
-It can:
-- load JSON or YAML files,
-- normalize `lag_config` into `LagConfiguration`,
-- normalize relation constraints,
-- validate and normalize backend aliases,
-- preserve backend-specific callback specs for later resolution,
-- normalize relation-based constraint declarations into the `relations` mapping,
-- move backend defaults from a backend spec into `model_config` when present,
-- normalize `initializer` strings to initializer classes (e.g., `"ols"`, `"zeros"`, `"random_normal"`),
-- normalize `compute_device` strings to backend-specific device configuration.
+## Minimal YAML
 
-The loader also accepts `relations` as a file path when you want to keep constraint rules in a separate JSON/YAML file.
+```yaml
+backend: numpy
+causes: [x, y]
+effects: [y]
+tested_causes: [x]
+stationarity: null
+lag_config:
+  max_lag: 2
+  use_lag_zero: false
+relations: []
+regularizer_spec: null
+model_config:
+  model: conditional_linear
+  epochs: 100
+```
 
-## Supported backend forms
+```python
+from enhanced_granger_analysis.configuration.loader import AnalysisConfigLoader
+from enhanced_granger_analysis.configuration import AnalysisSpec
+from enhanced_granger_analysis.execution import AnalysisRunner
+
+mapping = AnalysisConfigLoader.load_file("analysis.yaml")
+spec = AnalysisSpec.from_mapping(mapping)
+results = AnalysisRunner().run_analysis(spec=spec, data=frame)
+```
+
+Or load through a builder:
+
+```python
+from enhanced_granger_analysis.api.builder import MultiTaskGrangerBuilder
+
+results = MultiTaskGrangerBuilder().from_file("analysis.yaml").data(frame).fit()
+```
+
+`from_config()` updates supplied top-level fields; `replace_config()` resets configuration and execution artifacts. Nested maps are replaced, not recursively merged.
+
+## Loader methods
+
+| Method | Result |
+| --- | --- |
+| `read_document(path)` | JSON/YAML value of any top-level shape |
+| `load_raw_file(path)` | Mapping without resolving embedded references |
+| `load_file(path)` | Mapping with supported references resolved |
+| `resolve_references(mapping, base_dir=...)` | Mapping with supported references resolved |
+| `load_relations_file(path)` | Raw relation document, not a parsed relation specification |
+
+Relative relation paths are interpreted relative to the analysis file. For group files, references are resolved after each case is expanded, relative to the group file. Arbitrary strings elsewhere in component specifications are not interpreted as file paths.
+
+```yaml
+relations: ./rules/relations.json
+```
+
+Programmatic mappings have no implicit file base directory. `from_config()` does not read a relation path; load it through `load_file()` or call `resolve_references()` explicitly.
+
+The compatibility name `BuilderConfigLoader` aliases `AnalysisConfigLoader`. Removed methods `normalize_builder_config()` and `normalize_relations()` must not be used. For explicit relation parsing, call the existing `parse_relations_spec()`.
+
+## Backend declaration
+
+Canonical names are `pytorch`, `keras`, and `numpy`. Alias resolution lives only in `BackendFactory`: `torch`; `tensorflow`/`tf`; and `sklearn`/`scikit`/`scikit-learn`, respectively.
+
+```yaml
+backend: pytorch
+```
+
+The retained mapping form supplies model defaults:
+
+```yaml
+backend:
+  type: pytorch
+  params:
+    epochs: 50
+model_config:
+  epochs: 100
+```
+
+Here `epochs=100` wins. Backend mapping parameters are not automatically strategy-constructor arguments. In particular, placing `loading_verbose` there is not equivalent to calling `BackendFactory.get_strategy(..., loading_verbose=True)`.
+
+Availability is checked during backend selection, not merely when parsing an `AnalysisSpec`. With no backend, runtime selection prefers PyTorch, Keras, then NumPy. Configure explicitly when recording a reproducible run.
+
+## Device selection
+
+Supported configuration locations, in precedence order:
+
+1. `model_config.device` (also overriding defaults from the backend mapping).
+2. Top-level `compute_device`.
+3. Top-level `device`.
+
+```yaml
+device: cuda:0
+model_config:
+  epochs: 100
+```
+
+Device values are forwarded, not parsed against a second whitelist. PyTorch and Keras use their existing device managers. Explicit unavailable accelerators can raise errors; CPU fallback is not promised for explicit requests. The native PyTorch manager additionally supports explicit MPS; do not infer that every value is portable to Keras.
+
+NumPy ignores `device` during model construction, including values in resolved model-specification parameters. This also works if automatic backend selection chooses NumPy. Unknown unrelated model parameters are not silently discarded.
+
+Do not specify a constructor parameter both in `model.params` and the outer `model_config`; such duplication normally raises an error. NumPy's ignored device is an intentional exception.
+
+## Variable roles and preparation
+
+- `causes`: predictor variables; omitted/null uses available columns.
+- `effects`: jointly predicted outputs; omitted/null uses available columns.
+- `tested_causes`: subset of causes; omitted/null defaults to causes.
+- `schema_policy`: analysis default is `union`; the low-level `DataPreparationConfig` default remains `error`.
+- `stationarity`: declarative enforcer selection resolved by the preparation pipeline. Analysis entry points default to `adf`; `null`/`None` disables the stage, while the low-level `DataPreparationConfig` default remains `None` (stage off). Accepted declarations: `None`, a registered name, `{"type": ..., "params": {...}}`, an enforcer class, or a compatible instance. The prepared artifact is exposed as `stationarity_enforcer`.
+- `x_scaler`, `y_scaler`: passed to existing scaler resolution.
+- `missing_value_imputer`, `sampling_strategy`: preserve their existing accepted programmatic contracts; a config file does not automatically make arbitrary class mappings constructible.
+- `backend_sample_fraction`, `backend_max_samples`, `random_state`: preparation workload reduction settings, not a general model random-seed contract.
+
+Roles and preprocessing metadata are validated by the existing preparation pipeline.
+
+### Lag preparation
+
+```yaml
+lag_config:
+  max_lag: 4
+  use_lag_zero: false
+lag_selector: null
+lag_n_jobs: 1
+```
+
+With a selector:
+
+```yaml
+lag_config:
+  aggregation: union
+  use_lag_zero: false
+lag_selector:
+  type: ic
+  params:
+    max_lag: 8
+    use_bic: true
+lag_n_jobs: -1
+```
+
+Alternative separate parameters use `lag_selector_params`. Do not duplicate a constructor parameter inside both locations. Selectors and lag-engine settings are resolved in preprocessing, not in the loader or builder.
+
+Without a selector, `lag_config.max_lag` sets the fixed positive-lag range. With a selector, its own `max_lag` sets the search bound. `lag_n_jobs` is dataset-level lag-selection parallelism, not training-device selection.
+
+Manual lag values are explicit sets, not endpoints:
+
+```yaml
+lag_config:
+  use_lag_zero: true
+  predictor_overrides:
+    x1: [1, 3]
+    x2: []
+  pair_overrides:
+    y:
+      x1: [0, 2, 4]
+```
+
+Pair overrides take precedence. Own contemporaneous values are forbidden. A tested input with no final lags receives no restricted fit; restoration of its result column is a reporting convention, not an independent negative test.
+
+Detailed selector families, scoring, aggregation, overrides, and migration from range-based settings are documented in [Lag selection](lag_selection.md).
+
+## Model and components
+
+```yaml
+model_config:
+  model: conditional_linear
+  epochs: 100
+  batch_size: 32
+```
+
+`model_type` is an alternative to `model`, not an additional setting. Model registries reject unknown names rather than silently selecting a default. Structural fields such as `input_spec`, `n_features`, and `n_outputs` are generated from prepared data and must not be supplied here.
+
+PyTorch optimizer example:
+
+```yaml
+backend: pytorch
+model_config:
+  optimizer:
+    type: adam
+    params:
+      lr: 0.001
+  loss: mse
+  epochs: 100
+```
+
+Keras Adam uses `learning_rate` in optimizer parameters, not PyTorch's `lr`. NumPy uses its own solver/objective and does not gain custom optimizer/loss support from these keys.
+
+```yaml
+constraint_spec: mask_and_min_abs_sum
+relations:
+  - cause: x1
+    effect: y
+    rule:
+      type: zero
+regularizer_spec:
+  type: l1
+  params:
+    l1: 0.01
+initializer: zeros
+```
+
+Use empty relations for no additional named rules. `relations: null` is not supported. `constraint_spec: null` is rejected; `regularizer_spec: null` disables regularization. Do not put constraints, regularizers, callbacks, or layout metadata inside `model_config`. Initializer instances/factories are not accepted by the existing initializer resolver.
+
+See [Components](components_loading.md) and [Backend usage](backend_usage.md).
+
+## Hyperparameter optimization
+
+Model-quality hyperparameter optimization can be declared in the same JSON or
+YAML file under `search`. The search runs before final model construction and
+selects a `ModelingSpec`; it does not select Granger statistics and does not
+reuse a trained trial model.
+
+```yaml
+backend: numpy
+causes: [a, b]
+effects: [y]
+tested_causes: [a, b]
+stationarity: null
+lag_config:
+  max_lag: 2
+search:
+  preparation:
+    splitter:
+      type: temporal_blocks
+      params:
+        parts:
+          training: 0.75
+          validation: 0.25
+    random_state: 123
+  space:
+    model_config.learning_rate:
+      choices: [0.1, 0.5, 1.0]
+    model_config.batch_size:
+      choices: [16, 32]
+  strategy:
+    type: grid
+  objective:
+    type: mse
+  budget:
+    max_trials: 6
+    epochs_per_trial: 20
+  validation_part: validation
+  objective_scale: scaled
+  training_seed: 42
+  collect_history: true
+  error_policy: raise
+```
+
+The `search.preparation` section inherits the final analysis preparation and
+supports only `splitter` and `random_state` overrides. It is prepared in a
+separate context. The splitter must provide non-empty `training` and
+`validation` parts. Use `splitter: null` only when intentionally testing the
+clear validation error for enabled HPO.
+
+Load and execute the file through either public path:
+
+```python
+from enhanced_granger_analysis.api.builder import MultiTaskGrangerBuilder
+
+results = (
+    MultiTaskGrangerBuilder()
+    .from_file("analysis.yaml")
+    .data(frame)
+    .fit()
+)
+```
+
+or:
+
+```python
+from enhanced_granger_analysis.configuration.loader import AnalysisConfigLoader
+from enhanced_granger_analysis.configuration.analysis_spec import AnalysisSpec
+from enhanced_granger_analysis.execution.runner import AnalysisRunner
+
+mapping = AnalysisConfigLoader.load_file("analysis.yaml")
+spec = AnalysisSpec.from_mapping(mapping)
+results = AnalysisRunner().run_analysis(spec=spec, data=frame)
+```
+
+The resulting `GrangerAnalysisResults.model_search_result` contains the
+selected configuration, split metadata, budget, and trial history. Legacy
+`hiperoptimalization_state` and `hiperoptimalization_conf` fields are rejected
+with a migration message; use `search` instead.
+
+## Explicit groups of experiments
 
 ```json
 {
-  "backend": "pytorch"
-}
-```
-
-or
-
-```json
-{
-  "backend": {
-    "type": "pytorch",
-    "params": {
-      "loading_verbose": true
-    }
-  }
-}
-```
-
-The backend spec form is useful when you want to keep loader-level settings close to the config file while still letting the backend strategy build the concrete runtime objects.
-
-## Variable Selection (causes, effects, tested_causes)
-
-Three optional fields control which variables are used in the analysis:
-
-- **`causes`** — The full set of predictor variables available to the model. If omitted or set to `null`, all columns in the data are used.
-- **`effects`** — The output variables to predict. If omitted or set to `null`, all columns in the data are used.
-- **`tested_causes`** — A subset of `causes` for which Granger causality is formally tested (via the reference loop). If omitted or set to `null`, defaults to the value of `causes`.
-
-### Behavior when omitted or `null`
-
-```
-causes=null       → all columns
-effects=null      → all columns
-tested_causes=null → defaults to causes (which could be all columns if causes=null)
-```
-
-This distinction is useful when you want the model to see all available context (full `causes`) but test causality only for a specific subset (`tested_causes`), saving computation while preserving model accuracy.
-
-### Example with variable selection
-
-```json
-{
-  "causes": ["u", "f1", "f2", "x1", "x2"],
-  "effects": ["x3", "x4"],
-  "tested_causes": ["f1", "f2"],
-  "model_config": { "epochs": 50 }
-}
-```
-
-In this case:
-- The model uses 5 input variables: `u`, `f1`, `f2`, `x1`, `x2`.
-- It predicts 2 outputs: `x3`, `x4`.
-- Causality is tested only for `f1→x3`, `f1→x4`, `f2→x3`, `f2→x4`, saving time on the reference loop for `u`, `x1`, `x2`.
-
-## Model selection in config files
-
-A configuration can also carry a `model` or `model_type` field. This is supported as a compatibility hook for the current backend model family.
-
-Current behavior:
-
-- The default implementation remains the active fallback for each backend.
-- If `model` / `model_type` points to a subclass of the backend's current base model class, that subclass is used.
-- There is no model registry or automatic plugin discovery yet.
-- The model config remains the place for additional parameters such as hidden layers, dropout, or custom training settings.
-
-Example:
-
-```json
-{
-  "backend": "tensorflow",
-  "model": "TensorFlowGrangerModel",
-  "model_config": {
-    "hidden_layers": 2,
-    "epochs": 50,
-    "batch_size": 32
-  }
-}
-```
-
-The value can also be passed as a Python class object when working directly from code rather than through JSON.
-
-## Example configuration
-
-```json
-{
-  "backend": "tensorflow",
-  "reuse_data": true,
-  "lag_config": {
-    "max_lag": 8,
-    "use_lag_zero": false
-  },
-  "callbacks": [
-    {
-      "type": "early_stopping",
-      "monitor": "loss",
-      "patience": 5
-    }
-  ],
-  "relations": {
-    "y->x1": {
-      "zero": true
-    },
-    "y->x2": {
-      "min_abs_sum": 0.2
-    }
-  },
-  "model": "TensorFlowGrangerModel",
-  "model_config": {
-    "epochs": 50,
-    "batch_size": 32,
-    "optimizer": "adam"
-  }
-}
-```
-
-Or keep the relation rules in a separate file and point `relations` at it:
-
-```json
-{
-  "relations": "./relations.json"
-}
-```
-
-The referenced file may contain either the list-of-objects form or the mapping form.
-
-## Optimizer and training parameter control
-You can tune optimizer and training behavior directly in the builder config under `model_config` (or, for backward compatibility, by top-level keys such as `learning_rate`). Supported patterns are:
-
-```json
-{
-  "model_config": {
-    "optimizer": "adam",
-    "learning_rate": 1e-4,
-    "epochs": 100,
-    "batch_size": 32
-  }
-}
-```
-
-```json
-{
-  "model_config": {
-    "optimizer": {
-      "type": "adam",
-      "params": {
-        "lr": 1e-4,
-        "beta_1": 0.9,
-        "beta_2": 0.999
-      }
-    }
-  }
-}
-```
-
-This works for both TensorFlow and PyTorch. The difference is how backend-specific optimizer settings are forwarded:
-
-- TensorFlow/Keras: `optimizer.params` is the canonical location for optimizer arguments. If a backend-specific optimizer parameter is expected there, it should be placed under `optimizer.params` as part of the optimizer configuration.
-- PyTorch: `gradient_accumulation_steps` is also accepted outside `optimizer.params` as a legacy compatibility alias, because the training loop consumes it at the model level rather than passing it to the optimizer constructor.
-
-Canonical TensorFlow/Keras form:
-
-```json
-{
-  "model_config": {
-    "optimizer": {
-      "type": "adam",
-      "params": {
-        "learning_rate": 1e-4,
-        "gradient_accumulation_steps": 4
-      }
-    }
-  }
-}
-```
-
-Legacy PyTorch-compatible form:
-
-```json
-{
-  "model_config": {
-    "optimizer": "adam",
-    "learning_rate": 1e-4,
-    "gradient_accumulation_steps": 4
-  }
-}
-```
-
-The important distinction is that the backward-compatibility alias is PyTorch-only. In TensorFlow/Keras, the valid placement is under `optimizer.params`; the reverse is not the canonical or supported pattern.
-
-## Group Test Configuration
-
-Use a group-test file when you want to run multiple cases from one shared base config.
-
-Example:
-
-```json
-{
-  "reuse_data": true,
-  "compute_device": "cpu",
+  "device": "cpu",
   "base_config": {
-    "backend": "tensorflow",
-    "lag_config": {
-      "max_lag": 8,
-      "use_lag_zero": false
-    },
-    "model_config": {
-      "epochs": 50,
-      "batch_size": 32
-    },
-    "relations": "./relations.json"
+    "backend": "numpy",
+    "stationarity": null,
+    "lag_config": {"max_lag": 2, "use_lag_zero": false},
+    "model_config": {"epochs": 100}
   },
   "sweep": {
-    "param_names": ["model_config.epochs", "lag_config.max_lag"],
-    "cases": [[5, 8], [10, 10], [20, 12]]
+    "param_names": ["backend", "model_config.epochs"],
+    "cases": [["numpy", 100], ["pytorch", 50]]
   }
 }
 ```
 
-Important fields:
-
-- `reuse_data` keeps prepared preprocessing artifacts available across compatible cases. It is a top-level flag copied into each expanded config, not a `sweep.param_names` target.
-- `compute_device` may be `cpu`, `gpu`, or `auto`.
-- `base_config.relations` may be an inline mapping/list or a path to a JSON/YAML file.
-- `sweep.param_names` uses dotted keys for nested values.
-- `sweep.cases` must match the order and length of `param_names`.
-
-The group iterator expands the file into specific builder configs and then normalizes them.
-
-## What can and cannot be swept
-
-`TestGroupConfigIterator` applies sweep values using dotted keys and then calls `BuilderConfigLoader.normalize_builder_config(...)`.
-
-Important implementation detail:
-- Dotted updates work only through mappings (dictionaries/objects).
-- List indexing is not supported by dotted keys (for example, `callbacks.0.patience` will not work).
-
-### Supported (directly or conditionally)
-
-You can sweep these fields:
-
-- `lag_selector` and its parameters
-  - Supported: yes.
-  - Examples: `lag_selector.type`, `lag_selector.use_bic`, `lag_selector.max_lag`.
-  - Note: supported selector types are normalized to built-ins (`ic`, `cv`, `var`).
-
-- `lag_config` parameters
-  - Supported: yes.
-  - Examples: `lag_config.max_lag`, `lag_config.use_lag_zero`.
-
-- `causes`, `effects`, `tested_causes`
-  - Supported: yes.
-  - You can sweep these as lists of variable names.
-  - Examples: `causes: ["u", "f1", "x1"]`, `effects: ["x3"]`, `tested_causes: ["f1"]`.
-  - Defaults: if not specified or set to `null`, `causes` and `effects` default to all columns in data; `tested_causes` defaults to `causes`.
-  - Useful for comparing the impact of different variable subsets on causality results without retraining on multiple datasets.
-
-- `compute_device`
-  - Supported: yes.
-  - Examples: `compute_device: "cpu"`, `compute_device: "gpu"`, `compute_device: "auto"`.
-  - For PyTorch this is forwarded to `model_config.device`; for TensorFlow it maps to the runtime CPU/GPU environment flags.
-  - `auto` is supported: it leaves backend defaults in place, so PyTorch auto-selects CUDA when available and TensorFlow uses its normal runtime device selection.
-
-- `initializer`
-  - Supported: yes.
-  - String specs are automatically normalized to initializer classes via `BuilderConfigLoader`.
-  - Supported strings (case-insensitive): `"ols"`, `"zeros"`, `"random_normal"` and their aliases (`"olsinitializer"`, `"zero"`, `"zerosinitializer"`, `"randomnormal"`, `"random"`, `"randomnormalinitializer"`).
-  - Examples: `initializer: "ols"`, `initializer: "zeros"`, `initializer: "random_normal"`.
-  - You can also pass an initializer object/class directly from Python code (already resolved).
-  - `null` is accepted and means no custom weight initialization; each backend uses its defaults (PyTorch: Kaiming, TensorFlow: Glorot, scikit-learn: zeros).
-
-- `relations`
-  - Supported: yes.
-  - You can provide a full relation object/list inline or point `relations` to a JSON/YAML file path.
-  - The file is resolved relative to the group-config file.
-  - Nested per-relation dotted edits are practical only when `relations` is represented as a mapping of mappings.
-
-- `model_config` parameters
-  - Supported: yes.
-  - Examples: `model_config.optimizer`, `model_config.learning_rate`, `model_config.epochs`, `model_config.batch_size`.
-
-- `backend`
-  - Supported: yes.
-  - Examples: `backend` (string alias), or `backend.type`/`backend.params.*` when backend is object form.
-
-- scalers
-  - Supported: yes.
-  - Examples: `x_scaler`, `y_scaler` (for example `standard`, `minmax`, `robust`, `maxabs`, `none`).
-
-- callbacks list
-  - Supported: yes, by replacing the entire `callbacks` value per case.
-  - Works with callback specs normalized by backend loaders.
-
-- callback parameters
-  - Supported conditionally.
-  - Works via dotted keys only when callbacks are modeled as named mapping nodes (not as list items).
-  - In common list form, use full-list replacement per case instead of trying list-index paths.
-
-- regularizer type and presence
-  - Supported: yes.
-  - You can sweep `regularizer` / `regularizer_spec` and set them to `null` to disable regularization in a case.
-  - Supported regularizer types: `l1`, `lag_dependent_l1`.
-
-- regularizer parameters
-  - Supported: yes, for object form (for example `regularizer.type`, `regularizer.l1`).
-
-### Not directly supported (or limited)
-
-- Dotted paths through list indices are not supported.
-  - Not supported: `callbacks.0.patience`, `relations.0.min_abs_sum`.
-  - Use whole-object/list replacement in `cases` values.
-
-### Practical recommendation
-
-For sweep dimensions with many list/object internals (`callbacks`, `relations`), treat each case value as a full replacement object.
-For scalar and simple nested options (`model_config.*`, `lag_config.*`, `lag_selector.*`, `x_scaler`, `y_scaler`, `backend`), dotted keys are the most robust approach.
-
-## How to load and use it
-
 ```python
-from enhanced_granger_analysis.api import BuilderConfigLoader, MultitaskGrangerBuilder
+from enhanced_granger_analysis.experiments import TestGroupConfigIterator
+from enhanced_granger_analysis.api.builder import MultiTaskGrangerBuilder
 
-cfg = BuilderConfigLoader.load_file("config.json")
-output = MultitaskGrangerBuilder().from_config(cfg).data(df).fit()
+for config in TestGroupConfigIterator.from_file("group.json"):
+    result = MultiTaskGrangerBuilder().from_config(config).data(frame).fit()
 ```
 
-You can also load the raw mapping first and then adapt it yourself if needed:
+Each row is one explicit case. There is no automatic Cartesian product. Top-level group settings are combined with `base_config`; base values win, followed by case overrides. Dotted paths traverse dictionaries, not lists. Replace whole callback/relation lists rather than using list indices.
 
-```python
-from enhanced_granger_analysis.api import BuilderConfigLoader
+The iterator returns mappings and does not normalize aliases or resolve components. It can resolve a different relation-file reference for each expanded case.
 
-cfg = BuilderConfigLoader.load_file("config.json")
-```
+## Prepared data and reuse
 
-Then pass the normalized mapping to `MultitaskGrangerBuilder.from_config(...)`.
+DataFrame inputs and `PreparedData` are runtime inputs, not serializable fields of `AnalysisSpec`. The builder retains `data`/`prepared_data` compatibility handling, but direct runner calls supply them separately.
 
-## Constraints
+`reuse_data` does not create a runner cache. Explicitly supplied prepared data takes precedence and is not automatically checked against a newly changed preparation specification. The experiment script has its own preparation cache; its key must cover all settings affecting preparation before reusing data across differing cases.
 
-Constraints for Granger analysis are specified via `relations`. This is a mapping of `(effect, cause)` pairs to constraint rules, and the loader also accepts JSON-friendly string notation or a list of objects.
+## HPO status
 
-Examples:
+The `search` section described above is the supported integrated HPO workflow.
+It selects model settings by validation objective before the final Granger
+model is built. Sweeping a parameter through the experiment iterator still
+executes multiple independent experiments; it does not select that parameter
+internally by model-quality validation.
 
-```json
-{
-  "relations": {
-    "y->x1": { "zero": true },
-    "y->x2": { "min_abs_sum": 0.2 }
-  }
-}
-```
+`hiperoptimalization_state` and `hiperoptimalization_conf` are legacy fields
+and are rejected with an actionable migration message. Use `search` instead.
 
-and:
+## Migration
 
-```json
-{
-  "relations": [
-    { "effect": "y", "cause": "x1", "zero": true },
-    { "effect": "y", "cause": "x2", "min_abs_sum": 0.2 }
-  ]
-}
-```
-
-This is consistent with the description in [components loading](components_loading.md): `relations` contains the rules, and the backend strategy translates them into backend-native constraint objects.
-
-## `reuse_data`
-
-If `reuse_data` is set to `true`, the orchestrator can keep the prepared data object on the output when the builder/orchestrator decides to preserve it. This is useful when you want to inspect or reuse preprocessing artifacts across repeated runs.
-
-## Recommended workflow
-
-- Keep the file focused on configuration data.
-- Let the loader normalize the shape.
-- Let the builder orchestrator create and train the model.
-- Put backend-specific runtime behavior into the backend strategy, not the loader.
+See [Migration guide](api_refactor_migration.md) for removed loader helpers, preferred imports, and the distinction between update and replacement.

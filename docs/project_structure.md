@@ -1,172 +1,83 @@
 # Project Structure
 
-This document describes the repository layout and the role of each major package and module. The installable Python package lives in `enhanced_granger_analysis/` inside the repository root.
-
-## Repository Layout
+The installable source package is `enhanced_granger_analysis/`.
 
 ```text
 enhanced_granger_analysis/
-├── enhanced_granger_analysis/   # Installable package source
-│   ├── api/                    # Stateful builder, standard orchestration, config loading
-│   ├── backends/               # Strategies, models, and backend-specific components
-│   ├── core/                   # Shared configurations, protocols, and exceptions
-│   ├── hiperopt/               # Hyperoptimization subsystem
-│   ├── initializers/           # Optional model-weight initialization
-│   ├── preprocessing/          # Staged preparation and PreparedData contract
-│   ├── results/                # Snapshots, metrics, restoration, and causality matrices
-│   └── utilities/              # Shared helper functions (validation, metrics, etc.)
-├── docs/                       # User and developer documentation
-├── example/                    # Example data and notebooks
-├── CONTRIBUTING.md             # Contribution workflow and development rules
-├── README.md                   # Project overview and quick start
-├── VISION.md                   # Roadmap and long-term direction
-├── Changelog.md                # Release notes and change history
-├── pyproject.toml              # Build metadata and package configuration
-├── requirements.txt            # Base dependencies
-├── requirements-torch.txt      # PyTorch backend extras
-├── requirements-tensorflow.txt # TensorFlow backend extras
-└── requirements-full.txt       # Combined backend dependency set
+├── api/
+│   ├── builder.py
+│   ├── orchestrator.py
+│   ├── simple_granger.py
+│   └── config_loader.py
+├── configuration/
+│   ├── analysis_spec.py
+│   ├── modeling_spec.py
+│   └── loader.py
+├── modeling/
+│   ├── assembler.py
+│   ├── initialization.py
+│   ├── executor.py
+│   └── artifacts.py
+├── execution/
+│   ├── runner.py
+│   └── granger_trainer.py
+├── experiments/
+│   └── config_iterator.py
+├── backends/
+│   ├── backend_factory.py
+│   ├── base_backend.py
+│   ├── keras/
+│   ├── pytorch/
+│   └── numpy/
+├── core/
+├── initializers/
+├── preprocessing/
+├── results/
+├── hiperopt/
+├── scripts/
+├── tests/
+└── utilities/
 ```
 
-## Module Responsibilities
+## Responsibilities
 
-### api
+| Package | Responsibility |
+| --- | --- |
+| `api` | Fluent builder, one-call orchestrator, independent baseline, compatibility imports |
+| `configuration` | Configuration sections and document/reference reading; no backend component construction |
+| `modeling` | Assembly, initializer execution, one fit, and its artifacts |
+| `execution` | Full workflow coordination, standard Granger fitting, outcome-to-snapshot conversion |
+| `experiments` | Explicit test-case expansion, separate from HPO |
+| `backends` | Strategy selection, native model adapters/networks, existing resolvers and component registries |
+| `core` | Model protocols, structural metadata, registry infrastructure, shared component data, exceptions |
+| `initializers` | Existing initializer class registry and implementations |
+| `preprocessing` | Alignment, imputation, cleanup, stationarity, lag preparation, scaling, sampling |
+| `results` | Snapshots, preparation context, metrics, restoration, labelled matrices |
+| `hiperopt` | Existing optimization subsystem; not active in the standard runner |
+| `scripts` | Group experiments, export, timing, and ground-truth reporting |
+| `utilities` | Shared helpers including ground-truth metric calculation |
 
-Public analysis entry points and configuration loading:
+`configuration/legacy.py` has been removed. `api/config_loader.py` only exposes compatibility imports. Removed shared `backends/models`, `backends/object_loaders`, and `backends/scikit` packages are not restored.
 
-- `builder.py`: `MultiTaskGrangerBuilder`, which stores configuration and
-  runtime artifacts and executes individual pipeline stages.
-- `orchestrator.py`: `MultiTaskGrangerAPI`, which coordinates the standard
-  workflow through the builder.
-- `simple_granger.py`: independent pair-wise statsmodels analysis.
-- `config_loader.py`: JSON/YAML configuration normalization and grouped
-  experiment configuration expansion.
+## Existing shared contracts
 
-`MultitaskGrangerBuilder` is a compatibility alias of
-`MultiTaskGrangerBuilder`.
+- `core/models/input_spec.py`: `ModelInputSpec`.
+- `core/models/protocol.py`: `GrangerModelProtocol` and related types.
+- `core/models/training_result.py`: `TrainingResult`.
+- `core/initialization.py`: `InitializationContext`.
+- `core/components/`: relation/regularizer parsing, preparation data, registry support, and serialization.
+- `core/lag_config.py`: lag specifications, engine settings, preparation result metadata.
+- `preprocessing/pipeline.py`: existing `DataPreparationConfig` and `DataPreparer`.
+- `preprocessing/prepare_data.py`: `PreparedData`, `VariableRoles`, and removed-variable metadata.
 
-Configuration methods and execution stages are distinct. The builder is not
-only a facade over the orchestrator.
+Do not introduce parallel versions of these contracts in the new packages.
 
-### backends
+## Results and execution artifacts
 
-Backend abstraction layer and implementations:
+`modeling/artifacts.py` defines `FitOutcome`; it is not a causal result container. `execution/runner.py` defines internal `AnalysisRunProgress`; it is not a public session. Final snapshot evaluation remains in `results/`.
 
-- `backend_factory.py`: backend selection and strategy dispatch.
-- `base_backend.py`: shared backend contract.
-- `pytorch_backend.py`, `keras_backend.py`, `scikit_backend.py`: backend-specific logic.
-- Subfolders (`callbacks`, `constraints`, `models`, `object_loaders`, `regularizers`): backend-native components.
+## Repository-level documentation
 
-### core
+`README.md` provides navigation and quick start; `Changelog.md` records changes. `docs/execution_architecture.md` describes responsibilities and data flow; `docs/api_refactor_migration.md` describes migration.
 
-Low-level shared contracts and data models:
-
-- configuration objects such as lag and training constraints,
-- protocol-style interfaces,
-- exception classes,
-- output dataclasses.
-
-### initializers
-
-Utilities for building model state before training:
-
-- reusable initialization helpers,
-- backend-independent weight initialization logic.
-
-### preprocessing
-
-Staged data preparation and the contract passed to model execution:
-
-- `prepare_data.py`: the convenience entry point and preparation data models,
-  including `PreparedData`, `VariableRoles`, and `RemovedVariable`.
-- `pipeline.py`: `DataPreparer` and `DataPreparationConfig`.
-- `missing/`: optional missing-value imputation.
-- `stationarity/`: stationarity tests and transformations.
-- `lag/`: lag selection, feature construction, and target alignment.
-- `scaling/`: input and target scaling, including block-wise scaling.
-- `sampling.py`: workload-reduction strategies.
-
-Prepared data separates requested roles from effective roles and maps inputs
-to feature blocks through named `cause_slices`.
-
-For stage order and defaults, see [Data Preprocessing](data_preprocessing.md).
-
-### results
-
-Model-run storage, metric evaluation, and labelled result matrices:
-
-- `granger_results.py`: result container, model snapshots, preparation context,
-  metric evaluation, and convenience accessors.
-- `metrics.py`: registered statistical, diagnostic, and sign metrics.
-- `restoration.py`: restoration of requested result axes using preprocessing
-  metadata.
-- `causality_matrix.py`: labelled metric-matrix wrapper.
-- `statistics.py`: statistical helper calculations.
-
-Metrics are calculated for effective fitted variables.
-Restoration is applied when returning evaluated matrices.
-
-Signed results combine restored metric and sign matrices.
-Coefficient blocks are selected through named cause slices.
-
-For the public result contract, see [Results and Metrics](results_and_metrics.md).
-
-### hiperopt
-
-Hyperoptimization subsystem for evaluating candidate configurations.
-
-Its configuration can describe model, optimizer, and regularizer parameter
-groups.
-
-The standard builder pipeline currently accepts hyperoptimization settings
-but does not execute an optimization stage.
-
-Keep subsystem capabilities separate from their integration into the standard
-analysis workflow.
-
-(still under development)
-
-### scripts
-
-Automation for reproducible experiment runs:
-
-- group/sweep execution,
-- per-case matrix export,
-- summary metrics vs. ground-truth.
-
-For details, see [script usage](script_usage.md).
-
-### tests
-
-Unit and integration tests for library components and execution workflows.
-
-The test directory is located inside the source package, while package
-configuration excludes it from installed distribution packages.
-
-New lifecycle and result-contract changes should include regression tests
-for:
-
-- named feature-block selection;
-- single-input and final-input restriction counting;
-- tested-cause ordering independent of input ordering;
-- restored sign and metric axes;
-- callback and omission isolation;
-- snapshot independence;
-- metric-cache invalidation.
-
-### utilities
-
-Shared helper functions used across the package:
-
-- validation helpers,
-- metric calculations,
-- small reusable analysis utilities.
-
-## Related Documentation
-
-- [API usage](api_usage.md)
-- [Backend usage](backend_usage.md)
-- [Components loading](components_loading.md)
-- [Data preprocessing](data_preprocessing.md)
-- [Configuration files](config_file_usage.md)
-- [Script usage](script_usage.md)
+The detailed preprocessing, lag-selection, model-contract, result-metric, NumPy-solver, and ground-truth pages retain their subsystem scope. Future sessions/procedures are not part of the tree above.

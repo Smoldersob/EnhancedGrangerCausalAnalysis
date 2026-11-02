@@ -1,279 +1,110 @@
-# Components Loading
+# Component Loading and Construction
 
-This document lists supported component types and dictionary names used to build components in each backend.
+Component declarations are interpreted by their existing family-specific parsers, resolvers, and registries. Shared document loading is not a component factory, and there is no universal accepted input format for every family.
 
-## Generic Spec Format
-You can pass either:
+## Responsibility map
 
-- A concrete component object.
-- A string type name.
-- A dictionary with fields:
-  - `type` (preferred) or `name` or `kind`
-  - `params` (optional object)
-  - Extra keys outside `params` are also accepted and merged into params.
+| Family | Existing interpretation | Construction |
+| --- | --- | --- |
+| Backend | `BackendFactory` | Strategy selection |
+| Lag engine/selector | Preparation pipeline and lag resolvers | Preparation pipeline |
+| Scaler | Existing scaler resolver | Preparation pipeline |
+| Model | Backend-local model registry | Strategy `build_model` |
+| Optimizer | Backend-local resolver | Strategy `build_optimizer` |
+| Loss | Backend-local resolver | Strategy `build_loss` |
+| Callbacks | Backend-local resolver/registry | Strategy `build_callbacks` |
+| Relations | `parse_relations_spec` | Compile against final layout |
+| Constraint | Backend constraint registry | Strategy `build_constraint(spec, data=...)` |
+| Regularizer | `parse_regularizer_spec` and backend registry | Strategy `build_regularizer(selector, data=...)` |
+| Initializer | `resolve_initializer_spec` | `ModelInitializer` constructs and executes it |
 
-Example:
+`ModelAssembler` coordinates these construction dependencies; it does not maintain another registry or reinterpret component aliases. `AnalysisRunner` does not replace these mechanisms.
 
-```python
-{"type": "early_stopping", "patience": 5}
-{"name": "l1", "params": {"l1": 0.01}}
-```
-
-## Scikit/Numpy Backend
-Backend names: `sklearn` / `scikit` / `scikit-learn`
-
-### Callbacks
-Supported dictionary types:
-
-- `early_stopping` / `earlystopping`
-- `reduce_lr` / `reduce_learning_rate` / `reducelearningrate`
-- `convergence_check` / `convergencecheck`
-
-Simple example:
+## Constraint declarations
 
 ```python
-callbacks = [
-    {"type": "early_stopping", "patience": 10},
-    {"type": "reduce_lr", "factor": 0.5},
+relations = [
+    {"cause": "x1", "effect": "y", "rule": {"type": "zero"}},
+    {
+        "cause": "x2",
+        "effect": "y",
+        "rule": {"type": "min_abs_sum", "params": {"value": 0.2}},
+    },
 ]
+constraint_spec = "mask_and_min_abs_sum"
 ```
 
-### Regularizers
-Supported dictionary types:
+Relations accept the canonical list or `RelationConstraintsSpec`, not arbitrary shorthand maps or `None`. Empty relations preserve the base mask. Duplicate cause/effect declarations are rejected. A zero minimum adds no lower-bound restriction; it is not a zero mask.
 
-- `l1` / `numpy_l1`
-- `lag_dependent_l1` / `lagdependentl1` / `numpy_lag_dependent_l1`
+The assembler calls the existing relation parser, compiles `PreparedConstraintData` using effective cause slices/output order/base mask, and delegates component construction. Unknown effective variables and infeasible positive bounds fail according to existing preparation policy.
 
-Simple example:
+Do not supply layout metadata, masks, or indexed rules through constraint params. High-level analysis rejects `constraint_spec=None`, even though low-level registries/strategies may have broader acceptance.
+
+## Regularization
 
 ```python
-reg = {"type": "l1", "l1": 0.01}
+regularizer_spec = {"type": "l1", "params": {"l1": 0.01}}
 ```
+
+The shared parser accepts `None`, a registered name, a concrete class, a normalized `RegularizerSpec`, or its supported `type`/`params` declaration. It does not accept ready instances or factory functions. Strategy-level support for a compatible instance is a separate, lower-level contract.
+
+The assembler prepares `RegularizationLayout` and `PreparedRegularizerData`, then calls the backend strategy with selector and prepared data. There is no model-side reverse conversion from a ready regularizer to configuration.
+
+`None` disables regularization. Built-in `l1` and `lag_dependent_l1` default to zero strength when no nonzero value is specified. An existing zero-strength regularizer object can still affect NumPy solver eligibility; it is not identical to absence of a regularizer.
 
 Lag-dependent example:
 
 ```python
-reg = {
+regularizer_spec = {
     "type": "lag_dependent_l1",
-    "l1": 0.01,
-    "lag_weights": [1.0, 2.0, 3.0],
-    "max_lags_per_pred": [2, 2],
-    "col_offsets": [0, 3],
-}
-```
-
-### Constraints
-Supported dictionary types:
-
-- `mask` / `mask_constraint` / `numpy_mask`
-- `mask_and_min_abs_sum` / `mask_min_abs_sum` / `numpy_mask_and_min_abs_sum`
-
-Simple mask example:
-
-```python
-constraint = {
-    "type": "mask",
-    "mask": [[1, 1, 0], [1, 0, 0]],
-}
-```
-
-Mask + rules example:
-
-```python
-constraint = {
-    "type": "mask_and_min_abs_sum",
-    "mask": [[1, 1, 1]],
-    "rules": [
-        {"output_index": 0, "feature_indices": [1, 2], "min_abs_sum": 1.0}
-    ],
-    "eps": 1e-8,
-}
-```
-
-## PyTorch Backend
-Backend names: `pytorch` / `torch`
-
-### Callbacks
-Supported dictionary types:
-
-- `early_stopping` / `earlystopping`
-- `reduce_lr` / `reduce_learning_rate` / `reducelearningrate`
-- `convergence_check` / `convergencecheck`
-- `torch_tensorboard` / `tensorboard` / `tensorboard_logger`
-
-Simple example:
-
-```python
-callbacks = [{"type": "torch_tensorboard", "log_dir": "runs/demo"}]
-```
-
-### Regularizers
-Supported dictionary types:
-
-- `l1` / `torch_l1` / `pytorch_l1`
-- `lag_dependent_l1` / `lagdependentl1` / `torch_lag_dependent_l1` / `pytorch_lag_dependent_l1`
-
-Simple example:
-
-```python
-reg = {"type": "pytorch_l1", "l1": 0.005}
-```
-
-### Optimizer and training settings
-
-Optimizer configuration and training-loop configuration are related but
-distinct.
-
-A typical model configuration contains training settings together with an
-optimizer selection:
-
-```python
-model_config = {
-    "optimizer": "adam",
-    "learning_rate": 1e-4,
-    "epochs": 100,
-    "batch_size": 32,
-}
-```
-
-For structured optimizer specifications, use:
-
-```python
-model_config = {
-    "optimizer": {
-        "type": "adam",
-        "params": {
-            # Parameters accepted by the selected optimizer loader.
-        },
+    "params": {
+        "l1": 0.01,
+        "lag_weights": [1.0, 2.0, 3.0, 4.0],
+        "relative_lag_indexing": False,
     },
 }
 ```
 
-Parameter names and accepted aliases depend on the selected backend loader.
-Do not assume that one optimizer parameter dictionary is portable unchanged
-between native PyTorch and Keras.
+Actual `feature_lags` determine indexing. With absolute indexing, lag 1 uses index 1. Relative indexing subtracts the global minimum feature lag, not a separate minimum for each cause. Weights must cover required indices. Do not supply legacy `col_offsets` or `max_lags_per_pred` as layout substitutes.
 
-Training-loop options must not be forwarded to an optimizer constructor
-unless that optimizer explicitly supports them.
+## Initializers
 
-### Gradient accumulation
+The existing resolver accepts `None`, a registered name, a supported mapping, or a class. Instances and factory functions are not accepted. An initializer receives `InitializationContext` with prepared arrays, copied current weights, and the preparation mask. It returns the weight-array sequence expected by the model.
 
-Gradient accumulation has backend-specific configuration semantics.
+`ModelInitializer.compute_weights()` does not assign weights. Its caller uses the model's existing `set_weights()` and captures the accepted representation. Shape/orientation validation remains the model's responsibility.
 
-For the native PyTorch implementation, it is a training-loop setting rather
-than a standard optimizer constructor argument. It must remain outside the
-optimizer's constructor parameters.
+## Optimizers and losses
 
-For Keras optimizers that support `gradient_accumulation_steps`, it belongs
-to the optimizer configuration.
+Use `model_config.optimizer` and `model_config.loss`. The assembler extracts them and passes ready components separately from constructor options.
 
-Compatibility aliases should be documented separately from the canonical
-configuration location. An accepted alias must not be described as evidence
-that the underlying optimizer accepts the same argument.
+PyTorch Adam uses `params.lr`; Keras Adam uses `params.learning_rate`. Do not infer cross-backend parameter portability from a shared typed-specification shape. PyTorch gradient accumulation is a model training-loop setting; supported Keras optimizer accumulation options belong to that optimizer's configuration.
 
-Check the selected loader before moving accumulation settings between
-model-level and optimizer-level configuration.
+NumPy does not gain arbitrary optimizer/loss support from these fields. Its existing resolvers and solver contracts govern accepted values.
 
-### Constraints
-Supported dictionary types:
+## Callbacks
 
-- `mask` / `mask_constraint` / `torch_mask` / `pytorch_mask`
-- `mask_and_min_abs_sum` / `mask_min_abs_sum` / `torch_mask_and_min_abs_sum` / `pytorch_mask_and_min_abs_sum`
+Callback declarations pass to the existing backend callback resolver. The loader and specification do not maintain a separate normalization/instantiation path.
 
-Simple example:
+NumPy/PyTorch callbacks use backend-local classes and run-reset infrastructure. Keras uses its backend-specific callback path. Custom callbacks must satisfy lifecycle requirements, not merely constructor syntax. Run resets must not accidentally restore model parameters or alter omission state.
 
-```python
-constraint = {
-    "type": "pytorch_mask",
-    "mask": [[1, 0, 1]],
-}
-```
+## Backend bases and orientation
 
-## Keras-based strategy
+| Backend | Constraint base | Regularizer base |
+| --- | --- | --- |
+| NumPy | `BaseNumpyConstraint` | `BaseNumpyRegularizer` |
+| PyTorch | `BasePyTorchConstraint` | `BasePyTorchRegularizer` |
+| Keras | `BaseKerasConstraint` | `BaseKerasRegularizer` |
 
-This section describes components loaded for the library's Keras-based
-strategy, including historical TensorFlow-oriented aliases.
+Prepared layouts are canonical `(n_outputs, n_features)`. Native NumPy/PyTorch coefficients and Keras Dense kernels can have different orientations; backend implementations handle this. `FitOutcome` retains the model's complete exported weight representation without trying to standardize it.
 
-The library strategy name and the Keras execution runtime are distinct.
-Component aliases do not independently establish runtime compatibility.
+## Extensibility and serialization
 
-### Callbacks (Keras callbacks)
-Supported dictionary types:
+Register project components in their existing registries. Do not duplicate registration in the document loader, builder, runner, or iterator. Accepted forms are family-specific; programmatic objects are not automatically JSON/YAML serializable.
 
-- `early_stopping` / `keras_early_stopping` / `earlystopping`
-- `reduce_lr_on_plateau` / `reduce_learning_rate` / `reduce_lr` / `reducelronplateau` / `keras_reduce_lr`
-- `tensorboard` / `keras_tensorboard`
-- `model_checkpoint` / `checkpoint` / `keras_checkpoint`
-- `csv_logger` / `csvlogger` / `keras_csv_logger`
-- `terminate_on_nan` / `keras_terminate_on_nan`
+Configuration serialization is separate from component resolution. Preserve existing specification/prepared-data serializers and include custom constructor requirements in component serialization contracts. Do not introduce reverse normalization merely to make assembly work.
 
-Simple example:
+## Devices
 
-```python
-callbacks = [
-    {"type": "early_stopping", "monitor": "loss", "patience": 3},
-    {"type": "tensorboard", "log_dir": "logs/demo"},
-]
-```
+Device values are not a component family needing another resolver. Keras/PyTorch use existing managers. NumPy ignores `device` in its strategy's constructor dispatch. See [Backend usage](backend_usage.md).
 
-### Regularizers
-Supported dictionary types:
-
-- `l1` / `keras_l1` / `tensorflow_l1`
-- `lag_dependent_l1` / `lagdependentl1` / `keras_lag_dependent_l1` / `tensorflow_lag_dependent_l1`
-
-Simple example:
-
-```python
-reg = {"type": "keras_l1", "l1": 0.01}
-```
-
-### Constraints
-Supported dictionary types:
-
-- `mask` / `mask_constraint` / `keras_mask` / `tensorflow_mask`
-- `mask_and_min_abs_sum` / `mask_min_abs_sum` / `keras_mask_and_min_abs_sum` / `tensorflow_mask_and_min_abs_sum`
-
-Simple example:
-
-```python
-constraint = {
-    "type": "tensorflow_mask",
-    "mask": [[1, 1, 0, 0]],
-}
-```
-## Callback lifecycle
-
-Resolving a callback specification constructs or selects a callback.
-It does not by itself establish that the callback can be safely reused across
-base and restricted runs.
-
-The model's callback-reset mechanism is responsible for run isolation.
-Stateful callbacks and callbacks writing files may require reconstruction,
-resetting, or run-specific output paths.
-
-Custom callback objects should be checked against the reset mechanism used
-by the selected model.
-
-## Feature-block metadata
-
-Some component specifications, including lag-dependent regularizers, may use
-positional offsets.
-
-These offsets belong to the component's internal configuration and should not
-be confused with `PreparedData.cause_slices`.
-
-When constructing a component from prepared data, preserve the effective
-input order and derive positional information from the corresponding named
-feature slices.
-
-The order of `tested_causes` is not a feature-layout specification.
-
-## Verbose Loading
-All strategies support internal loader logging via `loading_verbose=True`.
-
-Simple example:
-
-```python
-strategy = BackendFactory.get_strategy("pytorch", loading_verbose=True)
-```
+Related: [Configuration](config_file_usage.md), [Architecture](execution_architecture.md), [Model contract](model_contract.md).

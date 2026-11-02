@@ -44,19 +44,15 @@ class PreparationContext:
 	The context exposes the original prepared-data objects and the
 	metadata needed to restore variables removed during feature preparation.
 	"""
-
+	
 	prepared_data: PreparedData
 	metadata: dict[str, Any] | None = None
 
 	@property
-	def stationarity_transformer(self):
-		"""Return the transformer used to stabilize the stationarity step.
-
-		Returns: Transformer instance applied to the prepared data pipeline before
-		model fitting.
-		"""
-		return self.prepared_data.stationarity_transformer
-
+	def stationarity_enforcer(self):
+		"""Return the fitted stationarity enforcer, or None if disabled."""
+		return self.prepared_data.stationarity_enforcer
+	
 	@property
 	def lag_engine(self):
 		"""Return the lag-generation engine used by the analysis.
@@ -64,6 +60,14 @@ class PreparationContext:
 		Returns: Lag-engine object producing time-lagged regression features.
 		"""
 		return self.prepared_data.lag_engine
+
+	@property
+	def split(self):
+		"""Return the active data split, or None when splitting is disabled.
+
+		Returns: Assignment of prepared rows to named parts.
+		"""
+		return self.prepared_data.split
 
 	@property
 	def x_scaler(self):
@@ -142,6 +146,8 @@ class GrangerAnalysisResults:
 		self._metric_cache: dict[Any, CausalityMatrix] = {}
 		self._rss_cache: dict[str, NDArray[np.float64]] = {}
 		self.preparation_context: Optional[PreparationContext] = None
+		self.model_search_result: Any = None
+		self.effective_modeling: Any = None
 
 	@property
 	def base_predictions(self) -> NDArray[np.float64] | None:
