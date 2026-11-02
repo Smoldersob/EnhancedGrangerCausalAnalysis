@@ -69,11 +69,13 @@ def _p_value_from_statistic(results: Any, statistic_name: str) -> CausalityMatri
         q_matrix[:, cause_idx] = results.n_restrictions_for(cause)
 
     if statistic_name == "f_statistic":
-        residual_df = np.full_like(
-            stat_values,
-            max(results.n_samples - results.n_unrestricted_parameters(), 1),
-            dtype=np.int_,
-        )
+        residual_df = np.broadcast_to(
+            np.asarray([
+                results.n_samples - results.n_unrestricted_parameters(cause)
+                for cause in results.causes
+            ], dtype=np.int_),
+            stat_values.shape,
+        ).copy()
         p_values = p_value_from_f_test(stat_values, q_matrix, residual_df)
         name = "f_statistic_p_value"
     elif statistic_name == "wald_test":
@@ -124,13 +126,13 @@ def f_statistic(results: Any) -> CausalityMatrix:
     The restriction count may use structural or active-support degrees of
     freedom, according to ``results.dof_method``.
     """
-    base_rss = results.base_rss_per_output()
     values = np.empty((len(results.effects), len(results.causes)), dtype=np.float64)
 
     for cause_col, cause in enumerate(results.causes):
+        base_rss = results.unrestricted_rss_per_output(cause)
         ref_rss = results.reference_rss_per_output(cause)
         q = results.n_restrictions_for(cause)
-        k_u = results.n_unrestricted_parameters()
+        k_u = results.n_unrestricted_parameters(cause)
         values[:, cause_col] = f_test_value(
             error_ref=ref_rss,
             error_base=base_rss,
@@ -161,37 +163,38 @@ def wald_test(results: Any) -> CausalityMatrix:
     describe the same multi-output model. Structurally inactive coefficients
     are excluded from each tested block.
     """
-    if results.base_snapshot is None or results.base_snapshot.weights is None or results.X_true.size == 0:
+    if results.X_true.size == 0:
         values = np.full((len(results.effects), len(results.causes)), np.nan, dtype=np.float64)
         return results.make_matrix(values, name="wald_test", metadata={"removed_signal_value": 0.0})
-
-    covariance = estimate_masked_weight_covariance(
-        x_train=results.X_true,
-        y_true=results.y_true,
-        y_pred=results.base_snapshot.predictions,
-        coefficient_mask=results.mask,
-        fit_intercept=False,
-    )
-    weights = np.asarray(results.base_snapshot.weights, dtype=np.float64)
-    if weights.shape[1] == len(results.effects):
-        weights = weights.T
     values = np.empty((len(results.effects), len(results.causes)), dtype=np.float64)
     for cause_col, cause in enumerate(results.causes):
+        snapshot = results._snapshot_for(cause, "unrestricted")
+        if snapshot.weights is None or snapshot.active_slope_mask is None:
+            values[:, cause_col] = np.nan
+            continue
+        unrestricted = results._snapshot_for(cause, "unrestricted")
+        restricted = results._snapshot_for(cause, "restricted")
+        tested_mask = unrestricted.active_slope_mask & ~restricted.active_slope_mask
+        covariance = estimate_masked_weight_covariance(
+            x_train=results.X_true,
+            y_true=results.y_true,
+            y_pred=unrestricted.predictions,
+            coefficient_mask=unrestricted.active_slope_mask,
+            fit_intercept=unrestricted.bias_enabled,
+        )
+        weights = results._weights_as_feature_output(snapshot.weights)
         if cause not in results.cause_slices:
             raise ValueError(
                 f"Missing feature slice for tested cause: {cause!r}"
             )
 
-        block = results.cause_slices[cause]
-        start = int(block.start)
-        end = int(block.stop)
-
         values[:, cause_col] = wald_test_value(
             weights=weights,
             covariance=covariance,
-            coefficient_mask=results.mask,
-            start=start,
-            end=end,
+            coefficient_mask=unrestricted.active_slope_mask,
+            start=0,
+            end=weights.shape[1],
+            tested_mask=tested_mask,
         )
     return results.make_matrix(values, name="wald_test", metadata={"removed_signal_value": 0.0})
 
@@ -214,9 +217,9 @@ def likelihood_ratio_test(results: Any) -> CausalityMatrix:
     The reference and base predictions must use the same observations and
     output ordering. The statistic is evaluated against the base RSS.
     """
-    base_rss = results.base_rss_per_output()
     values = np.empty((len(results.effects), len(results.causes)), dtype=np.float64)
     for cause_col, cause in enumerate(results.causes):
+        base_rss = results.unrestricted_rss_per_output(cause)
         ref_rss = results.reference_rss_per_output(cause)
         values[:, cause_col] = likelihood_ratio_test_value(
             error_ref=ref_rss,
@@ -257,23 +260,25 @@ def sign_metric(results: Any) -> CausalityMatrix:
         dtype=np.float64,
     )
 
-    snapshot = results.base_snapshot
-    if snapshot is None or snapshot.weights is None:
+    if not results.causes:
         return results.make_matrix(
             values,
             name="sign",
             metadata={"removed_signal_value": 0.0},
         )
 
-    weights = results._weights_as_feature_output(snapshot.weights)
-
-    if weights.shape[0] != len(results.effects):
-        raise ValueError(
-            f"Weight shape {weights.shape} is incompatible with "
-            f"{len(results.effects)} effects"
-        )
-
     for cause_index, cause in enumerate(results.causes):
+        snapshot = results._snapshot_for(cause, "unrestricted")
+        if snapshot.weights is None or snapshot.active_slope_mask is None:
+            continue
+        weights = results._weights_as_feature_output(snapshot.weights)
+        if weights.shape[0] != len(results.effects):
+            raise ValueError(
+                f"Weight shape {weights.shape} is incompatible with "
+                f"{len(results.effects)} effects"
+            )
+        restricted = results._snapshot_for(cause, "restricted")
+        tested_mask = snapshot.active_slope_mask & ~restricted.active_slope_mask
         if cause not in results.cause_slices:
             raise ValueError(
                 f"Missing feature slice for tested cause: {cause!r}"
@@ -297,7 +302,11 @@ def sign_metric(results: Any) -> CausalityMatrix:
                 f"weights have {weights.shape[1]} feature columns"
             )
 
-        sums = weights[:, block].sum(axis=1)
+        sums = np.where(
+            tested_mask[:, block],
+            weights[:, block],
+            0.0,
+        ).sum(axis=1)
         signs = np.sign(sums)
 
         # Preserve the existing convention for near-zero coefficient sums.

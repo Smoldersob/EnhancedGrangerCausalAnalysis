@@ -34,6 +34,9 @@ class ModelSnapshot:
 
 	predictions: NDArray[np.float64]
 	weights: NDArray[np.float64] | None = None
+	active_slope_mask: NDArray[np.bool_] | None = None
+	bias_enabled: bool = True
+	snapshot_id: str | None = None
 	metadata: dict[str, Any] = field(default_factory=dict)
 
 
@@ -141,8 +144,12 @@ class GrangerAnalysisResults:
 		self.y_true = ensure_2d(np.asarray(y_true, dtype=np.float64)) if y_true is not None else np.empty((0, 0), dtype=np.float64)
 		self.X_true = ensure_2d(np.asarray(X_true, dtype=np.float64)) if X_true is not None else np.empty((0, 0), dtype=np.float64)
 		self.dof_method: DofMethod = "structural"
+		self.active_support_tolerance = 1e-12
 		self.base_snapshot: ModelSnapshot | None = None
 		self.reference_snapshots: dict[str, ModelSnapshot] = {}
+		self.restricted_snapshots: dict[str, ModelSnapshot] = self.reference_snapshots
+		self.unrestricted_snapshots: dict[str, ModelSnapshot] = {}
+		self.base_model_role: Literal["unrestricted", "restricted"] | None = None
 		self._metric_cache: dict[Any, CausalityMatrix] = {}
 		self._rss_cache: dict[str, NDArray[np.float64]] = {}
 		self.preparation_context: Optional[PreparationContext] = None
@@ -241,6 +248,7 @@ class GrangerAnalysisResults:
 		if method not in {"structural", "active_support"}:
 			raise ValueError("dof method must be 'structural' or 'active_support'")
 		self.dof_method = method
+		self._metric_cache.clear()
 
 	def _weights_as_feature_output(self, weights: NDArray[np.float64]) -> NDArray[np.float64]:
 		"""
@@ -259,10 +267,11 @@ class GrangerAnalysisResults:
 		weights_arr = np.asarray(weights, dtype=np.float64)
 		if weights_arr.ndim != 2:
 			raise ValueError(f"Expected 2D weights, got shape {weights_arr.shape}")
-		if weights_arr.shape[0] == len(self.effects) and weights_arr.shape[1] != len(self.effects):
-			return weights_arr
-		if weights_arr.shape[1] == len(self.effects):
-			return weights_arr.T
+		expected = (len(self.effects), self.mask.shape[1])
+		if weights_arr.shape != expected:
+			raise ValueError(
+				f"Expected normalized weights with shape {expected}, got {weights_arr.shape}"
+			)
 		return weights_arr
 
 	def _effect_cause_matrix(self, values: NDArray[np.float64], *, name: str) -> CausalityMatrix:
@@ -303,6 +312,9 @@ class GrangerAnalysisResults:
 			base_predictions: NDArray[np.float64],
 			base_weights: NDArray[np.float64],
 			metadata: Optional[dict[str, Any]] = None,
+			active_slope_mask: NDArray[np.bool_] | None = None,
+			bias_enabled: bool = True,
+			role: Literal["unrestricted", "restricted"] | None = "unrestricted",
 		) -> None:
 			"""
 			Store the unrestricted base-model snapshot.
@@ -312,7 +324,19 @@ class GrangerAnalysisResults:
 				base_weights: Coefficient matrix for the unrestricted fit.
 				metadata: Optional metadata describing the fitted model state.
 			"""
-			self.base_snapshot = ModelSnapshot(predictions=ensure_2d(base_predictions), weights=np.asarray(base_weights, dtype=np.float64), metadata=metadata or {})
+			self.base_snapshot = ModelSnapshot(
+				predictions=ensure_2d(np.array(base_predictions, dtype=np.float64, copy=True)),
+				weights=np.array(base_weights, dtype=np.float64, copy=True),
+				active_slope_mask=None if active_slope_mask is None else np.array(active_slope_mask, dtype=bool, copy=True),
+				bias_enabled=bool(bias_enabled),
+				metadata=dict(metadata or {}),
+			)
+			self.base_model_role = role
+			if role == "unrestricted":
+				self.unrestricted_snapshots = {cause: self.base_snapshot for cause in self.causes}
+			elif role == "restricted":
+				self.restricted_snapshots = {cause: self.base_snapshot for cause in self.causes}
+			self.reference_snapshots = self.restricted_snapshots
 			self._rss_cache.pop("base", None)
 			self._metric_cache.clear()
 
@@ -322,6 +346,8 @@ class GrangerAnalysisResults:
 			reference_predictions: NDArray[np.float64],
 			reference_weights: NDArray[np.float64],
 			metadata: Optional[dict[str, Any]] = None,
+			active_slope_mask: NDArray[np.bool_] | None = None,
+			bias_enabled: bool = True,
 		) -> None:
 			"""
 			Store the reduced model that omits a single cause variable.
@@ -332,13 +358,81 @@ class GrangerAnalysisResults:
 				reference_weights: Coefficient matrix of the reduced model.
 				metadata: Optional metadata describing the restricted fit.
 			"""
-			self.reference_snapshots[cause] = ModelSnapshot(
-				predictions=ensure_2d(reference_predictions),
-				weights=np.asarray(reference_weights, dtype=np.float64),
-				metadata=metadata or {},
+			snapshot = ModelSnapshot(
+				predictions=ensure_2d(np.array(reference_predictions, dtype=np.float64, copy=True)),
+				weights=np.array(reference_weights, dtype=np.float64, copy=True),
+				active_slope_mask=None if active_slope_mask is None else np.array(active_slope_mask, dtype=bool, copy=True),
+				bias_enabled=bool(bias_enabled),
+				metadata=dict(metadata or {}),
 			)
+			self.reference_snapshots[cause] = snapshot
+			self.restricted_snapshots = self.reference_snapshots
+			self.restricted_snapshots[cause] = snapshot
 			self._rss_cache.pop(f"reference:{cause}", None)
 			self._metric_cache.clear()
+
+	def set_unrestricted_snapshot(
+		self,
+		cause: str,
+		predictions: NDArray[np.float64],
+		weights: NDArray[np.float64],
+		metadata: Optional[dict[str, Any]] = None,
+		active_slope_mask: NDArray[np.bool_] | None = None,
+		bias_enabled: bool = True,
+	) -> None:
+		snapshot = ModelSnapshot(
+			predictions=ensure_2d(np.array(predictions, dtype=np.float64, copy=True)),
+			weights=np.array(weights, dtype=np.float64, copy=True),
+			active_slope_mask=None if active_slope_mask is None else np.array(active_slope_mask, dtype=bool, copy=True),
+			bias_enabled=bool(bias_enabled),
+			metadata=dict(metadata or {}),
+		)
+		self.unrestricted_snapshots[cause] = snapshot
+		self._rss_cache.clear()
+		self._metric_cache.clear()
+
+	def set_restricted_snapshot(
+		self,
+		cause: str,
+		predictions: NDArray[np.float64],
+		weights: NDArray[np.float64],
+		metadata: Optional[dict[str, Any]] = None,
+		active_slope_mask: NDArray[np.bool_] | None = None,
+		bias_enabled: bool = True,
+	) -> None:
+		self.set_reference_snapshot(
+			cause,
+			predictions,
+			weights,
+			metadata,
+			active_slope_mask,
+			bias_enabled,
+		)
+
+	def register_snapshot(
+		self,
+		cause: str,
+		role: Literal["restricted", "unrestricted"],
+		snapshot: ModelSnapshot,
+	) -> None:
+		"""Register an existing snapshot for one cause and analysis role."""
+		if role == "restricted":
+			self.restricted_snapshots[cause] = snapshot
+			self.reference_snapshots = self.restricted_snapshots
+		elif role == "unrestricted":
+			self.unrestricted_snapshots[cause] = snapshot
+		else:
+			raise ValueError("role must be 'restricted' or 'unrestricted'")
+		self._rss_cache.clear()
+		self._metric_cache.clear()
+
+	def get_snapshot(
+		self,
+		cause: str,
+		role: Literal["restricted", "unrestricted"],
+	) -> ModelSnapshot:
+		"""Retrieve the snapshot registered for a cause and role."""
+		return self._snapshot_for(cause, role)
 
 	def n_restrictions_for(self, cause: str) -> NDArray[np.int_]:
 		"""
@@ -361,14 +455,14 @@ class GrangerAnalysisResults:
 				f"Missing feature slice for tested cause: {cause!r}"
 			)
 
-		if self.mask.size == 0:
-			return np.zeros(len(self.effects), dtype=np.int_)
-
-		if self.mask.ndim != 2 or self.mask.shape[0] != len(self.effects):
-			raise ValueError(
-				"Expected mask with shape "
-				f"(n_effects, n_features); got {self.mask.shape}"
-			)
+		unrestricted = self._snapshot_for(cause, "unrestricted")
+		restricted = self._snapshot_for(cause, "restricted")
+		u_mask = self._require_snapshot_mask(unrestricted)
+		r_mask = self._require_snapshot_mask(restricted)
+		if u_mask.shape != r_mask.shape or u_mask.shape[0] != len(self.effects):
+			raise ValueError("Restricted and unrestricted masks must have matching output/feature shapes.")
+		if np.any(r_mask & ~u_mask):
+			raise ValueError("Restricted active positions must be a subset of unrestricted positions.")
 
 		block = self.cause_slices[cause]
 		if not isinstance(block, slice):
@@ -380,35 +474,24 @@ class GrangerAnalysisResults:
 			block.start is None
 			or block.stop is None
 			or block.step not in (None, 1)
-			or not 0 <= block.start <= block.stop <= self.mask.shape[1]
+			or not 0 <= block.start <= block.stop <= u_mask.shape[1]
 		):
 			raise ValueError(
 				f"Invalid feature slice for cause {cause!r}: {block!r}; "
-				f"mask has {self.mask.shape[1]} feature columns"
+				f"mask has {u_mask.shape[1]} feature columns"
 			)
 
-		mask_block = self.mask[:, block]
-
-		if (
-			self.dof_method == "active_support"
-			and self.base_snapshot is not None
-			and self.base_snapshot.weights is not None
-		):
-			weights = self._weights_as_feature_output(
-				self.base_snapshot.weights
-			)
-
-			if weights.shape != self.mask.shape:
-				raise ValueError(
-					f"Weight shape {weights.shape} does not match "
-					f"mask shape {self.mask.shape}"
-				)
-
-			mask_block = mask_block & (np.abs(weights[:, block]) > 0.0)
-
-		return np.asarray(mask_block.sum(axis=1), dtype=np.int_)
+		tested = u_mask & ~r_mask
+		if self.dof_method == "active_support":
+			if unrestricted.weights is None:
+				raise ValueError("Active-support counts require unrestricted weights.")
+			weights = self._weights_as_feature_output(unrestricted.weights)
+			if weights.shape != u_mask.shape:
+				raise ValueError("Unrestricted weights and mask must have matching shapes.")
+			tested = tested & (np.abs(weights) > self.active_support_tolerance)
+		return np.asarray(tested.sum(axis=1), dtype=np.int_)
 	
-	def n_unrestricted_parameters(self) -> int:
+	def n_unrestricted_parameters(self, cause: str | None = None) -> NDArray[np.int_]:
 		"""
 		Calculate the model-width proxy used for residual degree-of-freedom
 		calculations.
@@ -417,12 +500,31 @@ class GrangerAnalysisResults:
 			Number of unrestricted parameters, falling back to the stored
 			explanatory matrix width when no base snapshot is present.
 		"""
-		if self.base_snapshot is not None and self.base_snapshot.weights is not None:
-			weights = self._weights_as_feature_output(self.base_snapshot.weights)
-			return int(max(weights.shape[1], 1))
-		if self.X_true.size:
-			return int(max(self.X_true.shape[1], 1))
-		return 1
+		if cause is None:
+			cause = self.causes[0] if self.causes else ""
+		snapshot = self._snapshot_for(cause, "unrestricted")
+		mask = self._require_snapshot_mask(snapshot)
+		counts = mask.sum(axis=1).astype(np.int_)
+		return counts + int(snapshot.bias_enabled)
+
+	def _snapshot_for(self, cause: str, role: Literal["restricted", "unrestricted"]) -> ModelSnapshot:
+		mapping = self.restricted_snapshots if role == "restricted" else self.unrestricted_snapshots
+		if cause not in mapping:
+			raise ValueError(f"{role.title()} snapshot for cause '{cause}' is not available")
+		return mapping[cause]
+
+	@staticmethod
+	def _require_snapshot_mask(snapshot: ModelSnapshot) -> NDArray[np.bool_]:
+		if snapshot.active_slope_mask is None:
+			raise ValueError("Snapshot is missing its active slope mask")
+		return np.array(snapshot.active_slope_mask, dtype=bool, copy=False)
+
+	def unrestricted_rss_per_output(self, cause: str) -> NDArray[np.float64]:
+		snapshot = self._snapshot_for(cause, "unrestricted")
+		key = f"unrestricted:{id(snapshot)}"
+		if key not in self._rss_cache:
+			self._rss_cache[key] = residual_sum_of_squares(self.y_true, snapshot.predictions)
+		return self._rss_cache[key]
 
 	def base_rss_per_output(self) -> NDArray[np.float64]:
 		"""
@@ -457,11 +559,9 @@ class GrangerAnalysisResults:
 		Raises:
 			ValueError: If the cause does not have a stored reference snapshot.
 		"""
-		if cause not in self.reference_snapshots:
-			raise ValueError(f"Reference snapshot for cause '{cause}' is not available")
-		cache_key = f"reference:{cause}"
+		snapshot = self._snapshot_for(cause, "restricted")
+		cache_key = f"restricted:{id(snapshot)}"
 		if cache_key not in self._rss_cache:
-			snapshot = self.reference_snapshots[cause]
 			self._rss_cache[cache_key] = residual_sum_of_squares(
 				self.y_true,
 				snapshot.predictions,

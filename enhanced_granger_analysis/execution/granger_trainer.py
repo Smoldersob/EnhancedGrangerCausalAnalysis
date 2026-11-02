@@ -35,113 +35,79 @@ class GrangerTrainer:
         prepared: PreparedData,
         initial_weights: Sequence[np.ndarray] | None = None,
     ) -> FitOutcome:
-        """Fit the unrestricted model and capture its artifacts."""
-
-        # Teporary restriction: 
-        # The standard Granger workflow currently requires all prepared rows to belong to training.
-        # Use the split-aware executor for HPO. Prepare a separate analytical sample for final refitting.
-        self._require_full_training_sample(prepared)
-
-        timings: dict[str, float] = {}
-
-        started = perf_counter()
-
-        if initial_weights is not None:
-            self._restore_weights(model, initial_weights)
-
-        timings["restore_weights"] = perf_counter() - started
-
-        started = perf_counter()
-
-        model.omit_variables([])
-
-        timings["update_mask"] = perf_counter() - started
-
-        started = perf_counter()
-
-        model.reset_components(
-            reset_optimizer=True,
-            reset_callbacks=True,
+        """Fit the adapter's configured baseline state."""
+        return self._fit_model(
+            model=model,
+            prepared=prepared,
+            cause=None,
+            initial_weights=initial_weights,
             run_name="base_model",
+            restricted=False,
         )
 
-        timings["reset_components"] = perf_counter() - started
-
-        started = perf_counter()
-
-        training_result = self._executor.fit(
-            model=model,
-            X=prepared.X_scaled,
-            y=prepared.y_scaled,
-            reset_components=False,
-        )
-
-        timings["fit_model"] = perf_counter() - started
-
-        return self._capture_outcome(
-            model=model,
-            X=prepared.X_scaled,
-            training_result=training_result,
-            timings=timings,
+    def fit_unrestricted(
+        self, *, model: GrangerModelProtocol, prepared: PreparedData,
+        cause: str, base_weights: Sequence[np.ndarray] | None = None,
+        initial_weights: Sequence[np.ndarray] | None = None,
+    ) -> FitOutcome:
+        return self._fit_model(
+            model=model, prepared=prepared, cause=cause,
+            base_weights=base_weights, initial_weights=initial_weights,
+            run_name=f"unrestricted_cause_{tuple(prepared.causes).index(cause)}",
+            restricted=False,
         )
 
     def fit_restricted(
-        self,
-        *,
-        model: GrangerModelProtocol,
-        prepared: PreparedData,
-        cause: str,
-        base_weights: Sequence[np.ndarray] | None,
+        self, *, model: GrangerModelProtocol, prepared: PreparedData,
+        cause: str, base_weights: Sequence[np.ndarray] | None = None,
         initial_weights: Sequence[np.ndarray] | None = None,
-        start_with_base: bool = True,
-        start_with_initial: bool = False,
     ) -> FitOutcome:
-        """Fit one restricted model and capture its artifacts."""
-        
-        # Teporary restriction: 
-        # The standard Granger workflow currently requires all prepared rows to belong to training.
-        # Use the split-aware executor for HPO. Prepare a separate analytical sample for final refitting.
+        return self._fit_model(
+            model=model, prepared=prepared, cause=cause,
+            base_weights=base_weights, initial_weights=initial_weights,
+            run_name=f"restricted_cause_{tuple(prepared.causes).index(cause)}",
+            restricted=True,
+        )
+
+    def _fit_model(
+        self, *, model: GrangerModelProtocol, prepared: PreparedData,
+        cause: str | None = None,
+        base_weights: Sequence[np.ndarray] | None = None,
+        initial_weights: Sequence[np.ndarray] | None = None,
+        run_name: str = "model",
+        restricted: bool,
+    ) -> FitOutcome:
+        """Fit one explicit configuration without owning result storage."""
+
         self._require_full_training_sample(prepared)
-
-        if base_weights is None:
-            raise DataValidationError(
-                "fit_base() must be completed before fit_restricted()."
-            )
-
-        if cause not in prepared.cause_slices:
+        if cause is not None and cause not in prepared.cause_slices:
             raise DataValidationError(
                 f"Unknown cause: {cause!r}."
             )
 
         timings: dict[str, float] = {}
-
         started = perf_counter()
-
-        if start_with_initial and initial_weights is not None:
-            self._restore_weights(model, initial_weights)
-        elif start_with_base:
+        if base_weights is not None:
             self._restore_weights(model, base_weights)
+        elif initial_weights is not None:
+            self._restore_weights(model, initial_weights)
 
         timings["restore_weights"] = perf_counter() - started
-
         started = perf_counter()
-
-        block = prepared.cause_slices[cause]
-
-        model.omit_variables(
-            list(range(block.start, block.stop))
-        )
-
+        indices = [] if cause is None else list(range(
+            prepared.cause_slices[cause].start,
+            prepared.cause_slices[cause].stop,
+        ))
+        if restricted:
+            model.omit_variables(indices)
+        else:
+            model.add_variables(indices)
         timings["update_mask"] = perf_counter() - started
-
-        cause_index = tuple(prepared.causes).index(cause)
-
         started = perf_counter()
-
         model.reset_components(
             reset_optimizer=True,
             reset_callbacks=True,
-            run_name=f"reference_cause_{cause_index}",
+            run_name=run_name,
         )
 
         timings["reset_components"] = perf_counter() - started
@@ -185,11 +151,29 @@ class GrangerTrainer:
             for weight in model.get_weights()
         ]
 
+        active_mask_getter = getattr(model, "get_active_mask", None)
+        if callable(active_mask_getter):
+            active_mask = np.asarray(active_mask_getter(), dtype=bool).copy()
+        else:
+            structural = getattr(getattr(model, "constraint", None), "mask", None)
+            if structural is None:
+                active_mask = np.ones(
+                    (model.input_spec.n_outputs, model.input_spec.n_features),
+                    dtype=bool,
+                )
+            else:
+                active_mask = np.asarray(structural, dtype=bool).copy()
+            omitted = np.asarray(getattr(model, "omitted", []), dtype=np.intp)
+            if omitted.size:
+                active_mask[:, omitted] = False
+
         return FitOutcome(
             predictions=predictions,
             weights=weights,
             training_result=training_result,
             timings=dict(timings),
+            active_slope_mask=active_mask,
+            bias_enabled=bool(getattr(model, "use_bias", len(weights) > 1)),
         )
 
     @staticmethod

@@ -722,6 +722,10 @@ class MultiTaskGrangerBuilder:
         if self._results is not None:
             self._results.base_snapshot = None
             self._results.reference_snapshots.clear()
+            self._results.restricted_snapshots.clear()
+            self._results.unrestricted_snapshots.clear()
+            self._results._rss_cache.clear()
+            self._results._metric_cache.clear()
 
         return self._model
 
@@ -1016,5 +1020,9 @@ class MultiTaskGrangerBuilder:
             # Keep preparation context, but discard results of the old model.
             self._results.base_snapshot = None
             self._results.reference_snapshots.clear()
+            self._results.restricted_snapshots.clear()
+            self._results.unrestricted_snapshots.clear()
+            self._results._rss_cache.clear()
+            self._results._metric_cache.clear()
 
 MultitaskGrangerBuilder = MultiTaskGrangerBuilder

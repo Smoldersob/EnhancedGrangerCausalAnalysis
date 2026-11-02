@@ -142,6 +142,7 @@ def wald_test_value(
     coefficient_mask: NDArray[np.float64],
     start: int,
     end: int,
+    tested_mask: NDArray[np.bool_] | None = None,
 ) -> NDArray[np.float64]:
     """Return one Wald statistic per output; NaN if structurally untestable."""
     weights_arr = np.asarray(weights, dtype=np.float64)
@@ -164,11 +165,19 @@ def wald_test_value(
     if not (0 <= start < end <= n_features):
         raise ResultsError(f"Invalid tested coefficient block [{start}:{end}]")
 
-    cause_indices = np.arange(start, end)
+    if tested_mask is not None:
+        tested_arr = np.asarray(tested_mask, dtype=bool)
+        if tested_arr.shape != mask_arr.shape:
+            raise ResultsError(
+                f"tested_mask shape {tested_arr.shape} does not match {mask_arr.shape}"
+            )
+    else:
+        tested_arr = np.zeros_like(mask_arr, dtype=bool)
+        tested_arr[:, start:end] = True
     statistics = np.full(n_outputs, np.nan, dtype=np.float64)
 
     for out_idx in range(n_outputs):
-        tested_idx = cause_indices[mask_arr[out_idx, cause_indices]]
+        tested_idx = np.flatnonzero(mask_arr[out_idx] & tested_arr[out_idx])
 
         if tested_idx.size == 0:
             continue
@@ -207,6 +216,8 @@ def f_test_value(
             "Unrestricted residual degrees of freedom must be > 0, got "
             f"n_samples={n_samples}, n_unrestricted_parameters={n_unrestricted_parameters}"
         )
+    if np.any(n_restrictions == 0):
+        return np.full_like(np.asarray(error_base, dtype=np.float64), np.nan)
 
     err_ref = np.asarray(error_ref, dtype=np.float64)
     err_base = np.asarray(error_base, dtype=np.float64)
@@ -214,9 +225,9 @@ def f_test_value(
     if err_ref.shape != err_base.shape:
         raise ResultsError("error_ref and error_base must have the same shape")
 
-    numerator = np.max([err_ref - err_base, err_base * 0], axis=0) / np.maximum(n_restrictions, np.finfo(np.float64).eps)
+    numerator = (err_ref - err_base) / n_restrictions
     denominator = err_base / residual_df
-    return numerator / np.maximum(denominator, np.finfo(np.float64).eps)
+    return numerator / denominator
 
 
 def likelihood_ratio_test_value(

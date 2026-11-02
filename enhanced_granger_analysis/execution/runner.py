@@ -167,25 +167,43 @@ class AnalysisRunner:
 		backend: str | None = None,
 		fit_restricted: bool = True,
 	) -> GrangerAnalysisResults:
-		"""Fit the base model and optionally all restricted models."""
+		"""Run the sequence selected by the adapter's baseline role."""
+		role = getattr(model, "base_model_role", "unrestricted")
+		if role is None:
+			if fit_restricted:
+				for cause in prepared.tested_causes:
+					self.fit_unrestricted(
+						model=model, prepared=prepared, results=progress.results,
+						cause=cause, initial_weights=initial_weights, backend=backend,
+					)
+				for cause in prepared.tested_causes:
+					self.fit_restricted(
+						model=model, prepared=prepared, results=progress.results,
+						cause=cause, initial_weights=initial_weights, backend=backend,
+					)
+			return progress.results
 
-		progress.base_weights = self.fit_base(
-			model=model,
-			prepared=prepared,
-			results=progress.results,
-			initial_weights=initial_weights,
-			backend=backend,
+		base_outcome = self.fit_base(
+			model=model, prepared=prepared, results=progress.results,
+			initial_weights=initial_weights, backend=backend,
 		)
+		progress.base_weights = [np.asarray(w).copy() for w in base_outcome]
+		if not fit_restricted:
+			return progress.results
 
-		if fit_restricted:
-			self.fit_restricted_models(
-				model=model,
-				prepared=prepared,
-				results=progress.results,
-				base_weights=progress.base_weights,
-				initial_weights=initial_weights,
-				backend=backend,
-			)
+		for cause in prepared.tested_causes:
+			if role == "unrestricted":
+				self.fit_restricted(
+					model=model, prepared=prepared, results=progress.results,
+					cause=cause, base_weights=progress.base_weights,
+					backend=backend,
+				)
+			else:
+				self.fit_unrestricted(
+					model=model, prepared=prepared, results=progress.results,
+					cause=cause, base_weights=progress.base_weights,
+					backend=backend,
+				)
 
 		return progress.results
 
@@ -212,12 +230,10 @@ class AnalysisRunner:
 			cause=None,
 			outcome=outcome,
 			backend=backend,
+			role=getattr(model, "base_model_role", "unrestricted"),
 		)
 
-		return [
-			np.asarray(weight).copy()
-			for weight in outcome.weights
-		]
+		return [np.asarray(weight).copy() for weight in outcome.weights]
 
 	def fit_restricted(
 		self,
@@ -240,16 +256,25 @@ class AnalysisRunner:
 			cause=cause,
 			base_weights=base_weights,
 			initial_weights=initial_weights,
-			start_with_base=start_with_base,
-			start_with_initial=start_with_initial,
 		)
-
 		self.store_fit_outcome(
 			prepared=prepared,
 			results=results,
 			cause=cause,
 			outcome=outcome,
 			backend=backend,
+			role="restricted",
+		)
+
+	def fit_unrestricted(self, *, model, prepared, results, cause,
+		base_weights=None, initial_weights=None, backend=None) -> None:
+		outcome = self._trainer.fit_unrestricted(
+			model=model, prepared=prepared, cause=cause,
+			base_weights=base_weights, initial_weights=initial_weights,
+		)
+		self.store_fit_outcome(
+			prepared=prepared, results=results, cause=cause,
+			outcome=outcome, backend=backend, role="unrestricted",
 		)
 
 	def fit_restricted_models(
@@ -285,6 +310,7 @@ class AnalysisRunner:
 		cause: str | None,
 		outcome: FitOutcome,
 		backend: str | None = None,
+		role: str | None = None,
 	) -> None:
 		"""Convert model-scale artifacts to the analysis snapshot format."""
 
@@ -292,10 +318,8 @@ class AnalysisRunner:
 			outcome.predictions
 		)
 
-		weights = np.asarray(
-			outcome.weights[0],
-			dtype=float,
-		).copy()
+		raw_weights = np.asarray(outcome.weights[0], dtype=float)
+		weights = raw_weights.T.copy()
 
 		metadata = {
 			"timings": dict(outcome.timings),
@@ -307,6 +331,15 @@ class AnalysisRunner:
 				predictions,
 				weights,
 				metadata,
+				active_slope_mask=outcome.active_slope_mask,
+				bias_enabled=outcome.bias_enabled,
+				role=role,
+			)
+		elif role == "unrestricted":
+			results.set_unrestricted_snapshot(
+				cause, predictions, weights, metadata,
+				active_slope_mask=outcome.active_slope_mask,
+				bias_enabled=outcome.bias_enabled,
 			)
 		else:
 			results.set_reference_snapshot(
@@ -314,6 +347,8 @@ class AnalysisRunner:
 				predictions,
 				weights,
 				metadata,
+				active_slope_mask=outcome.active_slope_mask,
+				bias_enabled=outcome.bias_enabled,
 			)
 
 	@staticmethod
@@ -335,10 +370,8 @@ class AnalysisRunner:
 			)
 		)
 
-		weights = np.asarray(
-			model.get_weights()[0],
-			dtype=float,
-		).copy()
+		raw_weights = np.asarray(model.get_weights()[0], dtype=float)
+		weights = raw_weights.T.copy()
 
 		metadata = dict(additional_metadata or {})
 		metadata["backend"] = backend
@@ -348,6 +381,8 @@ class AnalysisRunner:
 				predictions,
 				weights,
 				metadata,
+				active_slope_mask=model.get_active_mask(),
+				bias_enabled=model.use_bias,
 			)
 		else:
 			results.set_reference_snapshot(
@@ -355,6 +390,8 @@ class AnalysisRunner:
 				predictions,
 				weights,
 				metadata,
+				active_slope_mask=model.get_active_mask(),
+				bias_enabled=model.use_bias,
 			)
 
 	@staticmethod

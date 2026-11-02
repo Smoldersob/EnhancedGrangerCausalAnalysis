@@ -140,6 +140,10 @@ class KerasConditionalAdapter:
 		return "keras"
 
 	@property
+	def base_model_role(self) -> str:
+		return "unrestricted"
+
+	@property
 	def input_spec(self) -> ModelInputSpec:
 		return self._input_spec
 	
@@ -550,6 +554,24 @@ class KerasConditionalAdapter:
 
 		with self.device_manager.scope():
 			network.variable_control_layer.mask.assign(mask)
+
+	def add_variables(self, variable_indices: Sequence[int]) -> None:
+		indices = list(variable_indices)
+		if any(isinstance(index, (bool, np.bool_)) or not isinstance(index, (int, np.integer)) for index in indices):
+			raise TypeError("Feature indices must be integers, not booleans.")
+		if any(index < 0 or index >= int(self._n_features) for index in indices):
+			raise ValueError("Feature index is out of range.")
+		self.omit_variables([])
+
+	def get_active_mask(self) -> np.ndarray:
+		network = self._require_model()
+		structural = (
+			np.ones((self._n_outputs, self._n_features), dtype=bool)
+			if self.constraint is None
+			else np.asarray(network.coefficient_layer.kernel_constraint.mask, dtype=bool)
+		)
+		control = np.asarray(network.variable_control_layer.mask, dtype=bool)
+		return np.array(structural & control[None, :], dtype=bool, copy=True)
 
 	def reset_callbacks(
 		self,
