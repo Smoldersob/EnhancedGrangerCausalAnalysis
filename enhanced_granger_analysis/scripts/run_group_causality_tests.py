@@ -381,6 +381,17 @@ def run_from_config(script_config_path: str | Path, save_mode: str = "minimum", 
 				train_only_unrestricted=(selected_test == "wald"),
 			)
 
+			# Evaluation options belong to the script, not model_config.
+			results.set_dof_method(
+				script_cfg.get("dof_method", "structural"),
+				rank_rcond=script_cfg.get("rank_rcond"),
+			)
+			if results.dof_method == "rank":
+				diagnostic_path = output_dir / _build_result_filename(
+					case_idx, backend, param_names, case_values, "rank_diagnostics"
+				)
+				results.rank_diagnostics().to_csv(diagnostic_path, index=False)
+
 			# Extract and save all result matrices
 			statistic_name, p_value_name = test_metrics[selected_test]
 			test_df = results.evaluate(statistic_name)
@@ -419,6 +430,8 @@ def run_from_config(script_config_path: str | Path, save_mode: str = "minimum", 
 				"case_id": case_idx,
 				"backend": backend,
 				"test_type": selected_test,
+				"dof_method": script_cfg.get("dof_method", "structural"),
+				"rank_rcond": script_cfg.get("rank_rcond"),
 				"causality_file": causality_path.name,
 				"signed_result": "True" if with_sign else "False",
 				"p_value_file": p_value_path.name if save_mode == "matrices" else "NOT_SAVED",
@@ -443,6 +456,8 @@ def run_from_config(script_config_path: str | Path, save_mode: str = "minimum", 
 				"case_id": case_idx,
 				"backend": backend,
 				"test_type": selected_test,
+				"dof_method": script_cfg.get("dof_method", "structural"),
+				"rank_rcond": script_cfg.get("rank_rcond"),
 				"causality_file": "FAILED",
 				"p_value_file": "FAILED",
 				"test_file": "FAILED",

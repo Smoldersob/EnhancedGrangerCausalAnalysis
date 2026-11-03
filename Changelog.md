@@ -1001,10 +1001,10 @@ that all backends have been validated or that a release has been published.
 - Legacy `hiperoptimalization_state` and `hiperoptimalization_conf` settings
   are rejected with an actionable migration message.
 
-## [3.0.0] - Unreleased
+## 2.12.0 
 
 ### Overview
-First development update for version 3. Refactored model configuration,
+First developt as attepmt to create update for version 3. Later changed to be fix and update to version 2, because of its importance to results. It refactors model configuration,
 training order, snapshot storage, and statistical evaluation to support
 shared unrestricted baselines, shared restricted baselines, and analyses
 without a shared baseline.
@@ -1021,6 +1021,7 @@ without a shared baseline.
   statistics and their p-values against independent OLS reference fits.
 - Added regression coverage for rectangular result matrices, mixed
   restriction counts, scaling consistency, and active-support counting.
+- Added new option for calculating the restrictions count named `rank`. It is counts number of degrees of freedom of model base on lags selected by mask and rank of the used subset used for calculating the output.
 
 ### Changed
 - Defined variable addition and omission relative to the baseline

@@ -21,7 +21,7 @@ from .causality_matrix import CausalityMatrix
 from .restoration import restore_removed_matrix
 from .statistics import ensure_2d, residual_sum_of_squares
 
-DofMethod = Literal["structural", "active_support"]
+DofMethod = Literal["structural", "active_support", "rank"]
 
 
 @dataclass
@@ -145,6 +145,8 @@ class GrangerAnalysisResults:
 		self.X_true = ensure_2d(np.asarray(X_true, dtype=np.float64)) if X_true is not None else np.empty((0, 0), dtype=np.float64)
 		self.dof_method: DofMethod = "structural"
 		self.active_support_tolerance = 1e-12
+		self.rank_rcond = None
+		self._rank_cache = {}
 		self.base_snapshot: ModelSnapshot | None = None
 		self.reference_snapshots: dict[str, ModelSnapshot] = {}
 		self.restricted_snapshots: dict[str, ModelSnapshot] = self.reference_snapshots
@@ -235,20 +237,17 @@ class GrangerAnalysisResults:
 		"""Return coefficient-derived signs with removed variables restored."""
 		return self.evaluate("sign", restore_removed=True).data
 
-	def set_dof_method(self, method: DofMethod) -> None:
-		"""
-		Select the convention used to count residual degrees of freedom.
-
-		Args:
-			method: Either ``"structural"`` or ``"active_support"``.
-
-		Raises:
-			ValueError: If the method name is unsupported.
-		"""
-		if method not in {"structural", "active_support"}:
-			raise ValueError("dof method must be 'structural' or 'active_support'")
+	def set_dof_method(self, method, *, rank_rcond=None):
+		"""Select structural, active-support, or numerical-rank counting."""
+		if method not in {"structural", "active_support", "rank"}:
+			raise ValueError("dof method must be structural, active_support, or rank")
+		if rank_rcond is not None and (isinstance(rank_rcond, (bool, np.bool_))
+				or not np.isfinite(rank_rcond) or not 0 <= rank_rcond < 1):
+			raise ValueError("rank_rcond must be None or a finite number in [0, 1)")
 		self.dof_method = method
+		self.rank_rcond = None if rank_rcond is None else float(rank_rcond)
 		self._metric_cache.clear()
+		self._rank_cache.clear()
 
 	def _weights_as_feature_output(self, weights: NDArray[np.float64]) -> NDArray[np.float64]:
 		"""
@@ -339,6 +338,7 @@ class GrangerAnalysisResults:
 			self.reference_snapshots = self.restricted_snapshots
 			self._rss_cache.clear()
 			self._metric_cache.clear()
+			self._rank_cache.clear()
 
 	def set_reference_snapshot(
 			self,
@@ -370,6 +370,7 @@ class GrangerAnalysisResults:
 			self.restricted_snapshots[cause] = snapshot
 			self._rss_cache.clear()
 			self._metric_cache.clear()
+			self._rank_cache.clear()
 
 	def set_unrestricted_snapshot(
 		self,
@@ -390,6 +391,7 @@ class GrangerAnalysisResults:
 		self.unrestricted_snapshots[cause] = snapshot
 		self._rss_cache.clear()
 		self._metric_cache.clear()
+		self._rank_cache.clear()
 
 	def set_restricted_snapshot(
 		self,
@@ -425,6 +427,7 @@ class GrangerAnalysisResults:
 			raise ValueError("role must be 'restricted' or 'unrestricted'")
 		self._rss_cache.clear()
 		self._metric_cache.clear()
+		self._rank_cache.clear()
 
 	def get_snapshot(
 		self,
@@ -447,6 +450,8 @@ class GrangerAnalysisResults:
 		Raises:
 			ValueError: If the cause name is not part of the configured causal set.
 		"""
+		if self.dof_method == "rank":
+			return np.array([g["q"] for g in self._rank_geometry_for(cause)], dtype=np.int_)
 		if cause not in self.causes:
 			raise ValueError(f"Unknown tested cause: {cause!r}")
 
@@ -495,6 +500,12 @@ class GrangerAnalysisResults:
 	
 	def n_unrestricted_parameters(self, cause=None):
 		"""Count enabled unrestricted slopes and bias per output."""
+		if self.dof_method == "rank":
+			if cause is None:
+				if not self.causes:
+					raise ValueError("A tested cause is required")
+				cause = self.causes[0]
+			return np.array([g["rank_u"] for g in self._rank_geometry_for(cause)], dtype=np.int_)
 		if cause is None:
 			if not self.causes:
 				raise ValueError("A tested cause is required")
@@ -507,6 +518,109 @@ class GrangerAnalysisResults:
 			weights = self._weights_as_feature_output(snapshot.weights)
 			mask &= np.abs(weights) > self.active_support_tolerance
 		return mask.sum(axis=1).astype(np.int_) + int(snapshot.bias_enabled)
+
+	def _rank_coordinates(self, snapshot):
+		"""Return observations and predictions in the snapshot's model coordinates."""
+		space = snapshot.metadata.get("coefficient_space")
+		if space == "model":
+			if self.preparation_context is None:
+				raise ValueError("Rank evaluation requires the model preparation context")
+			data = self.preparation_context.prepared_data
+			x, y = data.X_scaled, data.y_scaled
+			pred = snapshot.metadata.get("model_predictions")
+			if pred is None:
+				raise ValueError("Snapshot lacks model-space predictions; refit")
+		elif space == "raw" or (space is None and self.preparation_context is None):
+			x, y, pred = self.X_true, self.y_true, snapshot.predictions
+		else:
+			raise ValueError("Ambiguous snapshot coordinates; refit or declare raw coordinates")
+		x, y, pred = [np.asarray(a, dtype=float) for a in (x, y, pred)]
+		if x.ndim != 2 or y.ndim != 2 or pred.shape != y.shape:
+			raise ValueError("Invalid rank-evaluation array dimensions")
+		if x.shape[0] != self.n_samples or y.shape != self.y_true.shape:
+			raise ValueError("Rank evaluation requires the same observations and output order")
+		if not all(np.isfinite(a).all() for a in (x, y, pred)):
+			raise ValueError("Rank-evaluation arrays must be finite")
+		return x, y, pred
+
+
+	def _rank_geometry_for(self, cause):
+		"""Cache the nested design geometry per cause and snapshot pair."""
+		from .statistics import nested_design_geometry
+		if cause not in self.causes:
+			raise ValueError(f"Unknown tested cause: {cause!r}")
+		u, r = self.get_snapshot(cause, "unrestricted"), self.get_snapshot(cause, "restricted")
+		key = (id(u), id(r), self.rank_rcond)
+		if key in self._rank_cache:
+			return self._rank_cache[key]
+		um, rm = self._require_snapshot_mask(u), self._require_snapshot_mask(r)
+		x, _, _ = self._rank_coordinates(u)
+		expected = (len(self.effects), x.shape[1])
+		if um.shape != expected or rm.shape != expected or np.any(rm & ~um):
+			raise ValueError("Rank mode requires matching nested slope masks")
+		if u.bias_enabled != r.bias_enabled:
+			raise ValueError("Rank mode requires matching intercept settings")
+		geometries = []
+		for j in range(len(self.effects)):
+			du, dr = x[:, um[j]], x[:, rm[j]]
+			if u.bias_enabled:
+				ones = np.ones((len(x), 1))
+				du, dr = np.column_stack([ones, du]), np.column_stack([ones, dr])
+			geometries.append(nested_design_geometry(du, dr, rcond=self.rank_rcond))
+		self._rank_cache[key] = geometries
+		return geometries
+
+
+	def rank_wald_per_output(self, cause):
+		"""Test identifiable added prediction directions, not arbitrary aliased coefficients.
+
+		This rank-mode Wald uses fitted unrestricted means and classical OLS
+		residual variance. It does not need a fitted restricted model.
+		"""
+		u = self.get_snapshot(cause, "unrestricted")
+		_, y, pred = self._rank_coordinates(u)
+		values = np.full(len(self.effects), np.nan)
+		for j, g in enumerate(self._rank_geometry_for(cause)):
+			if g["q"] == 0:
+				continue
+			df = self.n_samples - g["rank_u"]
+			if df <= 0:
+				raise ValueError("Rank-mode residual degrees of freedom must be positive")
+			qu, qa = g["basis_u"], g["basis_added"]
+			# Reject a changed effective model rather than silently mixing rank
+			# truncation with a fit that used different prediction directions.
+			projection_error = np.linalg.norm(pred[:, j] - qu @ (qu.T @ pred[:, j]))
+			if projection_error > 1e-7 * max(1., np.linalg.norm(pred[:, j])):
+				raise ValueError("Fitted U is outside the retained rank space; align fitting and rank tolerance")
+			score = np.linalg.norm(qu.T @ (y[:, j] - pred[:, j]))
+			if score > 1e-7 * max(1., np.linalg.norm(qu.T @ y[:, j])):
+				raise ValueError("Rank-mode Wald requires an OLS-equivalent unrestricted fit")
+			sigma2 = np.sum((y[:, j] - pred[:, j]) ** 2) / df
+			numerator = np.sum((qa.T @ pred[:, j]) ** 2)
+			if sigma2 > 0:
+				values[j] = numerator / sigma2
+			elif numerator > 0:
+				values[j] = np.inf
+		return values
+
+
+	def rank_diagnostics(self):
+		"""Return per-output design ranks and structural counts as a DataFrame."""
+		records = []
+		for cause in self.causes:
+			u, r = self.get_snapshot(cause, "unrestricted"), self.get_snapshot(cause, "restricted")
+			um, rm = self._require_snapshot_mask(u), self._require_snapshot_mask(r)
+			for j, g in enumerate(self._rank_geometry_for(cause)):
+				s = g["singular_u"]
+				condition = float(s[0] / s[-1]) if s.size and s[-1] > 0 else np.inf
+				records.append(dict(cause=cause, effect=self.effects[j],
+					k_u_structural=int(um[j].sum()) + int(u.bias_enabled),
+					k_u_rank=g["rank_u"], k_r_rank=g["rank_r"],
+					q_structural=int(np.count_nonzero(um[j] & ~rm[j])), q_rank=g["q"],
+					residual_df=self.n_samples-g["rank_u"], cutoff=g["cutoff"],
+					smallest_singular=float(s[-1]) if s.size else 0., condition=condition,
+					restricted_fit_performed=r.metadata.get("fit_performed")))
+		return pd.DataFrame.from_records(records)
 
 	def _snapshot_for(self, cause: str, role: Literal["restricted", "unrestricted"]) -> ModelSnapshot:
 		mapping = self.restricted_snapshots if role == "restricted" else self.unrestricted_snapshots
