@@ -696,7 +696,12 @@ class GrangerAnalysisResults:
 					q_structural=int(np.count_nonzero(um[j] & ~rm[j])), q_rank=g["q"],
 					residual_df=self.n_samples-g["rank_u"], cutoff=g["cutoff"],
 					smallest_singular=float(s[-1]) if s.size else 0., condition=condition,
-					restricted_fit_performed=r.metadata.get("fit_performed")))
+					restricted_fit_performed=r.metadata.get("fit_performed"),
+					nesting_error=g["nesting_error"],
+					nesting_tolerance=g["nesting_tolerance"],
+					is_nested=g["is_nested"],
+					added_basis_valid=g["added_basis_valid"],
+					geometry_status=g["geometry_status"]))
 		return pd.DataFrame.from_records(records)
 
 	def _snapshot_for(self, cause: str, role: Literal["restricted", "unrestricted"]) -> ModelSnapshot:
