@@ -58,6 +58,7 @@ class _RecordingModel:
             np.zeros(input_spec.n_outputs, dtype=float),
         ]
 
+        self.added = []
         self.omitted = []
         self.reset_calls = []
         self.component_reset_calls = []
@@ -76,6 +77,9 @@ class _RecordingModel:
 
     def omit_variables(self, variable_indices):
         self.omitted = list(variable_indices)
+
+    def add_variables(self, variable_indices):
+        self.added = list(variable_indices)
 
     def reset_components(
         self,
@@ -260,7 +264,7 @@ def test_builder_reuses_one_model_and_restricted_runs_start_from_base_weights(
     restricted_run_names = run_names[1:]
 
     assert all(
-        isinstance(name, str) and name.startswith("reference_cause_")
+        isinstance(name, str) and name.startswith("restricted_cause_")
         for name in restricted_run_names
     )
     assert len(set(restricted_run_names)) == 2

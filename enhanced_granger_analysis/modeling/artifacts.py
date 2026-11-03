@@ -22,3 +22,5 @@ class FitOutcome:
     weights: list[np.ndarray]
     training_result: TrainingResult
     timings: dict[str, float] = field(default_factory=dict)
+    active_slope_mask: np.ndarray | None = None
+    bias_enabled: bool = True

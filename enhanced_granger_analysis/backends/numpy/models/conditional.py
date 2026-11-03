@@ -169,6 +169,10 @@ class NumpyConditionalAdapter:
 		return "numpy"
 
 	@property
+	def base_model_role(self) -> str:
+		return "unrestricted"
+
+	@property
 	def input_spec(self) -> ModelInputSpec:
 		return self._input_spec
 
@@ -1070,6 +1074,23 @@ class NumpyConditionalAdapter:
 			mask[np.asarray(indices, dtype=np.intp)] = 0.0
 
 		self._require_model().variable_control_layer.set_mask(mask)
+
+	def add_variables(self, variable_indices: Sequence[int]) -> None:
+		indices = list(variable_indices)
+		if any(isinstance(index, (bool, np.bool_)) or not isinstance(index, (int, np.integer)) for index in indices):
+			raise TypeError("Feature indices must be integers, not booleans.")
+		if any(index < 0 or index >= self._n_features for index in indices):
+			raise ValueError("Feature index is out of range.")
+		self.omit_variables([])
+
+	def get_active_mask(self) -> np.ndarray:
+		network = self._require_model()
+		structural = (
+			np.ones((self._n_outputs, self._n_features), dtype=bool)
+			if network.constraint is None
+			else np.asarray(network.constraint.mask, dtype=bool)
+		)
+		return structural & network.variable_control_layer.mask.astype(bool)[None, :]
 
 
 NumpyConstrainedGrangerModel = NumpyConditionalAdapter

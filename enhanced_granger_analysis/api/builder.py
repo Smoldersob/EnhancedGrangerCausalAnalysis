@@ -722,6 +722,10 @@ class MultiTaskGrangerBuilder:
         if self._results is not None:
             self._results.base_snapshot = None
             self._results.reference_snapshots.clear()
+            self._results.restricted_snapshots.clear()
+            self._results.unrestricted_snapshots.clear()
+            self._results._rss_cache.clear()
+            self._results._metric_cache.clear()
 
         return self._model
 
@@ -883,7 +887,7 @@ class MultiTaskGrangerBuilder:
             raise DataValidationError("No results are available; prepare_data() has not run")
         return self._results
 
-    def fit(self, *, fit_restricted: bool = True):
+    def fit(self, *, train_only_unrestricted: bool = False):
         """Prepare the analysis and execute the standard fitting workflow."""
 
         spec = self.to_spec()
@@ -930,7 +934,7 @@ class MultiTaskGrangerBuilder:
                 progress=progress,
                 initial_weights=self._initial_weights,
                 backend=self._backend,
-                fit_restricted=fit_restricted,
+                train_only_unrestricted=train_only_unrestricted,
             )
             result.model_search_result = self._model_search_result
             result.effective_modeling = self._current_modeling()
@@ -1016,5 +1020,9 @@ class MultiTaskGrangerBuilder:
             # Keep preparation context, but discard results of the old model.
             self._results.base_snapshot = None
             self._results.reference_snapshots.clear()
+            self._results.restricted_snapshots.clear()
+            self._results.unrestricted_snapshots.clear()
+            self._results._rss_cache.clear()
+            self._results._metric_cache.clear()
 
 MultitaskGrangerBuilder = MultiTaskGrangerBuilder
