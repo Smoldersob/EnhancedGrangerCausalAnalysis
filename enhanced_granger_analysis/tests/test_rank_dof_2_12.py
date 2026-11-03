@@ -5,8 +5,11 @@ import numpy as np
 import pytest
 from scipy.stats import chi2, f
 
-from enhanced_granger_analysis.results.granger_results import GrangerAnalysisResults
-from enhanced_granger_analysis.results.statistics import nested_design_geometry
+from ..results.granger_results import (
+    GrangerAnalysisResults,
+    ModelSnapshot,
+)
+from ..results.statistics import nested_design_geometry
 
 
 def make_case(use_bias=True, duplicate=True):
@@ -32,9 +35,20 @@ def make_case(use_bias=True, duplicate=True):
 				coef=np.linalg.lstsq(d,y[:,j],rcond=None)[0]
 				pred[:,j]=d@coef
 				weights[j,mask[j]]=coef[int(use_bias):]
-			setter=result.set_unrestricted_snapshot if role=="unrestricted" else result.set_restricted_snapshot
-			setter(cause,pred,weights,active_slope_mask=mask,bias_enabled=use_bias,
-				   metadata={"coefficient_space":"raw","fit_performed":True})
+				result.register_snapshot(
+					cause=cause,
+					role=role,
+					snapshot=ModelSnapshot(
+						predictions=pred.copy(),
+						weights=weights.copy(),
+						active_slope_mask=mask.copy(),
+						bias_enabled=use_bias,
+						metadata={
+							"coefficient_space": "raw",
+							"fit_performed": True,
+						},
+					),
+				)
 	result.set_dof_method("rank")
 	return result
 
@@ -70,23 +84,75 @@ def test_rank_metrics_match_reference_spaces(use_bias,duplicate):
 				assert PW[j,col]==pytest.approx(chi2.sf(W[j,col],q[j]))
 				assert PF[j,col]==pytest.approx(f.sf(F[j,col],q[j],nu[j]))
 
+def evaluate_rank_wald(result, cause):
+    """Evaluate fresh Wald values for one cause without restoration."""
+    matrix = result.evaluate(
+        "wald_test",
+        restore_removed=False,
+        force=True,
+        cache=False,
+    )
+    return matrix.data.loc[result.effects, cause].to_numpy(
+        dtype=np.float64,
+        copy=True,
+    )
 
 def test_rank_wald_does_not_use_restricted_predictions():
-	result=make_case()
-	before=result.rank_wald_per_output("pair")
-	result.get_snapshot("pair","restricted").predictions[:]=12345.
-	result.get_snapshot("pair","restricted").metadata["fit_performed"]=False
-	after=result.rank_wald_per_output("pair")
-	np.testing.assert_allclose(before,after)
+    result = make_case()
+    before = evaluate_rank_wald(result, "pair")
+
+    restricted = result.get_snapshot("pair", "restricted")
+
+    replacement = ModelSnapshot(
+        predictions=np.full_like(
+            restricted.predictions,
+            12345.0,
+        ),
+        weights=restricted.weights.copy(),
+        active_slope_mask=restricted.active_slope_mask.copy(),
+        bias_enabled=restricted.bias_enabled,
+        metadata={
+            **restricted.metadata,
+            "fit_performed": False,
+        },
+    )
+
+    result.register_snapshot(
+        "pair",
+        "restricted",
+        replacement,
+    )
+
+    after = evaluate_rank_wald(result, "pair")
+    np.testing.assert_allclose(before, after)
 
 
 def test_rank_wald_is_invariant_to_nullspace_coefficients():
-	result=make_case()
-	before=result.rank_wald_per_output("pair")
-	# First output: x3=x1+x2, so this changes coefficients but not predictions.
-	u=result.get_snapshot("pair","unrestricted")
-	u.weights[0]+=np.array([10.,10.,-10.])
-	np.testing.assert_allclose(before,result.rank_wald_per_output("pair"))
+    result = make_case()
+    before = evaluate_rank_wald(result, "pair")
+
+    unrestricted = result.get_snapshot("pair", "unrestricted")
+    weights = unrestricted.weights.copy()
+
+    # x3 = x1 + x2 for the first output.
+    weights[0] += np.array([10.0, 10.0, -10.0])
+
+    replacement = ModelSnapshot(
+        predictions=unrestricted.predictions.copy(),
+        weights=weights,
+        active_slope_mask=unrestricted.active_slope_mask.copy(),
+        bias_enabled=unrestricted.bias_enabled,
+        metadata=dict(unrestricted.metadata),
+    )
+
+    result.register_snapshot(
+        "pair",
+        "unrestricted",
+        replacement,
+    )
+
+    after = evaluate_rank_wald(result, "pair")
+    np.testing.assert_allclose(before, after)
 
 
 def test_rank_option_invalidates_cache_and_can_be_disabled():

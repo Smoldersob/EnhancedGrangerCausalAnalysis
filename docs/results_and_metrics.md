@@ -1,137 +1,168 @@
 # Results and Metrics
 
-This document describes how fitted Granger models are represented, how
-causality metrics are calculated, and how to inspect or threshold the results.
-The main result-handling classes are:
+This page describes the refactored results interface. Integration and regression
+validation are pending. Apply the corresponding code changes before using the
+new interface; this document does not establish that they are already present
+in every execution path.
 
-- `GrangerAnalysisResults`, which stores fitted-model outputs and evaluates
-  metrics.
-- `ModelSnapshot`, which stores predictions, weights, and optional metadata for
-  one fitted model.
-- `PreparationContext`, which stores preprocessing information required to
-  restore variables removed before model fitting.
-- `CausalityMatrix`, which wraps a metric result in a labelled
-  effects-by-causes `pandas.DataFrame`.
+## Responsibilities
 
-The implementation is in:
+- `GrangerAnalysisResults` stores snapshots, preparation context, and cached
+  metric values. It provides shared mask, coordinate, and design-geometry access.
+- `ModelSnapshot` stores predictions, optional slope weights, the structural
+  slope mask, intercept configuration, and provenance for one model state.
+- `PreparationContext` connects results to preprocessing coordinates and
+  removed-variable metadata.
+- `metrics.py` registers metrics and orchestrates their evaluation.
+- `statistics.py` implements numerical statistics and distribution conversions.
+- `CausalityMatrix` wraps an effects-by-causes `pandas.DataFrame` and metadata.
 
-- `enhanced_granger_analysis/results/granger_results.py`
-- `enhanced_granger_analysis/results/metrics.py`
-- `enhanced_granger_analysis/results/causality_matrix.py`
+Models remain joint multi-output predictors. Per-effect inference does not
+introduce separately trained models for individual outputs.
 
-## Result lifecycle
+## Snapshot lifecycle
 
-A multitask analysis produces an unrestricted **base model** and one restricted
-**reference model** for each tested cause. The restricted model omits the cause
-being tested while retaining the rest of the model configuration.
-
-```text
-prepared data
-    |
-    +--> base model --------------------+
-    |                                    |
-    +--> reference model without x1 ----+--> metric matrix
-    +--> reference model without x2 ----+
-```
-
-`GrangerAnalysisResults` stores these model outputs in snapshots:
+Each tested cause identifies an unrestricted/restricted comparison:
 
 ```python
-results.set_base_snapshot(
-    base_predictions=base_predictions,
-    base_weights=base_weights,
-    metadata={"backend": "pytorch"},
-)
+unrestricted = results.get_snapshot("x1", "unrestricted")
+restricted = results.get_snapshot("x1", "restricted")
+```
 
-results.set_reference_snapshot(
-    cause="x1",
-    reference_predictions=x1_reference_predictions,
-    reference_weights=x1_reference_weights,
+The canonical mappings are:
+
+```python
+results.unrestricted_snapshots
+results.restricted_snapshots
+```
+
+There is no separate base/reference snapshot store. A shared model is fitted
+once and the same snapshot object can be registered for multiple causes:
+
+```python
+results.register_snapshots(
+    causes=results.causes,
+    role="unrestricted",
+    snapshot=shared_snapshot,
 )
 ```
 
-The result object also stores:
+This stores references, not copies of prediction and coefficient arrays.
+Use `register_snapshot(cause, role, snapshot)` for a single comparison.
+Both methods invalidate RSS, metric, and rank-geometry caches.
 
-- `effects`: output/effect variable names.
-- `causes`: tested cause variable names.
-- `mask`: coefficient activity mask.
-- `cause_slices`: named feature slices used to select coefficient blocks
-  for tested causes.
-- `y_true`: observed target values.
-- `X_true`: design matrix used for covariance-based metrics.
-- `preparation_context`: optional preprocessing and removed-variable metadata.
-
-## Base and reference snapshots
-
-`ModelSnapshot` contains:
+Construct snapshots explicitly when assembling results manually:
 
 ```python
-ModelSnapshot(
-    predictions=np.ndarray,
-    weights=np.ndarray | None,
-    metadata=dict,
+from enhanced_granger_analysis.results.granger_results import ModelSnapshot
+
+snapshot = ModelSnapshot(
+    predictions=predictions_raw.copy(),
+    weights=weights_model.copy(),
+    active_slope_mask=structural_mask.copy(),
+    bias_enabled=True,
+    metadata={
+        "coefficient_space": "model",
+        "model_predictions": predictions_model.copy(),
+        "fit_performed": True,
+    },
 )
+results.register_snapshot("x1", "unrestricted", snapshot)
 ```
 
-The unrestricted model is available through:
+Attach the matching preparation context for model-space snapshots.
+Slope weights and masks use `(n_effects, n_features)` order. Predictions use
+`(n_samples, n_effects)` order. Compared masks must be nested: restricted
+positions must be a subset of unrestricted positions. Intercept settings must
+match. Predictions and targets must use identical observations and output order.
 
-```python
-results.base_snapshot
-results.base_predictions
-results.base_weights
-```
+`clear_snapshots()` removes both mappings and clears derived caches without
+changing DOF settings or preparation context. Treat registered arrays and
+coordinate metadata as immutable; replace snapshots through registration
+methods rather than changing them in place.
 
-Restricted models are keyed by cause name:
+### Shared training is not a separate result representation
 
-```python
-results.reference_snapshots["x1"]
-results.ref_predictions["x1"]
-results.ref_weights["x1"]
-```
+`fit_base()`, `model.base_model_role`, and native `base_weights` remain execution
+concepts. They select shared U or R fitting and support initialization of later
+runs. They do not require a `results.base_snapshot` field.
+Native initialization weights may include a bias and backend-specific arrays;
+they are not interchangeable with `ModelSnapshot.weights`.
 
-The predictions from the base and reference models must refer to the same
-observations and use the same effect ordering. Their residuals are compared
-when computing RSS-based metrics.
+## Coordinates and masking
 
-## Restriction counts and parameter counts
+`predictions` are stored in target reporting coordinates. For model-space
+coefficients, metadata records `coefficient_space="model"` and
+`model_predictions`; features and targets come from the attached scaled
+preparation arrays. For raw coefficients, declare `coefficient_space="raw"`
+and provide matching raw arrays. Ambiguous legacy coordinates are rejected.
 
-The result object supports two restriction-counting modes:
+A structural zero excludes a slope from the model. It is different from a
+free coefficient estimated as zero. Covariance estimation selects enabled
+feature columns first; it does not invert the full unmasked design and then
+zero covariance entries afterward.
+
+## Degrees-of-freedom policies
 
 ```python
 results.set_dof_method("structural")
 results.set_dof_method("active_support")
+results.set_dof_method("rank", rank_rcond=1e-10)
 ```
 
-### Structural restrictions
+Use the setter to change the method or rank tolerance. It invalidates metric
+and rank-geometry caches. Direct assignment to configuration fields does not
+provide the same invalidation contract.
 
-`structural` counts active coefficient positions in the configured mask
-for each tested cause and effect.
+### Structural
 
-The cause's coefficient block is selected by name from `cause_slices`.
-This is the default mode.
+For structural slope masks \(M_U\) and \(M_R\):
 
-### Active-support restrictions
+\[
+T=M_U\land\neg M_R,\qquad
+q_j=\sum_k T_{jk},\qquad
+k_{U,j}=\sum_k M_{U,jk}+I_{\mathrm{bias}}.
+\]
 
-`active_support` counts structurally active coefficient positions whose
-corresponding base-model weights are non-zero.
+Counts use the actual snapshot pair. `cause_slices` preserves feature-block
+metadata, but restriction counts are not silently clipped to a cause slice.
 
-The current implementation uses an exact non-zero comparison. It does not
-apply a numerical tolerance to identify small coefficients.
+### Active support
 
-When base weights are unavailable, the current implementation falls back
-to structural counting.
+This is an intentional heuristic for sparse fits, including L1 regularization.
+With tolerance \(\epsilon\):
 
-### Rank-based degrees of freedom
+\[
+S_U=M_U\land(|\hat B_U|>\epsilon),\qquad
+M_U^*=M_U\land S_U,\qquad M_R^*=M_R\land S_U.
+\]
 
-The optional `rank` mode counts independent directions in the masked design matrices instead of counting active coefficient positions. It is useful when active predictors are linearly dependent or nearly dependent.
+Both effective masks use unrestricted weights. Restricted weights are not
+thresholded independently. Count restrictions from
+\(M_U^*\land\neg M_R^*\), and count unrestricted slopes from \(M_U^*\), plus
+the enabled intercept. Bias is counted by configuration, not its fitted value.
+Missing unrestricted weights raise an error; there is no structural fallback.
 
-Enable it after fitting and before evaluating metrics:
+Wald uses the effective unrestricted mask for covariance estimation as well
+as the effective tested mask for its hypothesis. It retains original fitted
+weights and predictions; it does not refit the support-selected model.
+Thresholding small nonzero values can therefore make the effective design
+and fitted predictions imperfectly aligned. Resulting p-values are heuristic,
+not selection-adjusted or guaranteed to have classical calibration.
+
+The current configuration has no dedicated support-tolerance setter. When
+changing it, invalidate derived values using the existing method setter:
 
 ```python
-results.set_dof_method("rank", rank_rcond=None)
+results.active_support_tolerance = 1e-10
+results.set_dof_method("active_support")
 ```
 
-For each tested cause and output, the method constructs the unrestricted and restricted design matrices, \(D_U\) and \(D_R\). Each matrix contains only the feature columns enabled by its snapshot mask, plus an intercept column when `bias_enabled=True`. Counts are then defined as:
+### Numerical rank
+
+Rank uses structural masks, not coefficient-value thresholding. For each
+output, form designs \(D_U,D_R\) from enabled feature columns and the optional
+intercept:
 
 \[
 k_U=\operatorname{rank}(D_U),\qquad
@@ -139,488 +170,240 @@ q=\operatorname{rank}(D_U)-\operatorname{rank}(D_R),\qquad
 df_{\mathrm{resid}}=n-k_U.
 \]
 
-The rank is computed from the design matrices, not from fitted coefficient values. Unlike `active_support`, this mode does not classify parameters by whether their estimates are numerically zero. When both designs have full column rank, the counts agree with `structural`. If removing a cause does not reduce the design rank, `q=0`; the corresponding test is treated as untestable.
+SVD uses a shared absolute cutoff
+\(\tau=r_{\mathrm{cond}}s_{\max}(D_U)\). With `rank_rcond=None`, the relative
+cutoff is machine precision times `max(D_U.shape)`.
 
-#### Numerical tolerance
+Rank counts can remain available even when independently truncated spaces
+are not nested. In that case an incremental basis is unavailable and
+rank-Wald returns `NaN` with a warning for the affected output.
+Use `rank_diagnostics()` to inspect ranks, counts, cutoffs, nesting, and
+incremental-basis validity.
 
-Rank is determined by SVD applied directly to the design matrices. For each cause–output pair, both designs use the same absolute singular-value cutoff:
-
-\[
-\tau=r_{\mathrm{cond}}\,s_{\max}(D_U).
-\]
-
-With `rank_rcond=None`, the relative cutoff is machine precision multiplied by `max(D_U.shape)`. An explicit value can be supplied:
-
-```python
-results.set_dof_method("rank", rank_rcond=1e-10)
-```
-
-A larger cutoff treats more weak directions as numerically redundant. It can change the effective model, so it should be consistent with the rank policy used during fitting. The method rejects truncated spaces that are no longer nested. Changing the counting method or tolerance invalidates the metric and rank-geometry caches.
-
-#### Effect on metrics
-
-- F uses rank-based `q` and unrestricted residual degrees of freedom.
-- LR retains its RSS-based statistic and uses rank-based `q` for its p-value.
-- In `rank` mode, Wald tests the identifiable prediction directions available in \(D_U\) but absent from \(D_R\). It uses the unrestricted fitted predictions and classical OLS residual variance, without requiring restricted predictions or an explicit inverse of \(D_U^\top D_U\). This avoids testing arbitrary coefficient representatives when coefficients are not uniquely identifiable.
-
-Rank-mode Wald requires an OLS-equivalent unrestricted fit within the retained prediction space. It checks this condition numerically and raises an error when it is not satisfied. Rank-based counting alone does not make classical inference valid for regularized, nonlinear, or insufficiently optimized models.
-
-Use `results.rank_diagnostics()` to inspect structural counts, numerical ranks, restriction counts, residual degrees of freedom, singular-value cutoffs, and design condition numbers for each cause–output pair. The existing `structural` and `active_support` modes remain available; **`rank` is opt-in**.
-
-### Restriction-count contract
-
-`n_restrictions_for(cause)` returns one restriction count per effective effect.
-
-A tested cause must have a valid named feature slice. Missing or invalid
-mappings raise an error rather than being interpreted as zero influence.
-
-A zero restriction count means that no coefficient positions are counted
-under the selected method. It is not, by itself, a statistical conclusion
-about the tested relationship.
-
-### Unrestricted parameter count
-
-`n_unrestricted_parameters()` currently uses the feature width inferred
-from base-model weights, or the width of `X_true` when weights are unavailable.
-
-This is a model-width proxy used by the implemented statistics. It should
-not be interpreted as a general effective-degrees-of-freedom estimator for
-arbitrary regularized, constrained, or nonlinear models.
-
-Availability of a statistic does not guarantee that its reference
-distribution is appropriate for every model configuration.
+A zero restriction count means the selected policy has no testable restriction;
+it is not evidence that the underlying process has no causal relationship.
 
 ## Available metrics
 
-Metrics are registered by name and can also have aliases. Names are normalized
-to lowercase by `resolve_metric`.
-
-| Metric | Aliases | Description |
+| Metric | Aliases | Meaning |
 | --- | --- | --- |
-| `f_statistic` | `f` | RSS-based Granger F statistic for each effect and cause. |
-| `f_statistic_p_value` | `f_test_p_value`, `f_p_value`, `p_value_f` | Upper-tail p-values derived from the F statistic. |
-| `wald_test` | `wald`, `wald_statistic` | Wald statistic based on base weights and OLS weight covariance. |
-| `wald_test_p_value` | `wald_statistic_p_value`, `wald_p_value`, `p_value_wald` | P-values derived from the Wald statistic. |
-| `likelihood_ratio` | `likelihood_ratio_test`, `lr`, `lr_test` | RSS-based likelihood-ratio statistic. |
-| `likelihood_ratio_p_value` | `likelihood_ratio_test_p_value`, `lr_p_value`, `p_value_lr`, `p_value_likelihood_ratio` | P-values derived from the likelihood-ratio statistic. |
-| `p_value` | — | Uses the p-value companion of a cached statistic; defaults to F-test p-values. |
-| `sign` | — | Sign of summed base-model coefficients for each effect and cause. |
-| `base_mse` | — | Base-model RSS divided by the number of samples, repeated for each cause. |
-| `base_rss` | — | Base-model RSS, repeated for each cause. |
+| `f_statistic` | `f` | RSS-based F statistic. |
+| `f_statistic_p_value` | `f_test_p_value`, `f_p_value`, `p_value_f` | F upper-tail p-value. |
+| `wald_test` | `wald`, `wald_statistic` | Policy-specific Wald statistic. |
+| `wald_test_p_value` | `wald_statistic_p_value`, `wald_p_value`, `p_value_wald` | Wald chi-square upper-tail p-value. |
+| `likelihood_ratio` | `likelihood_ratio_test`, `lr`, `lr_test` | RSS-based LR statistic. |
+| `likelihood_ratio_p_value` | `likelihood_ratio_test_p_value`, `lr_p_value`, `p_value_lr`, `p_value_likelihood_ratio` | LR chi-square upper-tail p-value. |
+| `unrestricted_rss` | — | U residual sum of squares per effect and cause. |
+| `restricted_rss` | — | R residual sum of squares per effect and cause. |
+| `unrestricted_mse` | — | U RSS divided by sample count. |
+| `restricted_mse` | — | R RSS divided by sample count. |
+| `sign` | — | Summary sign of unrestricted coefficients in the tested cause block. |
 
-## Coefficient-derived signs
+There is no generic `p_value` metric. Choose the test explicitly; cache history
+does not determine the test. `base_rss` and `base_mse` are removed rather than
+aliased to U diagnostics, since a shared training base can also have role R.
+Shared snapshots naturally produce repeated diagnostic columns.
 
-The `sign` metric summarizes the sum of base-model coefficients in each
-cause's named feature block.
+## Statistical tests
 
-It does not report the sign of the strongest individual lag coefficient
-and does not determine the direction of the causal arrow.
+### F and likelihood ratio
 
-A cause may have positive and negative lag coefficients whose contributions
-cancel in the sum. The resulting sign is therefore a summary of the block,
-not a complete description of lag-dependent effects.
+F and LR compare the registered U/R predictions for each cause. F uses the
+selected policy's restriction count and unrestricted parameter count. LR
+retains its RSS statistic and uses the selected restriction count for its
+chi-square p-value.
 
-For effective fitted variables, coefficient sums with absolute value below
-`1e-12` retain the current convention of sign `+1`.
+The RSS-based implementations clamp negative improvement to zero when R has
+lower RSS than U. This accommodates imperfect optimization; it does not make
+an incompatible estimator classically calibrated.
 
-This near-zero convention differs from removed-variable restoration,
-which uses sign `0` when no representative value is available.
+### Wald: structural and active support
 
-The `results.sign` property evaluates the registered sign metric with
-restoration enabled. Use `evaluate("sign", restore_removed=False)` to inspect
-only fitted-variable signs.
+Wald uses unrestricted slopes and an OLS-form covariance on the enabled
+design. All enabled U regressors, including nuisance regressors, participate
+in covariance estimation. The tested block is selected afterward:
 
+\[
+W=\hat\beta_T^\top
+\left[\widehat{\operatorname{Cov}}(\hat\beta)_T\right]^{-1}
+\hat\beta_T.
+\]
 
-# User interface properties
+The active design must have full column rank and positive residual degrees
+of freedom. Failures raise an error; neither policy silently switches to
+rank mode. Covariance is computed only for outputs with tested coefficients.
+Missing structural-mode weights yield unavailable values; active-support
+preparation requires weights and raises if they are absent.
 
+The covariance is OLS-form. For regularized, constrained, or incompletely
+optimized fits its classical interpretation is not automatically valid.
+`active_support` explicitly accepts a heuristic interpretation.
 
-## Evaluating a metric
+### Wald: rank
 
-Use `evaluate` when a `CausalityMatrix` is required:
+Rank-Wald tests additional retained prediction directions in U relative to R.
+It uses existing U predictions and residual variance, not arbitrary coefficient
+representatives. It does not require stored weights or restricted predictions,
+but requires both structural masks and matching snapshot coordinates.
+
+The numerical implementation is `statistics.rank_wald_test_value()`;
+`metrics.wald_test()` orchestrates it. No Wald execution method remains on
+`GrangerAnalysisResults`.
+
+For each output it checks:
+
+1. A valid incremental basis exists and `q > 0`.
+2. Residual degrees of freedom are positive.
+3. Existing predictions lie in the retained U space.
+4. Residuals are numerically orthogonal to that space (OLS equivalence).
+
+Failed compatibility checks produce `NaN` with a warning when `q > 0`.
+Invalid input dimensions or nonfinite coordinate arrays raise an error.
+The implementation does not refit, project predictions to replace them, or
+silently reinterpret an incompatible fit.
+
+### Wald metadata and p-values
+
+The statistic records `dof_method`, tolerances, `hypothesis`,
+`n_restrictions`, per-cell `status`, and `heuristic`.
+Wald p-values use the restriction counts recorded with the statistic.
+Metadata arrays follow effective fitted-variable axes, not restored axes.
+
+`q=0` produces `NaN` for both statistic and p-value. A zero residual variance
+with positive numerator gives an infinite statistic; the corresponding
+positive-DF upper-tail p-value is zero. A zero numerator and zero variance
+leave the statistic unavailable.
+
+## Evaluation and caching
 
 ```python
-f_statistics = results.evaluate("f_statistic")
-f_p_values = results.evaluate("f_test_p_value")
-wald = results.evaluate("wald_test")
-likelihood_ratio = results.evaluate("likelihood_ratio")
+wald = results.evaluate("wald_test", restore_removed=False)
+p_wald = results.evaluate("wald_test_p_value", restore_removed=False)
+p_f = results.evaluate("f_statistic_p_value")
+p_lr = results.evaluate("likelihood_ratio_p_value")
+
+wald.data
+wald.metadata["status"]
 ```
 
-The returned object contains:
+Repeated evaluation reuses cached matrices. `force=True` recomputes the
+requested metric; `cache=False` does not store that evaluation. Neither is
+a general recursive invalidation mechanism for dependencies.
+Registering or clearing snapshots invalidates all snapshot-derived caches.
+Change DOF settings through the supported setter. Do not mutate predictions,
+weights, masks, or preparation arrays in place after caching.
+
+A metric callable can also be supplied:
 
 ```python
-f_statistics.name       # "f_statistic"
-f_statistics.data       # effects x causes DataFrame
-f_statistics.metadata   # metric metadata
-```
-
-Metric callables can be supplied directly:
-
-```python
-def custom_metric(results) -> CausalityMatrix:
+def custom_metric(results):
     values = ...
     return results.make_matrix(values, name="custom_metric")
 
 custom = results.evaluate(custom_metric)
 ```
 
-## Caching
+### Convenience properties
 
-Metric evaluation is cached by default:
-
-```python
-first = results.evaluate("f_statistic")
-second = results.evaluate("f_statistic")
-```
-
-The second call reuses the cached matrix. To bypass the cache:
+After applying the matching property migration:
 
 ```python
-fresh = results.evaluate("f_statistic", force=True)
-```
-
-To evaluate without storing the result:
-
-```python
-uncached = results.evaluate("f_statistic", cache=False)
-```
-
-Setting a new base or reference snapshot clears the metric cache and the
-corresponding RSS cache because previously calculated values are no longer
-valid.
-
-## Restoring removed variables
-
-Preparation can remove constant variables, exact duplicates, or inputs
-with no final selected lags.
-
-A `PreparationContext` preserves requested roles and role-specific removal
-metadata.
-
-Metric evaluation restores requested effect and tested-cause axes by
-default:
-
-```python
-restored = results.evaluate("f_test_p_value")
-```
-
-To inspect only effective fitted variables:
-
-```python
-fitted_only = results.evaluate(
-    "f_test_p_value",
-    restore_removed=False,
-)
-```
-
-Restoration follows these rules:
-
-1. Newly introduced entries use the metric's `removed_signal_value`.
-2. Duplicate effects copy available representative rows.
-3. Tested causes excluded by lag preparation receive a neutral column.
-4. Duplicate tested causes copy an available computed representative
-   column or a representative column restored after lag exclusion.
-
-A variable removed only as an input retains its computed output row if
-that output role remains effective.
-
-A representative that was never requested/evaluated as a tested cause
-has no result column to copy.
-
-| Metric category | Neutral restoration value |
-| --- | --- |
-| F, Wald, and likelihood-ratio statistics | `0` |
-| Their p-value metrics | `1` |
-| Sign | `0` |
-| Metrics without an explicit restoration value | `NaN` |
-
-The reason `"no_selected_lags"` means that the final configured model has
-no feature for that input in any effective output equation.
-
-A restored p-value of `1` is a reporting convention for this structural
-exclusion. It is not a p-value obtained from fitting an additional
-restricted model, nor proof that the underlying process has no causal
-relationship.
-
-Restoration changes the returned matrix. Cached metric values remain
-associated with effective fitted variables.
-
-Report selection settings and removal metadata when interpreting or
-benchmarking restored results.
-
-### Selection and numerical diagnostics are different
-
-`"no_selected_lags"` means that no lag remains for a predictor in any
-effective output equation after aggregation and overrides.
-
-It does not mean that the predictor was proven irrelevant, that its
-coefficients were identifiable, or that an independent Granger test
-accepted a null hypothesis.
-
-Rank-deficient auxiliary fitting does not itself create a removal record.
-A completely unsuccessful selection raises an error rather than
-restoring neutral values for every requested cause.
-
-For selection semantics and diagnostic limitations, see
-[Lag Selection](lag_selection.md).
-
-## Convenience properties
-
-The most common metrics are exposed as properties. These properties evaluate
-the metric and return the underlying `DataFrame`:
-
-```python
-results.p_value
+results.f_p_value
+results.wald_p_value
+results.likelihood_ratio_p_value
 results.f_test
 results.wald_test
 results.likelihood_ratio
 results.sign
 ```
 
-For example:
+These return DataFrames with removed-variable restoration enabled. The old
+`results.p_value` property is removed. Use `evaluate()` for metadata or explicit
+control of restoration.
 
-```python
-p_values = results.p_value
-signs = results.sign
-```
+## Restoration and thresholding
 
-The statistical convenience properties and `sign` return DataFrames with
-removed-variable restoration enabled when a preparation context is available.
+Preparation can remove constant variables, duplicates, or inputs with no
+selected lags. Restoration uses requested axes and role-specific metadata:
 
-The `sign` property delegates to the registered metric:
+- Statistics use neutral fill `0`; test-specific p-values use `1`.
+- Sign uses neutral fill `0`; diagnostics without a fill use `NaN`.
+- Duplicate axes copy available representative values.
+- An input removed only in its predictor role can retain an effective output row.
+- A representative not evaluated as a tested cause has no column to copy.
 
-```python
-results.evaluate("sign", restore_removed=True).data
-```
-
-To inspect signs for effective fitted variables only, use:
-```python
-results.evaluate("sign", restore_removed=False).data
-```
-
-## Thresholded causality results
-
-`result` converts a metric matrix into a binary significance table. The default
-metric is `f_test_p_value` and the default threshold is `0.01`:
-
-```python
-causality = results.result()
-```
-
-Equivalent explicit usage:
+A restored p-value of `1` is a reporting convention, not an independently
+fitted test. Cached values and array-valued statistical metadata remain on
+effective fitted-variable axes. Compare metadata with
+`restore_removed=False`.
 
 ```python
 causality = results.result(
     threshold=0.05,
-    metric="f_test_p_value",
+    metric="wald_test_p_value",
 )
-```
-
-Cells with metric values below the threshold become `1`; other cells become
-`0`. The returned object is a `pandas.DataFrame` indexed by effects and
-labelled by causes.
-
-To include coefficient-derived signs:
-
-```python
-signed_causality = results.result(
+signed = results.result(
     threshold=0.05,
+    metric="wald_test_p_value",
     with_sign=True,
 )
 ```
 
-When `with_sign=True`, the thresholded metric matrix is multiplied by the
-sign metric after both have been restored to the requested axes.
+`result()` returns a DataFrame. Values below the threshold are significant.
+Its default metric remains `f_test_p_value`, with default threshold `0.01`.
+Use explicit metric names when comparing tests. A signed result multiplies
+significance by the restored sign matrix and requires matching axes.
 
-The matrices must have identical effect and tested-cause labels.
-An axis mismatch raises `ValueError`.
+`CausalityMatrix.threshold(threshold=0.05)` thresholds an already evaluated
+matrix without additional restoration.
 
-For effective fitted variables, signs are calculated from the sum of
-base-model coefficients in each named cause block. Near-zero sums retain
-the existing convention of `+1`.
+### Coefficient-derived signs
 
-Restored entries without an available representative use sign `0`.
-Consequently, a zero in the signed result can reflect either a
-non-significant relationship or a neutral sign introduced during restoration.
-Use the unsigned result and evaluated metric matrix when this distinction
-matters.
+Sign summarizes unrestricted coefficients in the named cause block, using
+positions present in U and removed in R. It is not the strongest lag's sign,
+the direction of a causal arrow, or an active-support/rank hypothesis.
+Opposing lag effects can cancel. Effective near-zero sums retain the existing
+`+1` convention below absolute tolerance `1e-12`; restored unavailable signs
+use `0`. A zero signed result can therefore represent nonsignificance or a
+neutral restored sign.
 
-# Working with `CausalityMatrix`
+## Migration summary
 
-`CausalityMatrix` is a small wrapper around a `pandas.DataFrame`:
+| Removed interface | Replacement |
+| --- | --- |
+| `set_base_snapshot(...)` | Construct once and use `register_snapshots(...)`. |
+| `set_reference_snapshot(...)` | `register_snapshot(cause, "restricted", snapshot)`. |
+| `set_unrestricted_snapshot(...)` | `register_snapshot(cause, "unrestricted", snapshot)`. |
+| `set_restricted_snapshot(...)` | `register_snapshot(cause, "restricted", snapshot)`. |
+| `base_snapshot`, `base_predictions`, `base_weights` on results | Select a cause and role with `get_snapshot(...)`. |
+| `reference_snapshots`, `ref_predictions`, `ref_weights` | `restricted_snapshots` and its snapshot fields. |
+| `reference_rss_per_output(cause)` | `restricted_rss_per_output(cause)`. |
+| `base_rss_per_output()` | `rss_per_output(cause, role)`. |
+| `base_rss`, `base_mse` metrics | Explicit restricted/unrestricted RSS or MSE metrics. |
+| `p_value` metric / property | Explicit test-specific p-value metric / property. |
+| `rank_wald_per_output()` | Evaluation through the registered `wald_test` metric. |
 
-```python
-matrix = results.evaluate("f_statistic")
+## Troubleshooting and interpretation
 
-matrix.data       # labelled DataFrame
-matrix.name       # metric name
-matrix.metadata   # metric-specific metadata
-```
+Missing U/R snapshots raise lookup errors. Check completion of the appropriate
+training path and manual registration. With `train_only_unrestricted=True`,
+restricted snapshots describe captured masked states, not independently
+optimized restricted models; inspect `fit_performed` provenance before
+interpreting RSS comparisons.
 
-It can threshold its own data:
+For unavailable Wald cells, inspect `status`, DOF settings, coordinate
+metadata, and rank diagnostics. Restored cells must be distinguished from
+computed cells. A singular structural/support design is not handled by
+silently switching inference policies.
 
-```python
-binary = matrix.threshold(threshold=0.05)
-```
+Report regularization, constraints, selection, preprocessing, optimizer
+convergence, rank tolerance, support tolerance, and restoration choices.
+A computable statistic is not a guarantee of a valid reference distribution.
+Rank counting does not establish inference validity for arbitrary nonlinear
+or penalized estimators.
 
-This is useful when a metric matrix has already been evaluated and no result
-restoration or sign multiplication is needed.
-
-# Interpreting the metrics
-
-## F statistic
-
-The F statistic compares the restricted model's residual error with the
-unrestricted model's residual error while accounting for:
-
-- the number of restrictions for the cause;
-- the number of unrestricted parameters;
-- the number of samples.
-
-Use the F statistic together with `f_test_p_value`; the statistic alone does
-not provide a significance decision.
-
-## Wald test
-
-The Wald metric uses the base-model coefficient weights and an estimated
-covariance matrix. It requires:
-
-- a base snapshot with weights;
-- non-empty `X_true`;
-- compatible target, prediction, mask, and coefficient shapes.
-
-If the required base data is unavailable, the implementation returns a matrix
-of `NaN` values.
-
-## Likelihood-ratio test
-
-The likelihood-ratio metric compares the RSS of each restricted model with the
-RSS of the unrestricted model. It requires a base snapshot and a reference
-snapshot for every tested cause.
-
-## Base RSS and MSE
-
-`base_rss` and `base_mse` are diagnostic metrics. Because they describe the
-unrestricted model rather than a cause-specific comparison, the same
-per-effect value is repeated across all cause columns.
-
-# Example workflow
-
-```python
-from enhanced_granger_analysis.api import MultitaskGrangerBuilder
-
-results = (
-    MultitaskGrangerBuilder(backend="pytorch")
-    .data(data)
-    .variables(
-        causes=["x1", "x2"],
-        effects=["y"],
-        tested_causes=["x1", "x2"],
-    )
-    .fit()
-)
-
-# Continuous metrics.
-f_statistics = results.evaluate("f_statistic")
-p_values = results.evaluate("f_test_p_value")
-
-# Binary and signed causality decisions.
-causality = results.result(threshold=0.05)
-signed_causality = results.result(
-    threshold=0.05,
-    with_sign=True,
-)
-```
-
-# Troubleshooting
-
-## Unknown metric
-
-An unknown metric name raises `ResultsError` and includes the registered metric
-names in the error message:
-
-```python
-results.evaluate("not_a_metric")
-```
-
-Use one of the registered names in the metric table or pass a callable that
-returns `CausalityMatrix`.
-
-## Missing base or reference model
-
-F, likelihood-ratio, and RSS metrics require the relevant snapshots. A missing
-base snapshot or reference snapshot causes the RSS helper methods to raise a
-`ValueError`. This normally indicates that model fitting did not finish or
-that the result object was constructed manually without all model outputs.
-
-## Unexpected `NaN` Wald values
-
-Check that the result contains:
-
-1. `base_snapshot.weights`;
-2. a non-empty `X_true`;
-3. predictions and targets with matching rows;
-4. a coefficient mask and named cause slices consistent with the weight matrix.
-
-# Evaluating an analysis
-
-Evaluate statistical evidence, model behavior, and preprocessing decisions
-separately.
-
-## Base versus restricted models
-
-The base model is unrestricted relative to the tested cause.
-The corresponding reference model disables that cause's feature block.
-
-The comparison asks whether the restriction increases residual error.
-It does not ask whether the restricted model improves on the base model.
-
-Base and reference predictions must correspond to identical observations
-and effect ordering.
-
-## Statistical evidence
-
-Use a statistic together with its matching p-value metric.
-An F statistic, Wald statistic, or likelihood-ratio statistic alone is not
-a significance decision.
-
-Interpret p-values under the assumptions of the selected test and fitted
-model. Regularization, constraints, preprocessing, and model selection
-should be reported as part of the analysis.
-
-## Predictive diagnostics
-
-Inspect base-model errors and changes in residual error after restriction.
-These diagnostics help explain model behavior but are not interchangeable
-with a calibrated statistical test.
-
-## Removed variables
-
-Inspect preparation metadata when a result contains restored variables.
-A restored entry may follow a fill or duplicate-copy rule rather than
-represent an independently fitted comparison.
-
-## Signed results
-
-Inspect unsigned significance and coefficient-derived signs separately
-when their distinction matters.
-
-A zero in a signed matrix may reflect a non-significant relationship or
-a neutral sign introduced during restoration.
-
-## Benchmarking
-
-When a ground-truth relationship matrix is available, report classification
-metrics together with the threshold, tested axes, sign convention, and
-handling of removed variables.
-
-The entries being compared must describe the same cause-effect pairs.
-
-## Training and benchmark diagnostics
-
-`TrainingResult` contains adapter-level fitting diagnostics. It does not replace
-`GrangerAnalysisResults`, model snapshots, statistical metrics, or causality
-matrices.
-
-Evaluation against externally supplied ground truth is handled separately by
-`MetricCalculator`. Version `2.7` changes its alignment and missing-value policy;
-see [Ground-Truth Evaluation](ground_truth_evaluation.md).
+Prediction diagnostics, statistical evidence, and evaluation against known
+ground truth are separate tasks. See [Ground-Truth Evaluation](ground_truth_evaluation.md)
+for alignment and missing-ground-truth rules and [Lag Selection](lag_selection.md)
+for feature-selection semantics. `TrainingResult` records fitting diagnostics;
+it does not replace the analysis result container.

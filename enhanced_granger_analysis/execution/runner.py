@@ -28,8 +28,11 @@ from ..preprocessing.pipeline import DataPreparer
 from ..preprocessing.search_preparation import resolve_search_preparation
 from ..preprocessing.prepare_data import PreparedData
 
-from ..results.granger_results import PreparationContext
-from ..results.granger_results import GrangerAnalysisResults
+from ..results.granger_results import (
+    GrangerAnalysisResults,
+    ModelSnapshot,
+    PreparationContext,
+)
 from .model_search_runner import ModelSearchRunner
 
 @dataclass
@@ -175,13 +178,7 @@ class AnalysisRunner:
 			initial_weights if initial_weights is not None else model.get_weights()
 		)]
 		results = progress.results
-		results.unrestricted_snapshots.clear()
-		results.restricted_snapshots.clear()
-		results.reference_snapshots = results.restricted_snapshots
-		results.base_snapshot = None
-		results.base_model_role = None
-		results._rss_cache.clear()
-		results._metric_cache.clear()
+		results.clear_snapshots()
 		progress.base_weights = None
 
 		if role == "unrestricted":
@@ -236,6 +233,13 @@ class AnalysisRunner:
 	) -> list[np.ndarray]:
 		"""Fit and store the base model, then return its weight state."""
 
+		role = model.base_model_role
+		if role not in ("restricted", "unrestricted"):
+			raise DataValidationError(
+				"Shared fitting requires base_model_role to be "
+				"'restricted' or 'unrestricted'"
+			)
+		
 		outcome = self._trainer.fit_base(
 			model=model,
 			prepared=prepared,
@@ -248,7 +252,7 @@ class AnalysisRunner:
 			cause=None,
 			outcome=outcome,
 			backend=backend,
-			role=getattr(model, "base_model_role", "unrestricted"),
+			role=role,
 		)
 
 		return [np.asarray(weight).copy() for weight in outcome.weights]
@@ -277,15 +281,25 @@ class AnalysisRunner:
 				model=model, prepared=prepared, cause=cause,
 				source_weights=base_weights,
 			)
-		self.store_fit_outcome(
-			prepared=prepared, results=results, cause=cause,
-			outcome=outcome, backend=backend, role="restricted",
-		)
-		snapshot = results.get_snapshot(cause, "restricted")
-		snapshot.metadata["fit_performed"] = train_model
+		metadata: dict[str, Any] = {}
 		if not train_model:
-			snapshot.metadata["derived_from_role"] = "unrestricted"
-			snapshot.metadata["derived_from_cause"] = source_cause
+			metadata.update(
+				{
+					"derived_from_role": "unrestricted",
+					"derived_from_cause": source_cause,
+				}
+			)
+
+		self.store_fit_outcome(
+			prepared=prepared,
+			results=results,
+			cause=cause,
+			outcome=outcome,
+			backend=backend,
+			role="restricted",
+			additional_metadata=metadata,
+			fit_performed=train_model,
+		)
 
 	def fit_unrestricted(
 		self, *, model, prepared, results, cause,
@@ -336,8 +350,33 @@ class AnalysisRunner:
 		outcome: FitOutcome,
 		backend: str | None = None,
 		role: str | None = None,
-	) -> None:
-		"""Convert model-scale artifacts to the analysis snapshot format."""
+		additional_metadata: Mapping[str, Any] | None = None,
+		fit_performed: bool = True,
+	) -> ModelSnapshot:
+		"""Convert fit artifacts and register one analysis snapshot.
+
+		Args:
+			prepared: Preparation state defining coordinates and cause order.
+			results: Destination result store.
+			cause: Tested cause, or None for a shared snapshot.
+			outcome: Predictions, native weights, and structural mask.
+			role: Explicit restricted or unrestricted role.
+			additional_metadata: Additional provenance information.
+			fit_performed: Whether this state was obtained by fitting.
+		"""
+		if role not in ("restricted", "unrestricted"):
+			raise DataValidationError(
+				"An explicit snapshot role is required: "
+				"'restricted' or 'unrestricted'"
+			)
+
+		if not isinstance(fit_performed, bool):
+			raise TypeError("fit_performed must be a bool")
+
+		if cause is None:
+			causes = tuple(results.causes)
+		else:
+			causes = (cause,)
 
 		predictions = prepared.y_scaler.inverse_transform(
 			outcome.predictions
@@ -346,71 +385,112 @@ class AnalysisRunner:
 		raw_weights = np.asarray(outcome.weights[0], dtype=float)
 		weights = raw_weights.T.copy()
 
-		metadata = {
-			"fit_performed": True,
-			"timings": dict(outcome.timings),
-			"backend": backend,
-			"coefficient_space": "model",
-			"model_predictions": np.array(outcome.predictions, dtype=float, copy=True),
-		}
+		metadata = dict(additional_metadata or {})
 
-		if cause is None:
-			results.set_base_snapshot(
+		# Coordinate and fit provenance always come from the captured state.
+		metadata.update(
+			{
+				"fit_performed": fit_performed,
+				"timings": dict(outcome.timings),
+				"backend": backend,
+				"coefficient_space": "model",
+				"model_predictions": np.array(
+					outcome.predictions,
+					dtype=float,
+					copy=True,
+				),
+			}
+		)
+
+		snapshot = ModelSnapshot(
+			predictions=np.array(
 				predictions,
+				dtype=np.float64,
+				copy=True,
+			),
+			weights=np.array(
 				weights,
-				metadata,
-				active_slope_mask=outcome.active_slope_mask,
-				bias_enabled=outcome.bias_enabled,
-				role=role,
-			)
-		elif role == "unrestricted":
-			results.set_unrestricted_snapshot(
-				cause, predictions, weights, metadata,
-				active_slope_mask=outcome.active_slope_mask,
-				bias_enabled=outcome.bias_enabled,
-			)
-		else:
-			results.set_reference_snapshot(
-				cause,
-				predictions,
-				weights,
-				metadata,
-				active_slope_mask=outcome.active_slope_mask,
-				bias_enabled=outcome.bias_enabled,
-			)
+				dtype=np.float64,
+				copy=True,
+			),
+			active_slope_mask=(
+				None
+				if outcome.active_slope_mask is None
+				else np.array(
+					outcome.active_slope_mask,
+					dtype=bool,
+					copy=True,
+				)
+			),
+			bias_enabled=bool(outcome.bias_enabled),
+			metadata=metadata,
+		)
+
+		results.register_snapshots(
+			causes=causes,
+			role=role,
+			snapshot=snapshot,
+		)
+
+		return snapshot
 
 	@staticmethod
 	def save_snapshot(
-		*, model: GrangerModelProtocol, prepared: PreparedData,
-		results: GrangerAnalysisResults, cause: str | None,
+		*,
+		model: GrangerModelProtocol,
+		prepared: PreparedData,
+		results: GrangerAnalysisResults,
+		cause: str | None,
 		backend: str | None = None,
 		additional_metadata: Mapping[str, Any] | None = None,
-		role: str | None = None, fit_performed: bool = False,
-	) -> None:
-		"""Capture the current state through the same storage path as fitted results."""
+		role: str | None = None,
+		fit_performed: bool = False,
+	) -> ModelSnapshot:
+		"""Capture and register the current fitted model state.
+
+		Args:
+			model: Fitted predictor whose current state is captured.
+			cause: Tested cause, or None for a shared snapshot.
+			role: Explicit restricted or unrestricted role.
+			fit_performed: Whether fitting produced the captured state.
+		"""
 		if not model.is_fitted:
-			raise DataValidationError("Snapshot capture requires a fitted predictor")
-		if role is None:
-			role = model.base_model_role if cause is None else "restricted"
+			raise DataValidationError(
+				"Snapshot capture requires a fitted predictor"
+			)
+
 		if role not in ("restricted", "unrestricted"):
-			raise DataValidationError("An explicit snapshot role is required")
+			raise DataValidationError(
+				"An explicit snapshot role is required: "
+				"'restricted' or 'unrestricted'"
+			)
+
 		outcome = FitOutcome(
-			predictions=np.array(model.predict(prepared.X_scaled), dtype=float, copy=True),
-			weights=[np.asarray(w).copy() for w in model.get_weights()],
-			training_result=TrainingResult(), timings={},
+			predictions=np.array(
+				model.predict(prepared.X_scaled),
+				dtype=float,
+				copy=True,
+			),
+			weights=[
+				np.asarray(weight).copy()
+				for weight in model.get_weights()
+			],
+			training_result=TrainingResult(),
+			timings={},
 			active_slope_mask=model.get_active_mask().copy(),
 			bias_enabled=model.use_bias,
 		)
-		AnalysisRunner.store_fit_outcome(
-			prepared=prepared, results=results, cause=cause,
-			outcome=outcome, backend=backend, role=role,
+
+		return AnalysisRunner.store_fit_outcome(
+			prepared=prepared,
+			results=results,
+			cause=cause,
+			outcome=outcome,
+			backend=backend,
+			role=role,
+			additional_metadata=additional_metadata,
+			fit_performed=fit_performed,
 		)
-		snapshot = results.base_snapshot if cause is None else results.get_snapshot(cause, role)
-		# Coordinate and fit provenance cannot be overridden by arbitrary metadata.
-		for key, value in dict(additional_metadata or {}).items():
-			if key not in {"coefficient_space", "model_predictions", "fit_performed"}:
-				snapshot.metadata[key] = value
-		snapshot.metadata["fit_performed"] = bool(fit_performed)
 
 	@staticmethod
 	def create_results(

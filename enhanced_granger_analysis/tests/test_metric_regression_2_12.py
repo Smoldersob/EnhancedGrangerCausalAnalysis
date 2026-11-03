@@ -8,7 +8,10 @@ import pytest
 from scipy.stats import f, chi2
 
 from ..core.exceptions import ResultsError
-from ..results.granger_results import GrangerAnalysisResults
+from ..results.granger_results import (
+    GrangerAnalysisResults,
+    ModelSnapshot,
+)
 from ..results.statistics import f_test_value, p_value_from_f_test
 from ..execution.runner import AnalysisRunner
 
@@ -58,8 +61,14 @@ def make_results(n_outputs=3, scaled=False):
     effects = [f"y{i}" for i in range(n_outputs)]
     results = GrangerAnalysisResults(effects=effects, causes=["a", "b"], mask=u_mask,
         cause_slices={"a": slice(0, 1), "b": slice(1, 2)}, X_true=x_raw, y_true=y_raw)
-    prepared = SimpleNamespace(X_scaled=x_model, y_scaled=y_model,
-        y_scaler=SimpleNamespace(inverse_transform=lambda y: y * y_scale + y_offset))
+    prepared = SimpleNamespace(
+            X_scaled=x_model,
+            y_scaled=y_model,
+            tested_causes=list(results.causes),
+            y_scaler=SimpleNamespace(
+                inverse_transform=lambda y: y * y_scale + y_offset
+            ),
+        )
     if scaled:
         results.preparation_context = SimpleNamespace(prepared_data=prepared)
     sm = pytest.importorskip("statsmodels.api")
@@ -86,8 +95,20 @@ def make_results(n_outputs=3, scaled=False):
                 AnalysisRunner.store_fit_outcome(prepared=prepared, results=results,
                     cause=cause, outcome=outcome, backend="numpy", role=role)
             else:
-                setter = results.set_unrestricted_snapshot if role == "unrestricted" else results.set_restricted_snapshot
-                setter(cause, pred, weights, active_slope_mask=mask, bias_enabled=True)
+                results.register_snapshot(
+                    cause=cause,
+                    role=role,
+                    snapshot=ModelSnapshot(
+                        predictions=pred.copy(),
+                        weights=weights.copy(),
+                        active_slope_mask=mask.copy(),
+                        bias_enabled=True,
+                        metadata={
+                            "coefficient_space": "raw",
+                            "fit_performed": True,
+                        },
+                    ),
+                )
         reference[cause] = (fits["unrestricted"], fits["restricted"])
     return results, reference
 
@@ -114,10 +135,28 @@ def test_metrics_match_independent_ols(n_outputs, scaled):
 
 def test_active_support_parameter_counts():
     results, _ = make_results(2)
-    snapshot = results.get_snapshot("a", "unrestricted")
-    snapshot.weights[0, 0] = 0.
+
     structural = results.n_unrestricted_parameters("a").copy()
+    snapshot = results.get_snapshot("a", "unrestricted")
+
+    weights = snapshot.weights.copy()
+    weights[0, 0] = 0.0
+
+    results.register_snapshot(
+        cause="a",
+        role="unrestricted",
+        snapshot=ModelSnapshot(
+            predictions=snapshot.predictions.copy(),
+            weights=weights,
+            active_slope_mask=snapshot.active_slope_mask.copy(),
+            bias_enabled=snapshot.bias_enabled,
+            metadata=dict(snapshot.metadata),
+        ),
+    )
+
     results.set_dof_method("active_support")
+
     supported = results.n_unrestricted_parameters("a")
+
     assert supported[0] == structural[0] - 1
     assert supported[1] == structural[1]

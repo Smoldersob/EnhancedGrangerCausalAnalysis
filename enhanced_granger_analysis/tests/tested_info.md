@@ -1,1 +1,1 @@
-The last version of library, for which all tests were done was 2.10. For it 861 tests passed, 2 were skipper and 33 returned warnings, but we did not cause errors. We don't promise that all tests will pass in future versions until we will have more time to test them.
+The last version of library, for which all tests were done was *2.12.1*. For it  938 passed, 2 were skipper and 2 skipped, 46 warnings, but we did not cause errors. All were done in 47.96s. We don't promise that all tests will pass in future versions until we will have more time to test them.

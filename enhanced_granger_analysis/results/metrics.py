@@ -1,7 +1,10 @@
+from  __future__ import annotations
+
 from collections.abc import Callable
 from typing import Any
 
 import numpy as np
+import warnings
 
 from ..core.registry import Registry
 from ..core.exceptions import ResultsError, RegistryError
@@ -14,7 +17,9 @@ from .statistics import (
 	p_value_from_likelihood_ratio_test,
 	p_value_from_wald_test,
 	wald_test_value,
+	rank_wald_test_value
 )
+from .granger_results import GrangerAnalysisResults
 
 Metric = Callable[..., CausalityMatrix]
 
@@ -53,71 +58,9 @@ def available_metrics(
 	"""List registered metrics without evaluating them."""
 	return _METRICS.available(include_aliases=include_aliases)
 
-def _statistic_matrix(results: Any, name: str) -> CausalityMatrix:
-	"""Reuse a cached statistic or evaluate it once without restoration."""
-	if name in results._metric_cache:
-		return results._metric_cache[name]
-	return results.evaluate(name, restore_removed=False)
-
-
-def _p_value_from_statistic(results: Any, statistic_name: str) -> CausalityMatrix:
-	"""Convert one named statistic matrix to its matching p-value matrix."""
-	statistic = _statistic_matrix(results, statistic_name)
-	stat_values = statistic.data.to_numpy(dtype=np.float64)
-	q_matrix = np.empty_like(stat_values, dtype=np.int_)
-	for cause_idx, cause in enumerate(results.causes):
-		q_matrix[:, cause_idx] = results.n_restrictions_for(cause)
-
-	if statistic_name == "f_statistic":
-		residual_df = np.empty_like(stat_values, dtype=np.int_)
-		for col, cause in enumerate(results.causes):
-			residual_df[:, col] = (
-				results.n_samples - results.n_unrestricted_parameters(cause)
-			)
-		p_values = p_value_from_f_test(stat_values, q_matrix, residual_df)
-		name = "f_statistic_p_value"
-	elif statistic_name == "wald_test":
-		p_values = p_value_from_wald_test(stat_values, q_matrix)
-		name = "wald_test_p_value"
-	else:
-		p_values = p_value_from_likelihood_ratio_test(stat_values, q_matrix)
-		name = "likelihood_ratio_p_value"
-
-	return results.make_matrix(
-		p_values,
-		name=name,
-		metadata={"removed_signal_value": 1.0},
-	)
-
-
-def _p_value_metric_name(results: Any) -> str:
-	"""Find a registered p-value companion for an evaluated statistic.
-
-	The companion convention is ``<statistic_name>_p_value``. This keeps the
-	meta-metric independent of the available statistical tests.
-	"""
-	for cache_key in results._metric_cache:
-		if not isinstance(cache_key, str):
-			continue
-		candidate = f"{cache_key}_p_value"
-		try:
-			resolve_metric(candidate)
-		except ResultsError:
-			continue
-		return candidate
-
-	default_name = "f_statistic_p_value"
-	try:
-		resolve_metric(default_name)
-	except ResultsError as exc:
-		raise ResultsError(
-			"No registered metric has a <metric>_p_value companion."
-		) from exc
-	return default_name
-
 
 @register_metric("f_statistic", "f")
-def f_statistic(results: Any) -> CausalityMatrix:
+def f_statistic(results: GrangerAnalysisResults) -> CausalityMatrix:
 	"""Compute the Granger F statistic per output and tested cause.
 
 	Assumes the reference model is restricted relative to the base model.
@@ -128,7 +71,7 @@ def f_statistic(results: Any) -> CausalityMatrix:
 
 	for cause_col, cause in enumerate(results.causes):
 		base_rss = results.unrestricted_rss_per_output(cause)
-		ref_rss = results.reference_rss_per_output(cause)
+		ref_rss = results.restricted_rss_per_output(cause)
 		q = results.n_restrictions_for(cause)
 		k_u = results.n_unrestricted_parameters(cause)
 		values[:, cause_col] = f_test_value(
@@ -142,84 +85,153 @@ def f_statistic(results: Any) -> CausalityMatrix:
 	return results.make_matrix(values, name="f_statistic", metadata={"removed_signal_value": 0.0})
 
 
-@register_metric(
-	"f_statistic_p_value",
-	"f_test_p_value",
-	"f_p_value",
-	"p_value_f",
-)
-def f_test_p_value(results: Any) -> CausalityMatrix:
-	"""Convert F statistics to upper-tail p-values per output and cause."""
-	return _p_value_from_statistic(results, "f_statistic")
-
-
 @register_metric("wald_test", "wald", "wald_statistic")
-def wald_test(results):
-	"""Evaluate slope restrictions in a consistent coefficient coordinate system."""
-	if results.dof_method == "rank":
-		values = np.empty((len(results.effects), len(results.causes)))
-		for col, cause in enumerate(results.causes):
-			values[:, col] = results.rank_wald_per_output(cause)
-		return results.make_matrix(values, name="wald_test", metadata={"removed_signal_value": 0.0, "hypothesis": "nested_prediction_spaces"})
-	values = np.full((len(results.effects), len(results.causes)), np.nan)
-	covariance_cache = {}
-	for col, cause in enumerate(results.causes):
-		u = results.get_snapshot(cause, "unrestricted")
-		r = results.get_snapshot(cause, "restricted")
-		um = results._require_snapshot_mask(u)
-		rm = results._require_snapshot_mask(r)
-		if um.shape != rm.shape or np.any(rm & ~um):
-			raise ResultsError("Restricted mask must be a subset of the unrestricted mask")
-		if u.bias_enabled != r.bias_enabled:
-			raise ResultsError("Compared snapshots must use matching intercept settings")
-		if u.weights is None:
-			continue
-		tested = um & ~rm
-		if results.dof_method == "active_support":
-			tested &= np.abs(u.weights) > results.active_support_tolerance
-		if not tested.any():
-			continue
-		space = u.metadata.get("coefficient_space")
-		if space == "model":
-			if results.preparation_context is None:
-				raise ResultsError("Model-space Wald coefficients require preparation context")
-			prepared = results.preparation_context.prepared_data
-			x = np.asarray(prepared.X_scaled, dtype=float)
-			y = np.asarray(prepared.y_scaled, dtype=float)
-			if "model_predictions" not in u.metadata:
-				raise ResultsError("Snapshot lacks model-space predictions; refit the analysis")
-			predictions = np.asarray(u.metadata["model_predictions"], dtype=float)
-		elif space == "raw" or (space is None and results.preparation_context is None):
-			x, y, predictions = results.X_true, results.y_true, u.predictions
-		else:
-			raise ResultsError("Ambiguous coefficient scale in legacy snapshot; refit the analysis")
-		key = id(u)
-		if key not in covariance_cache:
-			covariance_cache[key] = estimate_masked_weight_covariance(
-				x_train=x, y_true=y, y_pred=predictions,
-				coefficient_mask=um, fit_intercept=u.bias_enabled,
-			)
-		values[:, col] = wald_test_value(
-			weights=results._weights_as_feature_output(u.weights),
-			covariance=covariance_cache[key], coefficient_mask=um,
-			start=0, end=um.shape[1], tested_mask=tested,
-		)
-	return results.make_matrix(values, name="wald_test", metadata={"removed_signal_value": 0.0})
+def wald_test(results: GrangerAnalysisResults) -> CausalityMatrix:
+    """Evaluate Wald statistics using the selected DOF policy.
 
+    Args:
+        results: Snapshots, preparation context, and DOF configuration.
+    """
+    method = results.dof_method
 
-@register_metric(
-	"wald_test_p_value",
-	"wald_statistic_p_value",
-	"wald_p_value",
-	"p_value_wald",
-)
-def wald_p_value(results: Any) -> CausalityMatrix:
-	"""Convert Wald chi-square statistics to p-values per output and cause."""
-	return _p_value_from_statistic(results, "wald_test")
+    if method not in {"structural", "active_support", "rank"}:
+        raise ResultsError(
+            f"Unsupported DOF method: {method!r}"
+        )
+
+    shape = (len(results.effects), len(results.causes))
+    values = np.full(shape, np.nan, dtype=np.float64)
+    q_matrix = np.zeros(shape, dtype=np.int_)
+    status = np.full(shape, "no_tested_parameters", dtype=object)
+
+    covariance_cache = {}
+
+    for column, cause in enumerate(results.causes):
+        unrestricted = results.get_snapshot(
+            cause,
+            "unrestricted",
+        )
+
+        u_mask, r_mask = results._effective_masks_for(cause)
+        tested_mask = u_mask & ~r_mask
+
+        q = results.n_restrictions_for(cause)
+        q_matrix[:, column] = q
+
+        if not np.any(q > 0):
+            continue
+
+        x, y, predictions = results._snapshot_coordinates(
+            unrestricted
+        )
+
+        if method == "rank":
+            statistics, reasons = rank_wald_test_value(
+                y_true=y,
+                y_pred=predictions,
+                geometries=results._rank_geometry_for(cause),
+            )
+
+            values[:, column] = statistics
+
+            for output, reason in enumerate(reasons):
+                status[output, column] = (
+                    "ok" if reason is None else reason
+                )
+
+                if q[output] > 0 and reason is not None:
+                    warnings.warn(
+                        f"Rank-mode Wald unavailable for "
+                        f"cause={cause!r}, "
+                        f"effect={results.effects[output]!r}: "
+                        f"{reason}",
+                        RuntimeWarning,
+                        stacklevel=2,
+                    )
+
+            continue
+
+        if unrestricted.weights is None:
+            status[q > 0, column] = "missing_weights"
+            continue
+
+        weights = results._weights_as_feature_output(
+            unrestricted.weights
+        )
+
+        if not np.isfinite(weights[u_mask]).all():
+            raise ResultsError(
+                f"Non-finite enabled coefficients for cause {cause!r}"
+            )
+
+        eligible = np.flatnonzero(tested_mask.any(axis=1))
+
+        # Shared U snapshots can reuse covariance across causes.
+        cache_key = (
+            id(unrestricted),
+            u_mask.shape,
+            u_mask.tobytes(),
+            tuple(eligible.tolist()),
+        )
+
+        if cache_key not in covariance_cache:
+            covariance_cache[cache_key] = (
+                estimate_masked_weight_covariance(
+                    x_train=x,
+                    y_true=y[:, eligible],
+                    y_pred=predictions[:, eligible],
+                    coefficient_mask=u_mask[eligible],
+                    fit_intercept=unrestricted.bias_enabled,
+                )
+            )
+
+        covariance = covariance_cache[cache_key]
+
+        # Inactive stored values are not part of the effective model.
+        effective_weights = np.where(
+            u_mask[eligible],
+            weights[eligible],
+            0.0,
+        )
+
+        statistics = wald_test_value(
+            weights=effective_weights,
+            covariance=covariance,
+            coefficient_mask=u_mask[eligible],
+            start=0,
+            end=u_mask.shape[1],
+            tested_mask=tested_mask[eligible],
+        )
+
+        values[eligible, column] = statistics
+        status[eligible, column] = "ok"
+
+    hypothesis = (
+        "nested_prediction_spaces"
+        if method == "rank"
+        else "zero_slope_coefficients"
+    )
+
+    return results.make_matrix(
+        values,
+        name="wald_test",
+        metadata={
+            "removed_signal_value": 0.0,
+            "hypothesis": hypothesis,
+            "dof_method": method,
+            "active_support_tolerance": (
+                results.active_support_tolerance
+            ),
+            "rank_rcond": results.rank_rcond,
+            "n_restrictions": q_matrix.copy(),
+            "status": status.copy(),
+            "heuristic": method == "active_support",
+        },
+    )
 
 
 @register_metric("likelihood_ratio", "likelihood_ratio_test", "lr", "lr_test")
-def likelihood_ratio_test(results: Any) -> CausalityMatrix:
+def likelihood_ratio_test(results: GrangerAnalysisResults) -> CausalityMatrix:
 	"""Compute the RSS-based likelihood-ratio statistic per output and cause.
 
 	The reference and base predictions must use the same observations and
@@ -228,7 +240,7 @@ def likelihood_ratio_test(results: Any) -> CausalityMatrix:
 	values = np.empty((len(results.effects), len(results.causes)), dtype=np.float64)
 	for cause_col, cause in enumerate(results.causes):
 		base_rss = results.unrestricted_rss_per_output(cause)
-		ref_rss = results.reference_rss_per_output(cause)
+		ref_rss = results.restricted_rss_per_output(cause)
 		values[:, cause_col] = likelihood_ratio_test_value(
 			error_ref=ref_rss,
 			error_base=base_rss,
@@ -236,32 +248,159 @@ def likelihood_ratio_test(results: Any) -> CausalityMatrix:
 		)
 	return results.make_matrix(values, name="likelihood_ratio", metadata={"removed_signal_value": 0.0})
 
+@register_metric(
+    "f_statistic_p_value",
+    "f_test_p_value",
+    "f_p_value",
+    "p_value_f",
+)
+def f_test_p_value(results: GrangerAnalysisResults) -> CausalityMatrix:
+    """Compute F-test p-values using the current degrees-of-freedom policy.
+
+    Args:
+        results: Analysis results containing model snapshots and DOF settings.
+    """
+    statistic = results.evaluate(
+        "f_statistic",
+        restore_removed=False,
+    )
+    stat_values = statistic.data.loc[
+        results.effects, results.causes
+    ].to_numpy(dtype=np.float64)
+
+    n_restrictions = np.empty(stat_values.shape, dtype=np.int_)
+    residual_df = np.empty(stat_values.shape, dtype=np.int_)
+
+    for column, cause in enumerate(results.causes):
+        n_restrictions[:, column] = results.n_restrictions_for(cause)
+        residual_df[:, column] = (
+            results.n_samples
+            - results.n_unrestricted_parameters(cause)
+        )
+
+    p_values = p_value_from_f_test(
+        f_values=stat_values,
+        n_restrictions=n_restrictions,
+        residual_df=residual_df,
+    )
+
+    return results.make_matrix(
+        p_values,
+        name="f_statistic_p_value",
+        metadata={
+            "removed_signal_value": 1.0,
+            "statistic_name": "f_statistic",
+            "dof_method": results.dof_method,
+            "active_support_tolerance": results.active_support_tolerance,
+            "rank_rcond": results.rank_rcond,
+            "n_restrictions": n_restrictions.copy(),
+            "residual_df": residual_df.copy(),
+        },
+    )
+
 
 @register_metric(
-	"likelihood_ratio_p_value",
-	"likelihood_ratio_test_p_value",
-	"lr_p_value",
-	"p_value_lr",
-	"p_value_likelihood_ratio",
+    "wald_test_p_value",
+    "wald_statistic_p_value",
+    "wald_p_value",
+    "p_value_wald",
 )
-def likelihood_ratio_p_value(results: Any) -> CausalityMatrix:
-	"""Convert likelihood-ratio chi-square statistics to p-values."""
-	return _p_value_from_statistic(results, "likelihood_ratio")
+def wald_p_value(results: GrangerAnalysisResults) -> CausalityMatrix:
+    """Convert Wald statistics using their recorded restriction counts."""
+    statistic = results.evaluate(
+        "wald_test",
+        restore_removed=False,
+    )
+
+    stat_values = statistic.data.loc[
+        results.effects,
+        results.causes,
+    ].to_numpy(dtype=np.float64)
+
+    if "n_restrictions" not in statistic.metadata:
+        raise ResultsError(
+            "Wald statistic lacks restriction-count metadata"
+        )
+
+    q = np.asarray(
+        statistic.metadata["n_restrictions"],
+        dtype=np.int_,
+    )
+
+    if q.shape != stat_values.shape:
+        raise ResultsError(
+            "Wald restriction counts do not match the statistic shape"
+        )
+
+    p_values = p_value_from_wald_test(
+        test_values=stat_values,
+        df=q,
+    )
+
+    return results.make_matrix(
+        p_values,
+        name="wald_test_p_value",
+        metadata={
+            "removed_signal_value": 1.0,
+            "statistic_name": "wald_test",
+            "dof_method": statistic.metadata["dof_method"],
+            "active_support_tolerance": statistic.metadata[
+                "active_support_tolerance"
+            ],
+            "rank_rcond": statistic.metadata["rank_rcond"],
+            "n_restrictions": q.copy(),
+            "status": statistic.metadata["status"].copy(),
+            "heuristic": statistic.metadata["heuristic"],
+        },
+    )
 
 
-@register_metric("p_value")
-def p_value(results: Any) -> CausalityMatrix:
-	"""Convert the best available cached test statistic to p-values.
+@register_metric(
+    "likelihood_ratio_p_value",
+    "likelihood_ratio_test_p_value",
+    "lr_p_value",
+    "p_value_lr",
+    "p_value_likelihood_ratio",
+)
+def likelihood_ratio_p_value(results: GrangerAnalysisResults) -> CausalityMatrix:
+    """Compute likelihood-ratio p-values using the current DOF policy.
 
-	A previously evaluated statistic is paired with a registered metric named
-	``<statistic_name>_p_value``. If none is cached, F is used as the default.
-	"""
-	p_value_name = _p_value_metric_name(results)
-	return resolve_metric(p_value_name)(results)
+    Args:
+        results: Analysis results containing model snapshots and DOF settings.
+    """
+    statistic = results.evaluate(
+        "likelihood_ratio",
+        restore_removed=False,
+    )
+    stat_values = statistic.data.loc[
+        results.effects, results.causes
+    ].to_numpy(dtype=np.float64)
 
+    n_restrictions = np.empty(stat_values.shape, dtype=np.int_)
+
+    for column, cause in enumerate(results.causes):
+        n_restrictions[:, column] = results.n_restrictions_for(cause)
+
+    p_values = p_value_from_likelihood_ratio_test(
+        test_values=stat_values,
+        df=n_restrictions,
+    )
+
+    return results.make_matrix(
+        p_values,
+        name="likelihood_ratio_p_value",
+        metadata={
+            "removed_signal_value": 1.0,
+            "statistic_name": "likelihood_ratio",
+            "dof_method": results.dof_method,
+            "active_support_tolerance": results.active_support_tolerance,
+            "rank_rcond": results.rank_rcond,
+            "n_restrictions": n_restrictions.copy(),
+        },
+    )
 
 @register_metric("sign")
-def sign_metric(results: Any) -> CausalityMatrix:
+def sign_metric(results: GrangerAnalysisResults) -> CausalityMatrix:
 	"""Return coefficient-sum signs for effective effects and tested causes."""
 	values = np.zeros(
 		(len(results.effects), len(results.causes)),
@@ -327,23 +466,73 @@ def sign_metric(results: Any) -> CausalityMatrix:
 		metadata={"removed_signal_value": 0.0},
 	)
 
-@register_metric("base_mse")
-def base_mse(results: Any) -> CausalityMatrix:
-	"""Return unrestricted-model MSE per output, repeated for each cause."""
-	if results.base_snapshot is None:
-		values = np.full((len(results.effects), len(results.causes)), np.nan, dtype=np.float64)
-		return results.make_matrix(values, name="base_mse")
-	mse = results.base_rss_per_output() / max(results.n_samples, 1)
-	values = np.repeat(mse[:, np.newaxis], len(results.causes), axis=1)
-	return results.make_matrix(values, name="base_mse")
+def _rss_metric(
+    results: GrangerAnalysisResults,
+    *,
+    role: str,
+    normalize: bool,
+) -> CausalityMatrix:
+    """Build per-cause RSS or MSE for an explicit model role."""
+    if normalize and results.n_samples <= 0:
+        raise ResultsError(
+            "MSE evaluation requires at least one observation"
+        )
+
+    values = np.empty(
+        (len(results.effects), len(results.causes)),
+        dtype=np.float64,
+    )
+
+    for column, cause in enumerate(results.causes):
+        values[:, column] = results.rss_per_output(cause, role)
+
+    if normalize:
+        values /= float(results.n_samples)
+
+    suffix = "mse" if normalize else "rss"
+
+    return results.make_matrix(
+        values,
+        name=f"{role}_{suffix}",
+        metadata={"model_role": role},
+    )
 
 
-@register_metric("base_rss")
-def base_rss(results: Any) -> CausalityMatrix:
-	"""Return unrestricted-model RSS per output, repeated for each cause."""
-	if results.base_snapshot is None:
-		values = np.full((len(results.effects), len(results.causes)), np.nan, dtype=np.float64)
-		return results.make_matrix(values, name="base_rss")
-	rss = results.base_rss_per_output()
-	values = np.repeat(rss[:, np.newaxis], len(results.causes), axis=1)
-	return results.make_matrix(values, name="base_rss")
+@register_metric("unrestricted_rss")
+def unrestricted_rss(results: Any) -> CausalityMatrix:
+    """Return unrestricted RSS per effect and tested cause."""
+    return _rss_metric(
+        results,
+        role="unrestricted",
+        normalize=False,
+    )
+
+
+@register_metric("restricted_rss")
+def restricted_rss(results: Any) -> CausalityMatrix:
+    """Return restricted RSS per effect and tested cause."""
+    return _rss_metric(
+        results,
+        role="restricted",
+        normalize=False,
+    )
+
+
+@register_metric("unrestricted_mse")
+def unrestricted_mse(results: Any) -> CausalityMatrix:
+    """Return unrestricted MSE per effect and tested cause."""
+    return _rss_metric(
+        results,
+        role="unrestricted",
+        normalize=True,
+    )
+
+
+@register_metric("restricted_mse")
+def restricted_mse(results: Any) -> CausalityMatrix:
+    """Return restricted MSE per effect and tested cause."""
+    return _rss_metric(
+        results,
+        role="restricted",
+        normalize=True,
+    )
