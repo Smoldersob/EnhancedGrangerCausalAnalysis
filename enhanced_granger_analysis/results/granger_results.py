@@ -12,6 +12,7 @@ from typing import TYPE_CHECKING, Any, Iterable, Literal, Optional, Mapping
 
 import numpy as np
 import pandas as pd
+import warnings
 from numpy.typing import NDArray
 
 if TYPE_CHECKING:
@@ -572,35 +573,111 @@ class GrangerAnalysisResults:
 
 
 	def rank_wald_per_output(self, cause):
-		"""Test identifiable added prediction directions, not arbitrary aliased coefficients.
+		"""Compute projection-based Wald statistics for compatible outputs.
 
-		This rank-mode Wald uses fitted unrestricted means and classical OLS
-		residual variance. It does not need a fitted restricted model.
+		Use existing unrestricted predictions and OLS residual variance.
+		Return NaN for outputs that fail the rank-geometry or fit checks.
+		Do not refit models or project predictions to change the fitted model.
 		"""
 		u = self.get_snapshot(cause, "unrestricted")
 		_, y, pred = self._rank_coordinates(u)
+
 		values = np.full(len(self.effects), np.nan)
+
+		def report_skip(j, reason):
+			warnings.warn(
+				f"Rank-mode Wald unavailable for cause={cause!r}, "
+				f"effect={self.effects[j]!r}: {reason}",
+				RuntimeWarning,
+				stacklevel=3,
+			)
+
 		for j, g in enumerate(self._rank_geometry_for(cause)):
 			if g["q"] == 0:
+				# No added directions are retained under this rank policy.
 				continue
+
+			if not g["added_basis_valid"]:
+				report_skip(
+					j,
+					"incremental prediction space is unavailable "
+					f"({g['geometry_status']})",
+				)
+				continue
+
 			df = self.n_samples - g["rank_u"]
 			if df <= 0:
-				raise ValueError("Rank-mode residual degrees of freedom must be positive")
-			qu, qa = g["basis_u"], g["basis_added"]
-			# Reject a changed effective model rather than silently mixing rank
-			# truncation with a fit that used different prediction directions.
-			projection_error = np.linalg.norm(pred[:, j] - qu @ (qu.T @ pred[:, j]))
-			if projection_error > 1e-7 * max(1., np.linalg.norm(pred[:, j])):
-				raise ValueError("Fitted U is outside the retained rank space; align fitting and rank tolerance")
-			score = np.linalg.norm(qu.T @ (y[:, j] - pred[:, j]))
-			if score > 1e-7 * max(1., np.linalg.norm(qu.T @ y[:, j])):
-				raise ValueError("Rank-mode Wald requires an OLS-equivalent unrestricted fit")
-			sigma2 = np.sum((y[:, j] - pred[:, j]) ** 2) / df
-			numerator = np.sum((qa.T @ pred[:, j]) ** 2)
+				report_skip(
+					j,
+					"residual degrees of freedom are not positive",
+				)
+				continue
+
+			qu = g["basis_u"]
+			qa = g["basis_added"]
+			yj = y[:, j]
+			predj = pred[:, j]
+
+			if not np.isfinite(yj).all() or not np.isfinite(predj).all():
+				report_skip(
+					j,
+					"observations or predictions contain non-finite values",
+				)
+				continue
+
+			retained_pred = qu @ (qu.T @ predj)
+			projection_error = np.linalg.norm(predj - retained_pred)
+			projection_tolerance = 1e-7 * max(
+				1.0,
+				np.linalg.norm(predj),
+			)
+
+			if projection_error > projection_tolerance:
+				report_skip(
+					j,
+					"fitted predictions are outside the retained rank space "
+					f"(error={projection_error:.6g}, "
+					f"tolerance={projection_tolerance:.6g})",
+				)
+				continue
+
+			residual = yj - predj
+			score = np.linalg.norm(qu.T @ residual)
+			score_tolerance = 1e-7 * max(
+				1.0,
+				np.linalg.norm(qu.T @ yj),
+			)
+
+			if score > score_tolerance:
+				report_skip(
+					j,
+					"the unrestricted fit is not OLS-equivalent "
+					"in the retained rank space "
+					f"(error={score:.6g}, "
+					f"tolerance={score_tolerance:.6g})",
+				)
+				continue
+
+			sigma2 = float(np.sum(residual ** 2) / df)
+			numerator = float(np.sum((qa.T @ predj) ** 2))
+
+			if not np.isfinite(sigma2) or not np.isfinite(numerator):
+				report_skip(
+					j,
+					"the residual variance or numerator is non-finite",
+				)
+				continue
+
 			if sigma2 > 0:
 				values[j] = numerator / sigma2
 			elif numerator > 0:
 				values[j] = np.inf
+			else:
+				report_skip(
+					j,
+					"both the residual variance and numerator are zero",
+				)
+
 		return values
 
 
@@ -619,7 +696,12 @@ class GrangerAnalysisResults:
 					q_structural=int(np.count_nonzero(um[j] & ~rm[j])), q_rank=g["q"],
 					residual_df=self.n_samples-g["rank_u"], cutoff=g["cutoff"],
 					smallest_singular=float(s[-1]) if s.size else 0., condition=condition,
-					restricted_fit_performed=r.metadata.get("fit_performed")))
+					restricted_fit_performed=r.metadata.get("fit_performed"),
+					nesting_error=g["nesting_error"],
+					nesting_tolerance=g["nesting_tolerance"],
+					is_nested=g["is_nested"],
+					added_basis_valid=g["added_basis_valid"],
+					geometry_status=g["geometry_status"]))
 		return pd.DataFrame.from_records(records)
 
 	def _snapshot_for(self, cause: str, role: Literal["restricted", "unrestricted"]) -> ModelSnapshot:
