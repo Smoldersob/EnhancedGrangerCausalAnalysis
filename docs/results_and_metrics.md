@@ -121,6 +121,52 @@ apply a numerical tolerance to identify small coefficients.
 When base weights are unavailable, the current implementation falls back
 to structural counting.
 
+### Rank-based degrees of freedom
+
+The optional `rank` mode counts independent directions in the masked design matrices instead of counting active coefficient positions. It is useful when active predictors are linearly dependent or nearly dependent.
+
+Enable it after fitting and before evaluating metrics:
+
+```python
+results.set_dof_method("rank", rank_rcond=None)
+```
+
+For each tested cause and output, the method constructs the unrestricted and restricted design matrices, \(D_U\) and \(D_R\). Each matrix contains only the feature columns enabled by its snapshot mask, plus an intercept column when `bias_enabled=True`. Counts are then defined as:
+
+\[
+k_U=\operatorname{rank}(D_U),\qquad
+q=\operatorname{rank}(D_U)-\operatorname{rank}(D_R),\qquad
+df_{\mathrm{resid}}=n-k_U.
+\]
+
+The rank is computed from the design matrices, not from fitted coefficient values. Unlike `active_support`, this mode does not classify parameters by whether their estimates are numerically zero. When both designs have full column rank, the counts agree with `structural`. If removing a cause does not reduce the design rank, `q=0`; the corresponding test is treated as untestable.
+
+#### Numerical tolerance
+
+Rank is determined by SVD applied directly to the design matrices. For each cause–output pair, both designs use the same absolute singular-value cutoff:
+
+\[
+\tau=r_{\mathrm{cond}}\,s_{\max}(D_U).
+\]
+
+With `rank_rcond=None`, the relative cutoff is machine precision multiplied by `max(D_U.shape)`. An explicit value can be supplied:
+
+```python
+results.set_dof_method("rank", rank_rcond=1e-10)
+```
+
+A larger cutoff treats more weak directions as numerically redundant. It can change the effective model, so it should be consistent with the rank policy used during fitting. The method rejects truncated spaces that are no longer nested. Changing the counting method or tolerance invalidates the metric and rank-geometry caches.
+
+#### Effect on metrics
+
+- F uses rank-based `q` and unrestricted residual degrees of freedom.
+- LR retains its RSS-based statistic and uses rank-based `q` for its p-value.
+- In `rank` mode, Wald tests the identifiable prediction directions available in \(D_U\) but absent from \(D_R\). It uses the unrestricted fitted predictions and classical OLS residual variance, without requiring restricted predictions or an explicit inverse of \(D_U^\top D_U\). This avoids testing arbitrary coefficient representatives when coefficients are not uniquely identifiable.
+
+Rank-mode Wald requires an OLS-equivalent unrestricted fit within the retained prediction space. It checks this condition numerically and raises an error when it is not satisfied. Rank-based counting alone does not make classical inference valid for regularized, nonlinear, or insufficiently optimized models.
+
+Use `results.rank_diagnostics()` to inspect structural counts, numerical ranks, restriction counts, residual degrees of freedom, singular-value cutoffs, and design condition numbers for each cause–output pair. The existing `structural` and `active_support` modes remain available; **`rank` is opt-in**.
+
 ### Restriction-count contract
 
 `n_restrictions_for(cause)` returns one restriction count per effective effect.

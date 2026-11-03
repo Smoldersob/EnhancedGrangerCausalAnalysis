@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from collections.abc import Mapping, Sequence
-from typing import Any, Protocol, TypeAlias
+from typing import Any, Literal, Protocol, TypeAlias
 
 import numpy as np
 from numpy.typing import NDArray
@@ -28,6 +28,16 @@ class GrangerModelProtocol(Protocol):
     @property
     def backend(self) -> str:
         """Canonical library backend identifier."""
+        ...
+
+    @property
+    def base_model_role(self) -> Literal["unrestricted", "restricted"] | None:
+        """Role of a model shared across cause comparisons, if any."""
+        ...
+
+    @property
+    def use_bias(self) -> bool:
+        """Whether the predictor includes an intercept."""
         ...
 
     @property
@@ -113,6 +123,14 @@ class GrangerModelProtocol(Protocol):
         Relative to the baseline established by construction/rebuild().
         Preserve parameters, structural constraints and fitted status.
         """
+        ...
+
+    def add_variables(self, variable_indices: Sequence[int]) -> None:
+        """Restore the baseline feature mask, ignoring the supplied indices."""
+        ...
+
+    def get_active_mask(self) -> NDArray[np.bool_]:
+        """Return an independent (outputs, features) slope-activity mask."""
         ...
 
     def reset_components(

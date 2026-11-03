@@ -61,7 +61,7 @@ class MultiTaskGrangerAPI:
         model_config: Optional[Dict[str, Any]] = None,
         search: Any = None,
         search_prepared_data: Any = None,
-        fit_restricted: bool = True,
+        train_only_unrestricted: bool = False,
     ) -> GrangerAnalysisResults:
         """Execute an analysis using declarative preprocessing settings.
 
@@ -110,5 +110,5 @@ class MultiTaskGrangerAPI:
             data=data,
             prepared_data=prepared_data,
             search_prepared_data=search_prepared_data,
-            fit_restricted=fit_restricted,
+            train_only_unrestricted=train_only_unrestricted,
         )

@@ -20,6 +20,7 @@ from ..core.exceptions import (
 )
 
 from ..modeling.artifacts import FitOutcome
+from ..core.models.training_result import TrainingResult
 from ..modeling.assembler import ModelAssembler
 from ..modeling.initialization import ModelInitializer
 
@@ -156,38 +157,73 @@ class AnalysisRunner:
 			data,
 			roles=spec.roles,
 		).prepared_data_
-
+	
 	def run(
-		self,
-		*,
-		model: GrangerModelProtocol,
-		prepared: PreparedData,
+		self, *, model: GrangerModelProtocol, prepared: PreparedData,
 		progress: AnalysisRunProgress,
 		initial_weights: Sequence[np.ndarray] | None = None,
 		backend: str | None = None,
-		fit_restricted: bool = True,
+		train_only_unrestricted: bool = False,
 	) -> GrangerAnalysisResults:
-		"""Fit the base model and optionally all restricted models."""
+		"""Fit U/R pairs, optionally capturing restricted states without fitting."""
+		if not isinstance(train_only_unrestricted, bool):
+			raise TypeError("train_only_unrestricted must be a bool")
+		role = model.base_model_role
+		if role not in (None, "restricted", "unrestricted"):
+			raise DataValidationError("Invalid base_model_role")
+		initial = [np.asarray(w).copy() for w in (
+			initial_weights if initial_weights is not None else model.get_weights()
+		)]
+		results = progress.results
+		results.unrestricted_snapshots.clear()
+		results.restricted_snapshots.clear()
+		results.reference_snapshots = results.restricted_snapshots
+		results.base_snapshot = None
+		results.base_model_role = None
+		results._rss_cache.clear()
+		results._metric_cache.clear()
+		progress.base_weights = None
 
-		progress.base_weights = self.fit_base(
-			model=model,
-			prepared=prepared,
-			results=progress.results,
-			initial_weights=initial_weights,
-			backend=backend,
-		)
-
-		if fit_restricted:
-			self.fit_restricted_models(
-				model=model,
-				prepared=prepared,
-				results=progress.results,
-				base_weights=progress.base_weights,
-				initial_weights=initial_weights,
-				backend=backend,
+		if role == "unrestricted":
+			progress.base_weights = self.fit_base(
+				model=model, prepared=prepared, results=results,
+				initial_weights=initial, backend=backend,
 			)
+			for cause in prepared.tested_causes:
+				self.fit_restricted(
+					model=model, prepared=prepared, results=results,
+					cause=cause, base_weights=progress.base_weights,
+					backend=backend, train_model=not train_only_unrestricted,
+					source_cause=None,
+				)
+			return results
 
-		return progress.results
+		if role == "restricted" and not train_only_unrestricted:
+			progress.base_weights = self.fit_base(
+				model=model, prepared=prepared, results=results,
+				initial_weights=initial, backend=backend,
+			)
+			for cause in prepared.tested_causes:
+				self.fit_unrestricted(
+					model=model, prepared=prepared, results=results,
+					cause=cause, base_weights=progress.base_weights,
+					backend=backend,
+				)
+			return results
+
+		# No fitted shared baseline: each R starts from its matching U.
+		for cause in prepared.tested_causes:
+			unrestricted_weights = self.fit_unrestricted(
+				model=model, prepared=prepared, results=results,
+				cause=cause, initial_weights=initial, backend=backend,
+			)
+			self.fit_restricted(
+				model=model, prepared=prepared, results=results,
+				cause=cause, base_weights=unrestricted_weights,
+				backend=backend, train_model=not train_only_unrestricted,
+				source_cause=cause,
+			)
+		return results
 
 	def fit_base(
 		self,
@@ -212,45 +248,59 @@ class AnalysisRunner:
 			cause=None,
 			outcome=outcome,
 			backend=backend,
+			role=getattr(model, "base_model_role", "unrestricted"),
 		)
 
-		return [
-			np.asarray(weight).copy()
-			for weight in outcome.weights
-		]
+		return [np.asarray(weight).copy() for weight in outcome.weights]
 
 	def fit_restricted(
-		self,
-		*,
-		model: GrangerModelProtocol,
-		prepared: PreparedData,
-		results: GrangerAnalysisResults,
-		cause: str,
-		base_weights: Sequence[np.ndarray] | None,
+		self, *, model: GrangerModelProtocol, prepared: PreparedData,
+		results: GrangerAnalysisResults, cause: str,
+		base_weights: Sequence[np.ndarray] | None = None,
 		initial_weights: Sequence[np.ndarray] | None = None,
-		start_with_base: bool = True,
-		start_with_initial: bool = False,
-		backend: str | None = None,
+		start_with_base: bool = True, start_with_initial: bool = False,
+		backend: str | None = None, train_model: bool = True,
+		source_cause: str | None = None,
 	) -> None:
-		"""Fit and store one restricted model."""
-
-		outcome = self._trainer.fit_restricted(
-			model=model,
-			prepared=prepared,
-			cause=cause,
-			base_weights=base_weights,
-			initial_weights=initial_weights,
-			start_with_base=start_with_base,
-			start_with_initial=start_with_initial,
-		)
-
+		"""Fit R or capture R from the currently fitted corresponding U."""
+		if not isinstance(train_model, bool):
+			raise TypeError("train_model must be a bool")
+		selected_base = base_weights if start_with_base else None
+		selected_initial = initial_weights if start_with_initial else None
+		if train_model:
+			outcome = self._trainer.fit_restricted(
+				model=model, prepared=prepared, cause=cause,
+				base_weights=selected_base, initial_weights=selected_initial,
+			)
+		else:
+			outcome = self._trainer.capture_restricted(
+				model=model, prepared=prepared, cause=cause,
+				source_weights=base_weights,
+			)
 		self.store_fit_outcome(
-			prepared=prepared,
-			results=results,
-			cause=cause,
-			outcome=outcome,
-			backend=backend,
+			prepared=prepared, results=results, cause=cause,
+			outcome=outcome, backend=backend, role="restricted",
 		)
+		snapshot = results.get_snapshot(cause, "restricted")
+		snapshot.metadata["fit_performed"] = train_model
+		if not train_model:
+			snapshot.metadata["derived_from_role"] = "unrestricted"
+			snapshot.metadata["derived_from_cause"] = source_cause
+
+	def fit_unrestricted(
+		self, *, model, prepared, results, cause,
+		base_weights=None, initial_weights=None, backend=None,
+	) -> list[np.ndarray]:
+		"""Fit U and return native weights, including its intercept."""
+		outcome = self._trainer.fit_unrestricted(
+			model=model, prepared=prepared, cause=cause,
+			base_weights=base_weights, initial_weights=initial_weights,
+		)
+		self.store_fit_outcome(
+			prepared=prepared, results=results, cause=cause,
+			outcome=outcome, backend=backend, role="unrestricted",
+		)
+		return [np.asarray(w).copy() for w in outcome.weights]
 
 	def fit_restricted_models(
 		self,
@@ -285,6 +335,7 @@ class AnalysisRunner:
 		cause: str | None,
 		outcome: FitOutcome,
 		backend: str | None = None,
+		role: str | None = None,
 	) -> None:
 		"""Convert model-scale artifacts to the analysis snapshot format."""
 
@@ -292,14 +343,15 @@ class AnalysisRunner:
 			outcome.predictions
 		)
 
-		weights = np.asarray(
-			outcome.weights[0],
-			dtype=float,
-		).copy()
+		raw_weights = np.asarray(outcome.weights[0], dtype=float)
+		weights = raw_weights.T.copy()
 
 		metadata = {
+			"fit_performed": True,
 			"timings": dict(outcome.timings),
 			"backend": backend,
+			"coefficient_space": "model",
+			"model_predictions": np.array(outcome.predictions, dtype=float, copy=True),
 		}
 
 		if cause is None:
@@ -307,6 +359,15 @@ class AnalysisRunner:
 				predictions,
 				weights,
 				metadata,
+				active_slope_mask=outcome.active_slope_mask,
+				bias_enabled=outcome.bias_enabled,
+				role=role,
+			)
+		elif role == "unrestricted":
+			results.set_unrestricted_snapshot(
+				cause, predictions, weights, metadata,
+				active_slope_mask=outcome.active_slope_mask,
+				bias_enabled=outcome.bias_enabled,
 			)
 		else:
 			results.set_reference_snapshot(
@@ -314,48 +375,42 @@ class AnalysisRunner:
 				predictions,
 				weights,
 				metadata,
+				active_slope_mask=outcome.active_slope_mask,
+				bias_enabled=outcome.bias_enabled,
 			)
 
 	@staticmethod
 	def save_snapshot(
-		*,
-		model: GrangerModelProtocol,
-		prepared: PreparedData,
-		results: GrangerAnalysisResults,
-		cause: str | None,
+		*, model: GrangerModelProtocol, prepared: PreparedData,
+		results: GrangerAnalysisResults, cause: str | None,
 		backend: str | None = None,
 		additional_metadata: Mapping[str, Any] | None = None,
+		role: str | None = None, fit_performed: bool = False,
 	) -> None:
-		"""Store the current model state without performing a new fit."""
-
-		predictions = prepared.y_scaler.inverse_transform(
-			np.asarray(
-				model.predict(prepared.X_scaled),
-				dtype=float,
-			)
+		"""Capture the current state through the same storage path as fitted results."""
+		if not model.is_fitted:
+			raise DataValidationError("Snapshot capture requires a fitted predictor")
+		if role is None:
+			role = model.base_model_role if cause is None else "restricted"
+		if role not in ("restricted", "unrestricted"):
+			raise DataValidationError("An explicit snapshot role is required")
+		outcome = FitOutcome(
+			predictions=np.array(model.predict(prepared.X_scaled), dtype=float, copy=True),
+			weights=[np.asarray(w).copy() for w in model.get_weights()],
+			training_result=TrainingResult(), timings={},
+			active_slope_mask=model.get_active_mask().copy(),
+			bias_enabled=model.use_bias,
 		)
-
-		weights = np.asarray(
-			model.get_weights()[0],
-			dtype=float,
-		).copy()
-
-		metadata = dict(additional_metadata or {})
-		metadata["backend"] = backend
-
-		if cause is None:
-			results.set_base_snapshot(
-				predictions,
-				weights,
-				metadata,
-			)
-		else:
-			results.set_reference_snapshot(
-				cause,
-				predictions,
-				weights,
-				metadata,
-			)
+		AnalysisRunner.store_fit_outcome(
+			prepared=prepared, results=results, cause=cause,
+			outcome=outcome, backend=backend, role=role,
+		)
+		snapshot = results.base_snapshot if cause is None else results.get_snapshot(cause, role)
+		# Coordinate and fit provenance cannot be overridden by arbitrary metadata.
+		for key, value in dict(additional_metadata or {}).items():
+			if key not in {"coefficient_space", "model_predictions", "fit_performed"}:
+				snapshot.metadata[key] = value
+		snapshot.metadata["fit_performed"] = bool(fit_performed)
 
 	@staticmethod
 	def create_results(
@@ -379,8 +434,8 @@ class AnalysisRunner:
 					"requested_roles": prepared.requested_roles,
 					"effective_roles": prepared.effective_roles,
 					"removed_variables": prepared.removed_variables,
-                    "split": prepared.split_snapshot(),
-                },
+					"split": prepared.split_snapshot(),
+				},
 			)
 		)
 
@@ -393,7 +448,7 @@ class AnalysisRunner:
 		data: pd.DataFrame | Sequence[pd.DataFrame] | None = None,
 		prepared_data: PreparedData | None = None,
 		search_prepared_data: PreparedData | None = None,
-		fit_restricted: bool = True,
+		train_only_unrestricted: bool = False,
 	) -> GrangerAnalysisResults:
 		"""Execute a complete analysis from configuration and observations.
 
@@ -486,7 +541,7 @@ class AnalysisRunner:
 			progress=progress,
 			initial_weights=initial_weights,
 			backend=modeling.backend,
-			fit_restricted=fit_restricted,
+			train_only_unrestricted=train_only_unrestricted,
 		)
 		results.model_search_result = search_result
 		results.effective_modeling = modeling

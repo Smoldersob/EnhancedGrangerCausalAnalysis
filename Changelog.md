@@ -1000,3 +1000,77 @@ that all backends have been validated or that a release has been published.
   fresh components from `best_modeling`.
 - Legacy `hiperoptimalization_state` and `hiperoptimalization_conf` settings
   are rejected with an actionable migration message.
+
+## 2.12.0 
+
+### Overview
+First developt as attepmt to create update for version 3. Later changed to be fix and update to version 2, because of its importance to results. It refactors model configuration,
+training order, snapshot storage, and statistical evaluation to support
+shared unrestricted baselines, shared restricted baselines, and analyses
+without a shared baseline.
+
+### Added
+- Added `base_model_role` to the model adapter contract to identify a shared
+  unrestricted baseline, a shared restricted baseline, or no shared baseline.
+- Added `add_variables()` to the Keras, PyTorch, and NumPy adapters.
+- Added `get_active_mask()` to expose enabled coefficient positions per output.
+- Added active slope masks and bias information to fit outcomes and snapshots.
+- Added cause-specific storage and accessors for both restricted and
+  unrestricted snapshots. Multiple causes can reference one shared snapshot.
+- Added numerical regression tests comparing F, likelihood-ratio, and Wald
+  statistics and their p-values against independent OLS reference fits.
+- Added regression coverage for rectangular result matrices, mixed
+  restriction counts, scaling consistency, and active-support counting.
+- Added new option for calculating the restrictions count named `rank`. It is counts number of degrees of freedom of model base on lags selected by mask and rank of the used subset used for calculating the output.
+
+### Changed
+- Defined variable addition and omission relative to the baseline
+  configuration rather than the current masking state.
+- Unified restricted and unrestricted fitting through the existing
+  `GrangerTrainer` implementation.
+- Updated training order to fit a shared baseline first. Without a shared
+  baseline, unrestricted models are fitted before restricted models.
+- Preserved baseline weight reuse for hot starts while keeping weight
+  restoration separate from optimizer and callback resets.
+- Updated metrics to use the restricted and unrestricted snapshots assigned
+  to each cause instead of assuming that the baseline is unrestricted.
+- Replaced global matrix-width parameter counts with per-output counts
+  derived from each unrestricted snapshot, including bias.
+- Updated restriction counts to use differences between the restricted and
+  unrestricted active masks.
+- Made unrestricted parameter counting consistent with the selected
+  structural or active-support convention.
+- Reused covariance estimates for causes sharing an unrestricted snapshot
+  within a Wald evaluation.
+
+### Fixed
+- Fixed F-statistic evaluation so that zero restrictions invalidate only
+  the affected outputs, not the entire output vector.
+- Fixed the orientation of residual degrees of freedom used for F-test
+  p-values.
+- Fixed Wald evaluation mixing model-scale coefficients with raw-scale
+  design data and residuals.
+- Recorded coefficient coordinates and model-scale predictions explicitly
+  while retaining public predictions in original units.
+- Fixed positive infinite test statistics producing missing p-values
+  instead of zero.
+- Fixed stale RSS cache entries after replacing baseline or restricted
+  snapshots.
+- Fixed covariance handling for outputs without active slope coefficients.
+- Fixed the missing optional `base_weights` argument in the no-baseline
+  restricted-fitting path.
+- Added validation for incompatible intercept settings and materially worse
+  unrestricted fits.
+
+### Compatibility Notes
+- Preserved joint multi-output training and the existing exported weight
+  layout across backends.
+- Preserved existing conditional model names and aliases.
+- Statistical results may differ from previous versions because parameter
+  counts, degrees of freedom, and Wald coordinate handling were corrected.
+- Legacy snapshots with ambiguous coefficient coordinates must be refitted
+  before Wald evaluation.
+- Active-support counting remains a heuristic and does not guarantee valid
+  classical inference for regularized models.
+- This update prepares the analysis infrastructure for additional model
+  approaches; it does not introduce the pairwise Granger model.
