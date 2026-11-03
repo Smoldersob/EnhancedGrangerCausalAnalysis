@@ -318,42 +318,102 @@ def p_value_from_likelihood_ratio_test(
 
 
 def nested_design_geometry(design_u, design_r, rcond=None):
-	"""Describe nested prediction spaces using SVD and a common absolute cutoff."""
-	u = np.asarray(design_u, dtype=float)
-	r = np.asarray(design_r, dtype=float)
-	if u.ndim != 2 or r.ndim != 2 or u.shape[0] != r.shape[0]:
-		raise ResultsError("Nested designs must be 2D with matching rows")
-	if not np.isfinite(u).all() or not np.isfinite(r).all():
-		raise ResultsError("Designs must contain finite values")
-	if u.shape[0] == 0:
-		raise ResultsError("Designs must contain observations")
-	if rcond is not None and (isinstance(rcond, (bool, np.bool_))
-			or not np.isfinite(rcond) or not 0 <= rcond < 1):
-		raise ResultsError("rank_rcond must be None or a finite number in [0, 1)")
-	rel = np.finfo(float).eps * max(u.shape) if rcond is None else float(rcond)
-	qu, su, _ = np.linalg.svd(u, full_matrices=False)
-	qr, sr, _ = np.linalg.svd(r, full_matrices=False)
-	cutoff = rel * (su[0] if su.size else 0.)
-	ru = int(np.count_nonzero(su > cutoff))
-	rr = int(np.count_nonzero(sr > cutoff))
-	qu, qr = qu[:, :ru], qr[:, :rr]
-	if rr > ru:
-		raise ResultsError("Restricted numerical rank exceeds unrestricted rank")
-	nesting_error = np.linalg.norm(qr - qu @ (qu.T @ qr), ord='fro')
-	if nesting_error > 1e-7 * max(1., np.sqrt(rr)):
-		raise ResultsError(
-			"SVD-truncated spaces are not nested. Reduce rank_rcond or refit "
-			"the models using a consistent rank policy."
-		)
-	q = ru - rr
-	if q:
-		increment = qu - qr @ (qr.T @ qu)
-		qa, sa, _ = np.linalg.svd(increment, full_matrices=False)
-		if np.count_nonzero(sa > .5) != q:
-			raise ResultsError("Cannot identify the incremental prediction space")
-		qa = qa[:, :q]
-	else:
-		qa = np.empty((u.shape[0], 0))
-	return dict(rank_u=ru, rank_r=rr, q=q, cutoff=cutoff,
-				singular_u=su, singular_r=sr, basis_u=qu,
-				basis_r=qr, basis_added=qa)
+    """Compute design ranks and optional nested-space geometry.
+
+    Rank counts remain available when independent SVD truncations are
+    not nested. In that case, basis_added is None and must not be used
+    by a projection-based Wald calculation.
+    """
+    u = np.asarray(design_u, dtype=float)
+    r = np.asarray(design_r, dtype=float)
+
+    if u.ndim != 2 or r.ndim != 2 or u.shape[0] != r.shape[0]:
+        raise ResultsError("Nested designs must be 2D with matching rows")
+
+    if not np.isfinite(u).all() or not np.isfinite(r).all():
+        raise ResultsError("Designs must contain finite values")
+
+    if u.shape[0] == 0:
+        raise ResultsError("Designs must contain observations")
+
+    if rcond is not None and (
+        isinstance(rcond, (bool, np.bool_))
+        or not np.isfinite(rcond)
+        or not 0 <= rcond < 1
+    ):
+        raise ResultsError(
+            "rank_rcond must be None or a finite number in [0, 1)"
+        )
+
+    rel = (
+        np.finfo(float).eps * max(u.shape)
+        if rcond is None
+        else float(rcond)
+    )
+
+    qu_full, su, _ = np.linalg.svd(u, full_matrices=False)
+    qr_full, sr, _ = np.linalg.svd(r, full_matrices=False)
+
+    cutoff = rel * (float(su[0]) if su.size else 0.0)
+
+    ru = int(np.count_nonzero(su > cutoff))
+    rr = int(np.count_nonzero(sr > cutoff))
+
+    qu = qu_full[:, :ru]
+    qr = qr_full[:, :rr]
+
+    if rr > ru:
+        raise ResultsError(
+            "Restricted numerical rank exceeds unrestricted rank"
+        )
+
+    q = ru - rr
+
+    nesting_error = float(
+        np.linalg.norm(
+            qr - qu @ (qu.T @ qr),
+            ord="fro",
+        )
+    )
+    nesting_tolerance = 1e-7 * max(1.0, np.sqrt(rr))
+    is_nested = nesting_error <= nesting_tolerance
+
+    qa = None
+    added_basis_valid = False
+    geometry_status = "non_nested_after_truncation"
+
+    if is_nested:
+        if q == 0:
+            qa = np.empty((u.shape[0], 0))
+            added_basis_valid = True
+            geometry_status = "nested"
+        else:
+            increment = qu - qr @ (qr.T @ qu)
+            qa_full, sa, _ = np.linalg.svd(
+                increment,
+                full_matrices=False,
+            )
+
+            if int(np.count_nonzero(sa > 0.5)) == q:
+                qa = qa_full[:, :q]
+                added_basis_valid = True
+                geometry_status = "nested"
+            else:
+                geometry_status = "unstable_incremental_basis"
+
+    return dict(
+        rank_u=ru,
+        rank_r=rr,
+        q=q,
+        cutoff=cutoff,
+        singular_u=su,
+        singular_r=sr,
+        basis_u=qu,
+        basis_r=qr,
+        basis_added=qa,
+        nesting_error=nesting_error,
+        nesting_tolerance=nesting_tolerance,
+        is_nested=is_nested,
+        added_basis_valid=added_basis_valid,
+        geometry_status=geometry_status,
+    )
