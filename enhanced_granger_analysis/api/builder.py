@@ -720,13 +720,7 @@ class MultiTaskGrangerBuilder:
         self._base_weights = None
 
         if self._results is not None:
-            self._results.base_snapshot = None
-            self._results.reference_snapshots.clear()
-            self._results.restricted_snapshots.clear()
-            self._results.unrestricted_snapshots.clear()
-            self._results._rss_cache.clear()
-            self._results._metric_cache.clear()
-
+            self._results.clear_snapshots()
         return self._model
 
     def initialize_weights(self, initializer=None):
@@ -843,33 +837,37 @@ class MultiTaskGrangerBuilder:
         self,
         cause: Optional[str],
         outcome: FitOutcome,
+        *,
+        role: str,
     ) -> None:
-        """Store fit artifacts through the analysis runner."""
-
+        """Store fit artifacts using an explicit statistical role."""
         self._analysis_runner.store_fit_outcome(
             prepared=self._prepared_data,
             results=self._results,
             cause=cause,
             outcome=outcome,
             backend=self._backend,
+            role=role,
         )
 
     def _save_snapshot(
         self,
         cause: Optional[str],
         additional_metadata: Optional[Mapping[str, Any]] = None,
+        *,
+        role: str,
     ):
-        """Store the current model state through the analysis runner."""
-
-        self._analysis_runner.save_snapshot(
+        """Capture the current model using an explicit statistical role."""
+        return self._analysis_runner.save_snapshot(
             model=self._model,
             prepared=self._prepared_data,
             results=self._results,
             cause=cause,
             backend=self._backend,
             additional_metadata=additional_metadata,
+            role=role,
         )
-
+    
     @property
     def results(self):
         """
@@ -1018,11 +1016,6 @@ class MultiTaskGrangerBuilder:
             self._results = None
         elif self._results is not None:
             # Keep preparation context, but discard results of the old model.
-            self._results.base_snapshot = None
-            self._results.reference_snapshots.clear()
-            self._results.restricted_snapshots.clear()
-            self._results.unrestricted_snapshots.clear()
-            self._results._rss_cache.clear()
-            self._results._metric_cache.clear()
+            self._results.clear_snapshots()
 
 MultitaskGrangerBuilder = MultiTaskGrangerBuilder

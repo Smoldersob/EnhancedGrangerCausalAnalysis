@@ -1074,3 +1074,63 @@ without a shared baseline.
   classical inference for regularized models.
 - This update prepares the analysis infrastructure for additional model
   approaches; it does not introduce the pairwise Granger model.
+
+# 2.12.1 - Results and Wald refactor
+
+Status: integration and regression validation pending. This entry records the
+refactor specified for the development branch; it is not a stable-release or
+cross-backend validation claim.
+
+### Changed
+
+- Use unrestricted/restricted snapshot mappings as the canonical result store.
+  Register shared snapshots for multiple causes without copying their arrays.
+- Centralize snapshot reset and invalidation of RSS, metric, and rank caches.
+- Require explicit snapshot roles in runner and builder storage paths.
+  Preserve shared fitting and native initialization weights as execution concepts.
+- Consolidate structural and effective mask preparation and per-output parameter
+  counts. Active support uses the unrestricted support for both U and R masks.
+- Use effective unrestricted support for Wald covariance estimation as well as
+  tested-coefficient selection. Retain fitted predictions without support refitting;
+  active-support inference remains an intentional L1-oriented heuristic.
+- Move rank-Wald numerical execution from the result container to statistics.py.
+  Keep metric orchestration in metrics.py and shared design geometry in results.
+- Record Wald restriction counts and per-cell availability diagnostics with the
+  statistic. Use those recorded counts when calculating Wald p-values.
+- Preserve rank counts when truncated spaces are not nested; mark rank-Wald
+  unavailable for incompatible geometry or fits rather than replacing predictions.
+- Document OLS-form covariance assumptions, coordinate consistency, support
+  tolerance, rank tolerance, and the distinction between computed and restored cells.
+
+### Added
+
+- Add bulk snapshot registration, unified role-based RSS access, and explicit
+  unrestricted/restricted RSS and MSE metrics.
+- Add test-specific p-value convenience properties and Wald diagnostic metadata.
+- Specify regression coverage for shared snapshots, nested masks, active support,
+  rank deficiency, coordinate consistency, and cache invalidation. Test execution
+  and cross-backend statistical calibration remain to be verified.
+
+### Removed / Breaking changes
+
+- Remove the separate base/reference result representation and legacy snapshot
+  setters. Use ModelSnapshot with register_snapshot() or register_snapshots().
+- Remove the generic p_value metric and results.p_value property. Select F,
+  Wald, or likelihood-ratio p-values explicitly; cache history no longer selects
+  the statistical test.
+- Replace base_rss/base_mse metrics with explicit role-based diagnostics. Do not
+  alias them silently to unrestricted diagnostics: a shared training base may be R.
+- Remove rank_wald_per_output() from GrangerAnalysisResults. Evaluate wald_test
+  through the metric registry.
+
+### Compatibility notes
+
+- Keep fit_base(), model.base_model_role, and native base_weights for execution
+  strategy and warm-start initialization; these are not separate result stores.
+- Structural and active-support Wald require full-rank active designs and positive
+  residual degrees of freedom. They do not silently switch to rank mode.
+- Rank-Wald requires compatible retained spaces and OLS-equivalent U predictions.
+  Per-output compatibility failures produce NaN and warnings; invalid inputs raise.
+- A zero restriction count produces NaN for the test and its p-value, not evidence
+  of absence of causality. Neutral restored p-values remain a reporting convention.
+- See docs/results_and_metrics.md for the updated interface and migration table.
