@@ -417,3 +417,142 @@ def nested_design_geometry(design_u, design_r, rcond=None):
         added_basis_valid=added_basis_valid,
         geometry_status=geometry_status,
     )
+
+def rank_wald_test_value(
+    y_true: NDArray[np.float64],
+    y_pred: NDArray[np.float64],
+    geometries: list[dict],
+) -> tuple[NDArray[np.float64], list[str | None]]:
+    """Compute projection-based Wald statistics per output.
+
+    Args:
+        y_true: Targets in the unrestricted model coordinates.
+        y_pred: Existing unrestricted predictions in the same coordinates.
+        geometries: Nested-design geometry for each output.
+
+    Returns:
+        Statistics and optional reasons for unavailable outputs.
+    """
+    y = ensure_2d(y_true)
+    predictions = ensure_2d(y_pred)
+
+    if y.shape != predictions.shape:
+        raise ResultsError(
+            "Targets and predictions must have matching shapes"
+        )
+
+    if not np.isfinite(y).all() or not np.isfinite(predictions).all():
+        raise ResultsError(
+            "Rank-Wald targets and predictions must be finite"
+        )
+
+    n_samples, n_outputs = y.shape
+
+    if len(geometries) != n_outputs:
+        raise ResultsError(
+            "One rank geometry is required for each output"
+        )
+
+    values = np.full(n_outputs, np.nan, dtype=np.float64)
+    reasons: list[str | None] = [None] * n_outputs
+
+    for output, geometry in enumerate(geometries):
+        q = int(geometry["q"])
+
+        if q == 0:
+            reasons[output] = "no additional retained directions"
+            continue
+
+        if not geometry["added_basis_valid"]:
+            reasons[output] = (
+                "incremental prediction space is unavailable: "
+                f"{geometry['geometry_status']}"
+            )
+            continue
+
+        residual_df = n_samples - int(geometry["rank_u"])
+
+        if residual_df <= 0:
+            reasons[output] = (
+                "residual degrees of freedom are not positive"
+            )
+            continue
+
+        basis_u = np.asarray(
+            geometry["basis_u"],
+            dtype=np.float64,
+        )
+        basis_added = np.asarray(
+            geometry["basis_added"],
+            dtype=np.float64,
+        )
+
+        if (
+            basis_u.shape != (n_samples, int(geometry["rank_u"]))
+            or basis_added.shape != (n_samples, q)
+        ):
+            raise ResultsError("Invalid rank-Wald basis dimensions")
+
+        target = y[:, output]
+        prediction = predictions[:, output]
+
+        retained_prediction = basis_u @ (
+            basis_u.T @ prediction
+        )
+
+        projection_error = np.linalg.norm(
+            prediction - retained_prediction
+        )
+        projection_tolerance = 1e-7 * max(
+            1.0,
+            np.linalg.norm(prediction),
+        )
+
+        if projection_error > projection_tolerance:
+            reasons[output] = (
+                "predictions are outside the retained rank space "
+                f"(error={projection_error:.6g}, "
+                f"tolerance={projection_tolerance:.6g})"
+            )
+            continue
+
+        residual = target - prediction
+
+        score = np.linalg.norm(basis_u.T @ residual)
+        score_tolerance = 1e-7 * max(
+            1.0,
+            np.linalg.norm(basis_u.T @ target),
+        )
+
+        if score > score_tolerance:
+            reasons[output] = (
+                "the unrestricted fit is not OLS-equivalent "
+                "in the retained rank space "
+                f"(error={score:.6g}, "
+                f"tolerance={score_tolerance:.6g})"
+            )
+            continue
+
+        sigma2 = float(
+            np.sum(residual**2) / residual_df
+        )
+        numerator = float(
+            np.sum((basis_added.T @ prediction) ** 2)
+        )
+
+        if not np.isfinite(sigma2) or not np.isfinite(numerator):
+            reasons[output] = (
+                "residual variance or numerator is non-finite"
+            )
+            continue
+
+        if sigma2 > 0:
+            values[output] = numerator / sigma2
+        elif numerator > 0:
+            values[output] = np.inf
+        else:
+            reasons[output] = (
+                "residual variance and numerator are both zero"
+            )
+
+    return values, reasons

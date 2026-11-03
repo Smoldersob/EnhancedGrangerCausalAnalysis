@@ -12,7 +12,6 @@ from typing import TYPE_CHECKING, Any, Iterable, Literal, Optional, Mapping
 
 import numpy as np
 import pandas as pd
-import warnings
 from numpy.typing import NDArray
 
 if TYPE_CHECKING:
@@ -148,49 +147,13 @@ class GrangerAnalysisResults:
 		self.active_support_tolerance = 1e-12
 		self.rank_rcond = None
 		self._rank_cache = {}
-		self.base_snapshot: ModelSnapshot | None = None
-		self.reference_snapshots: dict[str, ModelSnapshot] = {}
-		self.restricted_snapshots: dict[str, ModelSnapshot] = self.reference_snapshots
 		self.unrestricted_snapshots: dict[str, ModelSnapshot] = {}
-		self.base_model_role: Literal["unrestricted", "restricted"] | None = None
+		self.restricted_snapshots: dict[str, ModelSnapshot] = {}
 		self._metric_cache: dict[Any, CausalityMatrix] = {}
 		self._rss_cache: dict[str, NDArray[np.float64]] = {}
 		self.preparation_context: Optional[PreparationContext] = None
 		self.model_search_result: Any = None
 		self.effective_modeling: Any = None
-
-	@property
-	def base_predictions(self) -> NDArray[np.float64] | None:
-		"""Return predictions from the unrestricted base model.
-
-		Returns: Base-model predictions as a 2D array or None when unavailable.
-		"""
-		return None if self.base_snapshot is None else self.base_snapshot.predictions
-
-	@property
-	def base_weights(self) -> NDArray[np.float64] | None:
-		"""Return coefficient weights from the unrestricted base model.
-
-		Returns: Weight matrix for the base fit, or None if no base snapshot is set.
-		"""
-		return None if self.base_snapshot is None else self.base_snapshot.weights
-
-	@property
-	def ref_predictions(self) -> dict[str, NDArray[np.float64]]:
-		"""Return predictions for every restricted reference model.
-
-		Returns: Mapping from cause name to the corresponding reduced-model outputs.
-		"""
-		return {name: snap.predictions for name, snap in self.reference_snapshots.items()}
-
-	@property
-	def ref_weights(self) -> dict[str, NDArray[np.float64]]:
-		"""Return weight matrices for every restricted reference model.
-
-		Returns: Mapping from cause name to reduced-model weights for non-None
-		entries.
-		"""
-		return {name: snap.weights for name, snap in self.reference_snapshots.items() if snap.weights is not None}
 
 	@property
 	def n_samples(self) -> int:
@@ -209,12 +172,30 @@ class GrangerAnalysisResults:
 		return self.evaluate("p_value", restore_removed=True).data
 
 	@property
-	def f_test(self) -> pd.DataFrame:
-		"""Return the F-statistic matrix for evaluated Granger tests.
+	def f_p_value(self) -> pd.DataFrame:
+		"""Return F-test p-values with removed variables restored."""
+		return self.evaluate(
+			"f_statistic_p_value",
+			restore_removed=True,
+		).data
 
-		Returns: DataFrame containing F-statistics indexed by effects and causes.
-		"""
-		return self.evaluate("f_statistic", restore_removed=True).data
+
+	@property
+	def wald_p_value(self) -> pd.DataFrame:
+		"""Return Wald-test p-values with removed variables restored."""
+		return self.evaluate(
+			"wald_test_p_value",
+			restore_removed=True,
+		).data
+
+
+	@property
+	def likelihood_ratio_p_value(self) -> pd.DataFrame:
+		"""Return likelihood-ratio p-values with removed variables restored."""
+		return self.evaluate(
+			"likelihood_ratio_p_value",
+			restore_removed=True,
+		).data
 
 	@property
 	def wald_test(self) -> pd.DataFrame:
@@ -237,6 +218,173 @@ class GrangerAnalysisResults:
 	def sign(self) -> pd.DataFrame:
 		"""Return coefficient-derived signs with removed variables restored."""
 		return self.evaluate("sign", restore_removed=True).data
+
+	### Preparation context and removed-variable restoration
+
+	def set_preparation_context(self, context: PreparationContext) -> None:
+		"""
+		Attach preprocessing metadata used to restore removed variables.
+
+		Args:
+			context: Context object storing the prepared-data pipeline and the
+				removed-variable restoration metadata.
+		"""
+		self.preparation_context = context
+	
+	### Saving and retrieving snapshots for later evaluation
+		
+	def _invalidate_snapshot_caches(self) -> None:
+		"""Invalidate values derived from model snapshots."""
+		self._rss_cache.clear()
+		self._metric_cache.clear()
+		self._rank_cache.clear()
+
+
+	def clear_snapshots(self) -> None:
+		"""Remove model snapshots without changing analysis configuration."""
+		self.unrestricted_snapshots.clear()
+		self.restricted_snapshots.clear()
+		self._invalidate_snapshot_caches()
+
+
+	def _snapshots_for_role(
+		self,
+		role: Literal["restricted", "unrestricted"],
+	) -> dict[str, ModelSnapshot]:
+		"""Return the snapshot mapping for an explicit model role."""
+		if role == "unrestricted":
+			return self.unrestricted_snapshots
+		if role == "restricted":
+			return self.restricted_snapshots
+
+		raise ValueError(
+			"Snapshot role must be 'restricted' or 'unrestricted'"
+		)
+
+
+	def register_snapshots(
+		self,
+		causes: Iterable[str],
+		role: Literal["restricted", "unrestricted"],
+		snapshot: ModelSnapshot,
+	) -> None:
+		"""Register one snapshot for multiple causes without copying it.
+
+		Args:
+			causes: Causes whose comparisons use this snapshot.
+			role: Statistical role of the snapshot.
+			snapshot: Existing snapshot to register.
+		"""
+		snapshots = self._snapshots_for_role(role)
+
+		if not isinstance(snapshot, ModelSnapshot):
+			raise TypeError("snapshot must be a ModelSnapshot")
+
+		if isinstance(causes, str):
+			raise TypeError(
+				"causes must be an iterable of names, not a single string"
+			)
+
+		selected_causes = tuple(causes)
+		unknown = [
+			cause
+			for cause in selected_causes
+			if cause not in self.causes
+		]
+
+		if unknown:
+			raise ValueError(f"Unknown tested causes: {unknown!r}")
+
+		for cause in selected_causes:
+			snapshots[cause] = snapshot
+
+		self._invalidate_snapshot_caches()
+
+
+	def register_snapshot(
+		self,
+		cause: str,
+		role: Literal["restricted", "unrestricted"],
+		snapshot: ModelSnapshot,
+	) -> None:
+		"""Register an existing snapshot for one cause and model role."""
+		self.register_snapshots(
+			causes=(cause,),
+			role=role,
+			snapshot=snapshot,
+		)
+
+
+	def get_snapshot(
+		self,
+		cause: str,
+		role: Literal["restricted", "unrestricted"],
+	) -> ModelSnapshot:
+		"""Return the snapshot registered for a cause and model role."""
+		if cause not in self.causes:
+			raise ValueError(f"Unknown tested cause: {cause!r}")
+
+		snapshots = self._snapshots_for_role(role)
+
+		try:
+			return snapshots[cause]
+		except KeyError as exc:
+			raise ValueError(
+				f"{role.title()} snapshot for cause {cause!r} "
+				"is not available"
+			) from exc
+
+
+	def _snapshot_for(
+		self,
+		cause: str,
+		role: Literal["restricted", "unrestricted"],
+	) -> ModelSnapshot:
+		"""Delegate internal snapshot access to the public lookup."""
+		return self.get_snapshot(cause, role)
+
+	
+	#### Residual sum-of-squares evaluation methods
+
+	def rss_per_output(
+		self,
+		cause: str,
+		role: Literal["restricted", "unrestricted"],
+	) -> NDArray[np.float64]:
+		"""Return residual sums of squares for a registered snapshot.
+
+		Args:
+			cause: Cause identifying the model comparison.
+			role: Statistical role of the requested snapshot.
+		"""
+		snapshot = self.get_snapshot(cause, role)
+		key = f"snapshot:{id(snapshot)}"
+
+		if key not in self._rss_cache:
+			self._rss_cache[key] = residual_sum_of_squares(
+				self.y_true,
+				snapshot.predictions,
+			)
+
+		return self._rss_cache[key].copy()
+
+
+	def unrestricted_rss_per_output(
+		self,
+		cause: str,
+	) -> NDArray[np.float64]:
+		"""Return unrestricted residual sums of squares per output."""
+		return self.rss_per_output(cause, "unrestricted")
+
+
+	def restricted_rss_per_output(
+		self,
+		cause: str,
+	) -> NDArray[np.float64]:
+		"""Return restricted residual sums of squares per output."""
+		return self.rss_per_output(cause, "restricted")
+
+	### Dof methods and slope-mask evaluation
 
 	def set_dof_method(self, method, *, rank_rcond=None):
 		"""Select structural, active-support, or numerical-rank counting."""
@@ -274,275 +422,272 @@ class GrangerAnalysisResults:
 			)
 		return weights_arr
 
-	def _effect_cause_matrix(self, values: NDArray[np.float64], *, name: str) -> CausalityMatrix:
-		"""
-		Wrap a numeric table as an effects-by-causes matrix.
-
-		Args:
-			values: Metric values to place into the matrix body.
-			name: Human-readable label assigned to the resulting matrix.
-
-		Returns:
-			Data structure containing an effects-by-causes DataFrame and
-			associated metadata.
-		"""
-		values_arr = np.asarray(values, dtype=np.float64)
-		if values_arr.ndim == 1:
-			values_arr = values_arr[:, np.newaxis]
-		if values_arr.shape == (len(self.effects), len(self.causes)):
-			matrix = pd.DataFrame(values_arr, index=self.effects, columns=self.causes)
-		else:
-			filled = np.full((len(self.effects), len(self.causes)), np.nan, dtype=np.float64)
-			filled[: values_arr.shape[0], : values_arr.shape[1]] = values_arr[: len(self.effects), : len(self.causes)]
-			matrix = pd.DataFrame(filled, index=self.effects, columns=self.causes)
-		return CausalityMatrix(data=matrix, name=name)
-
-	def set_preparation_context(self, context: PreparationContext) -> None:
-		"""
-		Attach preprocessing metadata used to restore removed variables.
-
-		Args:
-			context: Context object storing the prepared-data pipeline and the
-				removed-variable restoration metadata.
-		"""
-		self.preparation_context = context
-
-	def set_base_snapshot(
-			self,
-			base_predictions: NDArray[np.float64],
-			base_weights: NDArray[np.float64],
-			metadata: Optional[dict[str, Any]] = None,
-			active_slope_mask: NDArray[np.bool_] | None = None,
-			bias_enabled: bool = True,
-			role: Literal["unrestricted", "restricted"] | None = "unrestricted",
-		) -> None:
-			"""
-			Store the unrestricted base-model snapshot.
-
-			Args:
-				base_predictions: Predicted values from the unrestricted fit.
-				base_weights: Coefficient matrix for the unrestricted fit.
-				metadata: Optional metadata describing the fitted model state.
-			"""
-			self.base_snapshot = ModelSnapshot(
-				predictions=ensure_2d(np.array(base_predictions, dtype=np.float64, copy=True)),
-				weights=np.array(base_weights, dtype=np.float64, copy=True),
-				active_slope_mask=None if active_slope_mask is None else np.array(active_slope_mask, dtype=bool, copy=True),
-				bias_enabled=bool(bias_enabled),
-				metadata=dict(metadata or {}),
-			)
-			self.base_model_role = role
-			if role == "unrestricted":
-				self.unrestricted_snapshots = {cause: self.base_snapshot for cause in self.causes}
-			elif role == "restricted":
-				self.restricted_snapshots = {cause: self.base_snapshot for cause in self.causes}
-			self.reference_snapshots = self.restricted_snapshots
-			self._rss_cache.clear()
-			self._metric_cache.clear()
-			self._rank_cache.clear()
-
-	def set_reference_snapshot(
-			self,
-			cause: str,
-			reference_predictions: NDArray[np.float64],
-			reference_weights: NDArray[np.float64],
-			metadata: Optional[dict[str, Any]] = None,
-			active_slope_mask: NDArray[np.bool_] | None = None,
-			bias_enabled: bool = True,
-		) -> None:
-			"""
-			Store the reduced model that omits a single cause variable.
-
-			Args:
-				cause: Name of the omitted cause variable.
-				reference_predictions: Predicted values from the reduced model.
-				reference_weights: Coefficient matrix of the reduced model.
-				metadata: Optional metadata describing the restricted fit.
-			"""
-			snapshot = ModelSnapshot(
-				predictions=ensure_2d(np.array(reference_predictions, dtype=np.float64, copy=True)),
-				weights=np.array(reference_weights, dtype=np.float64, copy=True),
-				active_slope_mask=None if active_slope_mask is None else np.array(active_slope_mask, dtype=bool, copy=True),
-				bias_enabled=bool(bias_enabled),
-				metadata=dict(metadata or {}),
-			)
-			self.reference_snapshots[cause] = snapshot
-			self.restricted_snapshots = self.reference_snapshots
-			self.restricted_snapshots[cause] = snapshot
-			self._rss_cache.clear()
-			self._metric_cache.clear()
-			self._rank_cache.clear()
-
-	def set_unrestricted_snapshot(
-		self,
-		cause: str,
-		predictions: NDArray[np.float64],
-		weights: NDArray[np.float64],
-		metadata: Optional[dict[str, Any]] = None,
-		active_slope_mask: NDArray[np.bool_] | None = None,
-		bias_enabled: bool = True,
-	) -> None:
-		snapshot = ModelSnapshot(
-			predictions=ensure_2d(np.array(predictions, dtype=np.float64, copy=True)),
-			weights=np.array(weights, dtype=np.float64, copy=True),
-			active_slope_mask=None if active_slope_mask is None else np.array(active_slope_mask, dtype=bool, copy=True),
-			bias_enabled=bool(bias_enabled),
-			metadata=dict(metadata or {}),
-		)
-		self.unrestricted_snapshots[cause] = snapshot
-		self._rss_cache.clear()
-		self._metric_cache.clear()
-		self._rank_cache.clear()
-
-	def set_restricted_snapshot(
-		self,
-		cause: str,
-		predictions: NDArray[np.float64],
-		weights: NDArray[np.float64],
-		metadata: Optional[dict[str, Any]] = None,
-		active_slope_mask: NDArray[np.bool_] | None = None,
-		bias_enabled: bool = True,
-	) -> None:
-		self.set_reference_snapshot(
-			cause,
-			predictions,
-			weights,
-			metadata,
-			active_slope_mask,
-			bias_enabled,
-		)
-
-	def register_snapshot(
-		self,
-		cause: str,
-		role: Literal["restricted", "unrestricted"],
-		snapshot: ModelSnapshot,
-	) -> None:
-		"""Register an existing snapshot for one cause and analysis role."""
-		if role == "restricted":
-			self.restricted_snapshots[cause] = snapshot
-			self.reference_snapshots = self.restricted_snapshots
-		elif role == "unrestricted":
-			self.unrestricted_snapshots[cause] = snapshot
-		else:
-			raise ValueError("role must be 'restricted' or 'unrestricted'")
-		self._rss_cache.clear()
-		self._metric_cache.clear()
-		self._rank_cache.clear()
-
-	def get_snapshot(
-		self,
-		cause: str,
-		role: Literal["restricted", "unrestricted"],
-	) -> ModelSnapshot:
-		"""Retrieve the snapshot registered for a cause and role."""
-		return self._snapshot_for(cause, role)
-
-	def n_restrictions_for(self, cause: str) -> NDArray[np.int_]:
-		"""
-		Count which coefficients are active for one cause across all effects.
-
-		Args:
-			cause: Name of the cause whose coefficient block is being counted.
-
-		Returns:
-			1D array containing the number of active restrictions for each effect.
-
-		Raises:
-			ValueError: If the cause name is not part of the configured causal set.
-		"""
-		if self.dof_method == "rank":
-			return np.array([g["q"] for g in self._rank_geometry_for(cause)], dtype=np.int_)
-		if cause not in self.causes:
-			raise ValueError(f"Unknown tested cause: {cause!r}")
-
-		if cause not in self.cause_slices:
-			raise ValueError(
-				f"Missing feature slice for tested cause: {cause!r}"
-			)
-
-		unrestricted = self._snapshot_for(cause, "unrestricted")
-		restricted = self._snapshot_for(cause, "restricted")
-		u_mask = self._require_snapshot_mask(unrestricted)
-		r_mask = self._require_snapshot_mask(restricted)
-		if u_mask.shape != r_mask.shape or u_mask.shape[0] != len(self.effects):
-			raise ValueError("Restricted and unrestricted masks must have matching output/feature shapes.")
-		if np.any(r_mask & ~u_mask):
-			raise ValueError("Restricted active positions must be a subset of unrestricted positions.")
-
-		block = self.cause_slices[cause]
-		if not isinstance(block, slice):
-			raise ValueError(
-				f"Expected slice for cause {cause!r}; got {type(block).__name__}"
-			)
-
-		if (
-			block.start is None
-			or block.stop is None
-			or block.step not in (None, 1)
-			or not 0 <= block.start <= block.stop <= u_mask.shape[1]
-		):
-			raise ValueError(
-				f"Invalid feature slice for cause {cause!r}: {block!r}; "
-				f"mask has {u_mask.shape[1]} feature columns"
-			)
-
-		if unrestricted.bias_enabled != restricted.bias_enabled:
-			raise ValueError("Compared snapshots must use matching intercept settings")
-		tested = u_mask & ~r_mask
-		if self.dof_method == "active_support":
-			if unrestricted.weights is None:
-				raise ValueError("Active-support counts require unrestricted weights.")
-			weights = self._weights_as_feature_output(unrestricted.weights)
-			if weights.shape != u_mask.shape:
-				raise ValueError("Unrestricted weights and mask must have matching shapes.")
-			tested = tested & (np.abs(weights) > self.active_support_tolerance)
-		return np.asarray(tested.sum(axis=1), dtype=np.int_)
-	
-	def n_unrestricted_parameters(self, cause=None):
-		"""Count enabled unrestricted slopes and bias per output."""
-		if self.dof_method == "rank":
-			if cause is None:
-				if not self.causes:
-					raise ValueError("A tested cause is required")
-				cause = self.causes[0]
-			return np.array([g["rank_u"] for g in self._rank_geometry_for(cause)], dtype=np.int_)
+	def _resolve_tested_cause(self, cause: str | None) -> str:
+		"""Resolve a cause name, using the first cause when omitted."""
 		if cause is None:
 			if not self.causes:
 				raise ValueError("A tested cause is required")
 			cause = self.causes[0]
-		snapshot = self._snapshot_for(cause, "unrestricted")
-		mask = self._require_snapshot_mask(snapshot).copy()
-		if self.dof_method == "active_support":
-			if snapshot.weights is None:
-				raise ValueError("Active-support counts require unrestricted weights")
-			weights = self._weights_as_feature_output(snapshot.weights)
-			mask &= np.abs(weights) > self.active_support_tolerance
-		return mask.sum(axis=1).astype(np.int_) + int(snapshot.bias_enabled)
 
-	def _rank_coordinates(self, snapshot):
-		"""Return observations and predictions in the snapshot's model coordinates."""
+		if cause not in self.causes:
+			raise ValueError(f"Unknown tested cause: {cause!r}")
+		return cause
+
+	def _structural_masks_for(
+		self,
+		cause: str,
+	) -> tuple[NDArray[np.bool_], NDArray[np.bool_]]:
+		"""Return validated unrestricted and restricted slope masks.
+
+		Args:
+			cause: Cause identifying the compared model snapshots.
+		"""
+		unrestricted = self._snapshot_for(cause, "unrestricted")
+		restricted = self._snapshot_for(cause, "restricted")
+
+		u_mask = np.array(
+			self._require_snapshot_mask(unrestricted),
+			dtype=bool,
+			copy=True,
+		)
+		r_mask = np.array(
+			self._require_snapshot_mask(restricted),
+			dtype=bool,
+			copy=True,
+		)
+
+		expected = (len(self.effects), self.mask.shape[1])
+
+		if u_mask.shape != expected or r_mask.shape != expected:
+			raise ValueError(
+				f"Snapshot masks must have shape {expected}; "
+				f"got unrestricted={u_mask.shape}, restricted={r_mask.shape}"
+			)
+
+		if np.any(r_mask & ~u_mask):
+			raise ValueError(
+				"Restricted slope positions must be a subset "
+				"of unrestricted positions"
+			)
+
+		if unrestricted.bias_enabled != restricted.bias_enabled:
+			raise ValueError(
+				"Compared snapshots must use matching intercept settings"
+			)
+
+		return u_mask, r_mask
+
+
+	def _active_support_for(
+		self,
+		cause: str,
+		structural_mask: NDArray[np.bool_],
+	) -> NDArray[np.bool_]:
+		"""Select unrestricted slopes exceeding the support tolerance.
+
+		Args:
+			cause: Cause identifying the unrestricted snapshot.
+			structural_mask: Structurally enabled unrestricted slopes.
+		"""
+		tolerance = self.active_support_tolerance
+
+		if (
+			isinstance(tolerance, (bool, np.bool_))
+			or not np.isscalar(tolerance)
+			or not np.isfinite(tolerance)
+			or tolerance < 0
+		):
+			raise ValueError(
+				"active_support_tolerance must be a finite nonnegative number"
+			)
+
+		snapshot = self._snapshot_for(cause, "unrestricted")
+
+		if snapshot.weights is None:
+			raise ValueError(
+				"Active-support counting requires unrestricted weights"
+			)
+
+		weights = self._weights_as_feature_output(snapshot.weights)
+
+		if weights.shape != structural_mask.shape:
+			raise ValueError(
+				"Unrestricted weights and slope mask must have matching shapes"
+			)
+
+		if not np.isfinite(weights[structural_mask]).all():
+			raise ValueError(
+				"Structurally enabled unrestricted weights must be finite"
+			)
+
+		return structural_mask & (np.abs(weights) > float(tolerance))
+
+
+	def _effective_masks_for(
+		self,
+		cause: str,
+	) -> tuple[NDArray[np.bool_], NDArray[np.bool_]]:
+		"""Return slope masks used by the current DOF policy.
+
+		Rank mode retains structural masks. Numerical ranks are evaluated
+		separately from the corresponding design matrices.
+		"""
+		u_mask, r_mask = self._structural_masks_for(cause)
+
+		if self.dof_method == "active_support":
+			support = self._active_support_for(cause, u_mask)
+			u_mask &= support
+			r_mask &= support
+		elif self.dof_method not in {"structural", "rank"}:
+			raise ValueError(
+				f"Unsupported DOF method: {self.dof_method!r}"
+			)
+
+		return u_mask, r_mask
+
+
+	def _tested_mask_for(self, cause: str) -> NDArray[np.bool_]:
+		"""Return coefficient positions removed by the tested restriction.
+
+		In rank mode, this mask describes structural positions, not the
+		number of independently testable prediction directions.
+		"""
+		cause = self._resolve_tested_cause(cause)
+		u_mask, r_mask = self._effective_masks_for(cause)
+		return u_mask & ~r_mask
+
+
+	def _parameter_counts_for(
+		self,
+		cause: str,
+	) -> tuple[NDArray[np.int_], NDArray[np.int_]]:
+		"""Return restriction and unrestricted-parameter counts per output.
+
+		Args:
+			cause: Cause identifying the compared model snapshots.
+
+		Returns:
+			Arrays containing q and k_u in effect order.
+		"""
+		cause = self._resolve_tested_cause(cause)
+		u_mask, r_mask = self._effective_masks_for(cause)
+
+		if self.dof_method == "rank":
+			geometry = self._rank_geometry_for(cause)
+
+			q = np.asarray(
+				[item["q"] for item in geometry],
+				dtype=np.int_,
+			)
+			k_u = np.asarray(
+				[item["rank_u"] for item in geometry],
+				dtype=np.int_,
+			)
+			return q, k_u
+
+		unrestricted = self._snapshot_for(cause, "unrestricted")
+
+		q = np.count_nonzero(
+			u_mask & ~r_mask,
+			axis=1,
+		).astype(np.int_)
+
+		k_u = (
+			np.count_nonzero(u_mask, axis=1).astype(np.int_)
+			+ int(unrestricted.bias_enabled)
+		)
+
+		return q, k_u
+
+
+	def n_restrictions_for(self, cause: str) -> NDArray[np.int_]:
+		"""Return the restriction count per output for a tested cause."""
+		q, _ = self._parameter_counts_for(cause)
+		return q
+
+
+	def n_unrestricted_parameters(
+		self,
+		cause: str | None = None,
+	) -> NDArray[np.int_]:
+		"""Return unrestricted parameter counts, including the intercept."""
+		cause = self._resolve_tested_cause(cause)
+		_, k_u = self._parameter_counts_for(cause)
+		return k_u
+
+	def _snapshot_coordinates(
+		self,
+		snapshot: ModelSnapshot,
+	) -> tuple[
+		NDArray[np.float64],
+		NDArray[np.float64],
+		NDArray[np.float64],
+	]:
+		"""Return features, targets, and predictions in snapshot coordinates.
+
+		Args:
+			snapshot: Snapshot declaring raw or model coefficient coordinates.
+		"""
 		space = snapshot.metadata.get("coefficient_space")
+
 		if space == "model":
 			if self.preparation_context is None:
-				raise ValueError("Rank evaluation requires the model preparation context")
-			data = self.preparation_context.prepared_data
-			x, y = data.X_scaled, data.y_scaled
-			pred = snapshot.metadata.get("model_predictions")
-			if pred is None:
-				raise ValueError("Snapshot lacks model-space predictions; refit")
-		elif space == "raw" or (space is None and self.preparation_context is None):
-			x, y, pred = self.X_true, self.y_true, snapshot.predictions
+				raise ValueError(
+					"Model-space evaluation requires preparation context"
+				)
+
+			prepared = self.preparation_context.prepared_data
+			x = prepared.X_scaled
+			y = prepared.y_scaled
+			predictions = snapshot.metadata.get("model_predictions")
+
+			if predictions is None:
+				raise ValueError(
+					"Snapshot lacks model-space predictions; refit the analysis"
+				)
+
+		elif space == "raw" or (
+			space is None and self.preparation_context is None
+		):
+			x = self.X_true
+			y = self.y_true
+			predictions = snapshot.predictions
+
 		else:
-			raise ValueError("Ambiguous snapshot coordinates; refit or declare raw coordinates")
-		x, y, pred = [np.asarray(a, dtype=float) for a in (x, y, pred)]
-		if x.ndim != 2 or y.ndim != 2 or pred.shape != y.shape:
-			raise ValueError("Invalid rank-evaluation array dimensions")
-		if x.shape[0] != self.n_samples or y.shape != self.y_true.shape:
-			raise ValueError("Rank evaluation requires the same observations and output order")
-		if not all(np.isfinite(a).all() for a in (x, y, pred)):
-			raise ValueError("Rank-evaluation arrays must be finite")
-		return x, y, pred
+			raise ValueError(
+				"Ambiguous snapshot coordinates; "
+				"refit or declare raw coordinates"
+			)
+
+		x, y, predictions = (
+			np.asarray(value, dtype=np.float64)
+			for value in (x, y, predictions)
+		)
+
+		if (
+			x.ndim != 2
+			or y.ndim != 2
+			or predictions.shape != y.shape
+		):
+			raise ValueError("Invalid snapshot-coordinate array dimensions")
+
+		if (
+			x.shape[0] != self.n_samples
+			or y.shape != self.y_true.shape
+			or x.shape[1] != self.mask.shape[1]
+		):
+			raise ValueError(
+				"Snapshot evaluation requires matching observations, "
+				"features, and output order"
+			)
+
+		if not all(
+			np.isfinite(value).all()
+			for value in (x, y, predictions)
+		):
+			raise ValueError("Snapshot-coordinate arrays must be finite")
+
+		return x, y, predictions
 
 
 	def _rank_geometry_for(self, cause):
@@ -555,7 +700,7 @@ class GrangerAnalysisResults:
 		if key in self._rank_cache:
 			return self._rank_cache[key]
 		um, rm = self._require_snapshot_mask(u), self._require_snapshot_mask(r)
-		x, _, _ = self._rank_coordinates(u)
+		x, _, _ = self._snapshot_coordinates(u)
 		expected = (len(self.effects), x.shape[1])
 		if um.shape != expected or rm.shape != expected or np.any(rm & ~um):
 			raise ValueError("Rank mode requires matching nested slope masks")
@@ -570,116 +715,6 @@ class GrangerAnalysisResults:
 			geometries.append(nested_design_geometry(du, dr, rcond=self.rank_rcond))
 		self._rank_cache[key] = geometries
 		return geometries
-
-
-	def rank_wald_per_output(self, cause):
-		"""Compute projection-based Wald statistics for compatible outputs.
-
-		Use existing unrestricted predictions and OLS residual variance.
-		Return NaN for outputs that fail the rank-geometry or fit checks.
-		Do not refit models or project predictions to change the fitted model.
-		"""
-		u = self.get_snapshot(cause, "unrestricted")
-		_, y, pred = self._rank_coordinates(u)
-
-		values = np.full(len(self.effects), np.nan)
-
-		def report_skip(j, reason):
-			warnings.warn(
-				f"Rank-mode Wald unavailable for cause={cause!r}, "
-				f"effect={self.effects[j]!r}: {reason}",
-				RuntimeWarning,
-				stacklevel=3,
-			)
-
-		for j, g in enumerate(self._rank_geometry_for(cause)):
-			if g["q"] == 0:
-				# No added directions are retained under this rank policy.
-				continue
-
-			if not g["added_basis_valid"]:
-				report_skip(
-					j,
-					"incremental prediction space is unavailable "
-					f"({g['geometry_status']})",
-				)
-				continue
-
-			df = self.n_samples - g["rank_u"]
-			if df <= 0:
-				report_skip(
-					j,
-					"residual degrees of freedom are not positive",
-				)
-				continue
-
-			qu = g["basis_u"]
-			qa = g["basis_added"]
-			yj = y[:, j]
-			predj = pred[:, j]
-
-			if not np.isfinite(yj).all() or not np.isfinite(predj).all():
-				report_skip(
-					j,
-					"observations or predictions contain non-finite values",
-				)
-				continue
-
-			retained_pred = qu @ (qu.T @ predj)
-			projection_error = np.linalg.norm(predj - retained_pred)
-			projection_tolerance = 1e-7 * max(
-				1.0,
-				np.linalg.norm(predj),
-			)
-
-			if projection_error > projection_tolerance:
-				report_skip(
-					j,
-					"fitted predictions are outside the retained rank space "
-					f"(error={projection_error:.6g}, "
-					f"tolerance={projection_tolerance:.6g})",
-				)
-				continue
-
-			residual = yj - predj
-			score = np.linalg.norm(qu.T @ residual)
-			score_tolerance = 1e-7 * max(
-				1.0,
-				np.linalg.norm(qu.T @ yj),
-			)
-
-			if score > score_tolerance:
-				report_skip(
-					j,
-					"the unrestricted fit is not OLS-equivalent "
-					"in the retained rank space "
-					f"(error={score:.6g}, "
-					f"tolerance={score_tolerance:.6g})",
-				)
-				continue
-
-			sigma2 = float(np.sum(residual ** 2) / df)
-			numerator = float(np.sum((qa.T @ predj) ** 2))
-
-			if not np.isfinite(sigma2) or not np.isfinite(numerator):
-				report_skip(
-					j,
-					"the residual variance or numerator is non-finite",
-				)
-				continue
-
-			if sigma2 > 0:
-				values[j] = numerator / sigma2
-			elif numerator > 0:
-				values[j] = np.inf
-			else:
-				report_skip(
-					j,
-					"both the residual variance and numerator are zero",
-				)
-
-		return values
-
 
 	def rank_diagnostics(self):
 		"""Return per-output design ranks and structural counts as a DataFrame."""
@@ -704,66 +739,13 @@ class GrangerAnalysisResults:
 					geometry_status=g["geometry_status"]))
 		return pd.DataFrame.from_records(records)
 
-	def _snapshot_for(self, cause: str, role: Literal["restricted", "unrestricted"]) -> ModelSnapshot:
-		mapping = self.restricted_snapshots if role == "restricted" else self.unrestricted_snapshots
-		if cause not in mapping:
-			raise ValueError(f"{role.title()} snapshot for cause '{cause}' is not available")
-		return mapping[cause]
-
 	@staticmethod
 	def _require_snapshot_mask(snapshot: ModelSnapshot) -> NDArray[np.bool_]:
 		if snapshot.active_slope_mask is None:
 			raise ValueError("Snapshot is missing its active slope mask")
 		return np.array(snapshot.active_slope_mask, dtype=bool, copy=False)
-
-	def unrestricted_rss_per_output(self, cause: str) -> NDArray[np.float64]:
-		snapshot = self._snapshot_for(cause, "unrestricted")
-		key = f"unrestricted:{id(snapshot)}"
-		if key not in self._rss_cache:
-			self._rss_cache[key] = residual_sum_of_squares(self.y_true, snapshot.predictions)
-		return self._rss_cache[key]
-
-	def base_rss_per_output(self) -> NDArray[np.float64]:
-		"""
-		Compute the residual sum of squares for the unrestricted base model.
-
-		Returns:
-			1D array of RSS values, one per output variable.
-
-		Raises:
-			ValueError: If no base snapshot has been registered.
-		"""
-		if self.base_snapshot is None:
-			raise ValueError("Base snapshot is not available")
-		if "base" not in self._rss_cache:
-			self._rss_cache["base"] = residual_sum_of_squares(
-				self.y_true,
-				self.base_snapshot.predictions,
-			)
-		return self._rss_cache["base"]
-
-	def reference_rss_per_output(self, cause: str) -> NDArray[np.float64]:
-		"""
-		Compute the residual sum of squares for the restricted model omitting
-		one cause.
-
-		Args:
-			cause: Name of the omitted cause variable.
-
-		Returns:
-			RSS values for each output in the reference model.
-
-		Raises:
-			ValueError: If the cause does not have a stored reference snapshot.
-		"""
-		snapshot = self._snapshot_for(cause, "restricted")
-		cache_key = f"restricted:{id(snapshot)}"
-		if cache_key not in self._rss_cache:
-			self._rss_cache[cache_key] = residual_sum_of_squares(
-				self.y_true,
-				snapshot.predictions,
-			)
-		return self._rss_cache[cache_key]
+	
+	### Helper for building metric matrices in metric.py
 
 	def make_matrix(
 		self,
@@ -786,6 +768,32 @@ class GrangerAnalysisResults:
 		if metadata:
 			matrix.metadata.update(metadata)
 		return matrix
+
+	
+	def _effect_cause_matrix(self, values: NDArray[np.float64], *, name: str) -> CausalityMatrix:
+		"""
+		Wrap a numeric table as an effects-by-causes matrix.
+
+		Args:
+			values: Metric values to place into the matrix body.
+			name: Human-readable label assigned to the resulting matrix.
+
+		Returns:
+			Data structure containing an effects-by-causes DataFrame and
+			associated metadata.
+		"""
+		values_arr = np.asarray(values, dtype=np.float64)
+		if values_arr.ndim == 1:
+			values_arr = values_arr[:, np.newaxis]
+		if values_arr.shape == (len(self.effects), len(self.causes)):
+			matrix = pd.DataFrame(values_arr, index=self.effects, columns=self.causes)
+		else:
+			filled = np.full((len(self.effects), len(self.causes)), np.nan, dtype=np.float64)
+			filled[: values_arr.shape[0], : values_arr.shape[1]] = values_arr[: len(self.effects), : len(self.causes)]
+			matrix = pd.DataFrame(filled, index=self.effects, columns=self.causes)
+		return CausalityMatrix(data=matrix, name=name)
+
+	### Metric evaluation and result summarization
 
 	def evaluate(
 			self,

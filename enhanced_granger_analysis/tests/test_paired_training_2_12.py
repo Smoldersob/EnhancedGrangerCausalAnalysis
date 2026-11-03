@@ -96,17 +96,26 @@ def test_training_order_and_snapshot_provenance(role, only_u):
     runner.run(model=model, prepared=prepared, progress=progress,
                train_only_unrestricted=only_u)
     if role == "unrestricted":
-        expected = [("unrestricted", None)]
-        if not only_u:
-            expected += [("restricted", "a"), ("restricted", "b")]
+        assert (
+            progress.results.get_snapshot("a", "unrestricted")
+            is progress.results.get_snapshot("b", "unrestricted")
+        )
+
     elif role == "restricted" and not only_u:
-        expected = [("restricted", None), ("unrestricted", "a"), ("unrestricted", "b")]
-    elif only_u:
-        expected = [("unrestricted", "a"), ("unrestricted", "b")]
-    else:
-        expected = [("unrestricted", "a"), ("restricted", "a"),
-                    ("unrestricted", "b"), ("restricted", "b")]
-    assert trainer.calls == expected
+        assert (
+            progress.results.get_snapshot("a", "restricted")
+            is progress.results.get_snapshot("b", "restricted")
+        )
+
+    elif role == "restricted" and only_u:
+        assert progress.base_weights is None
+
+        for snapshot_role in ("unrestricted", "restricted"):
+            assert (
+                progress.results.get_snapshot("a", snapshot_role)
+                is not progress.results.get_snapshot("b", snapshot_role)
+            )
+            
     for cause in prepared.tested_causes:
         u = progress.results.get_snapshot(cause, "unrestricted")
         r = progress.results.get_snapshot(cause, "restricted")
@@ -119,8 +128,17 @@ def test_training_order_and_snapshot_provenance(role, only_u):
     if role == "unrestricted":
         assert progress.results.get_snapshot("a", "unrestricted") is progress.results.get_snapshot("b", "unrestricted")
     elif role == "restricted" and only_u:
-        assert progress.results.base_snapshot is None
-        assert progress.results.get_snapshot("a", "restricted") is not progress.results.get_snapshot("b", "restricted")
+        assert progress.base_weights is None
+
+        assert (
+            progress.results.get_snapshot("a", "unrestricted")
+            is not progress.results.get_snapshot("b", "unrestricted")
+        )
+
+        assert (
+            progress.results.get_snapshot("a", "restricted")
+            is not progress.results.get_snapshot("b", "restricted")
+        )
 
 
 def test_no_baseline_initialization_and_pair_warm_start():

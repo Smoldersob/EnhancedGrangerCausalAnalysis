@@ -46,6 +46,14 @@ class _RecordingModel:
         self.regularizer = regularizer
         self.constraint = constraint
         self.config = dict(config)
+        self.base_model_role = "unrestricted"
+        self.use_bias = True
+        self.is_fitted = False
+
+        self._active_mask = np.asarray(
+            constraint.mask,
+            dtype=bool,
+        ).copy()
 
         self.weights = [
             np.arange(
@@ -74,13 +82,33 @@ class _RecordingModel:
             np.asarray(weight, dtype=float).copy()
             for weight in weights
         ]
+        self.is_fitted = False
+
 
     def omit_variables(self, variable_indices):
-        self.omitted = list(variable_indices)
+        indices = list(variable_indices)
+        self.omitted = indices
+
+        self._active_mask = np.asarray(
+            self.constraint.mask,
+            dtype=bool,
+        ).copy()
+        self._active_mask[:, indices] = False
+
 
     def add_variables(self, variable_indices):
         self.added = list(variable_indices)
+        self.omitted = []
 
+        self._active_mask = np.asarray(
+            self.constraint.mask,
+            dtype=bool,
+        ).copy()
+
+
+    def get_active_mask(self):
+        return self._active_mask.copy()
+    
     def reset_components(
         self,
         *,
@@ -121,13 +149,21 @@ class _RecordingModel:
             np.asarray(y).copy(),
         ))
         self.fit_start_weights.append(self.get_weights())
-
+        self.is_fitted = True
         return TrainingResult()
 
     def predict(self, X):
-        inputs = np.asarray(X, dtype=float).copy()
-        inputs[:, self.omitted] = 0.0
-        return inputs @ self.weights[0] + self.weights[1]
+        if not self.is_fitted:
+            raise AssertionError(
+                "Prediction requires a fitted model"
+            )
+
+        inputs = np.asarray(X, dtype=float)
+        effective_kernel = (
+            self.weights[0] * self.get_active_mask().T
+        )
+
+        return inputs @ effective_kernel + self.weights[1]
 
 
 class _RecordingStrategy:
@@ -238,13 +274,22 @@ def test_builder_reuses_one_model_and_restricted_runs_start_from_base_weights(
     model = strategy.model
 
     builder.fit_base()
+
+    # Native backend weights are used to initialize subsequent runs.
     base_weights = [
         weight.copy()
         for weight in model.get_weights()
     ]
-    base_snapshot_weights = builder.results.base_weights.copy()
 
-    # Deliberately disturb the active model after saving the base weights.
+    shared_u = builder.results.get_snapshot("z", "unrestricted")
+    base_snapshot_weights = shared_u.weights.copy()
+
+    assert (
+        builder.results.get_snapshot("x", "unrestricted")
+        is shared_u
+    )
+
+    # Disturb the working model without modifying the stored snapshot.
     model.set_weights([
         np.full_like(weight, -100.0)
         for weight in base_weights
@@ -264,12 +309,13 @@ def test_builder_reuses_one_model_and_restricted_runs_start_from_base_weights(
     restricted_run_names = run_names[1:]
 
     assert all(
-        isinstance(name, str) and name.startswith("restricted_cause_")
+        isinstance(name, str)
+        and name.startswith("restricted_cause_")
         for name in restricted_run_names
     )
     assert len(set(restricted_run_names)) == 2
 
-    assert set(builder.results.reference_snapshots) == {"z", "x"}
+    assert set(builder.results.restricted_snapshots) == {"z", "x"}
 
     assert all(
         call["reset_optimizer"] and call["reset_callbacks"]
@@ -283,29 +329,44 @@ def test_builder_reuses_one_model_and_restricted_runs_start_from_base_weights(
     assert model.omitted == [1, 2]
 
     np.testing.assert_array_equal(
-        builder.results.base_weights,
+        shared_u.weights,
         base_snapshot_weights,
     )
 
     prepared = builder._prepared_data
 
     for cause in ("z", "x"):
-        masked_X = prepared.X_scaled.copy()
-        masked_X[:, prepared.cause_slices[cause]] = 0.0
+        restricted = builder.results.get_snapshot(
+            cause,
+            "restricted",
+        )
+
+        masked_x = prepared.X_scaled.copy()
+        masked_x[:, prepared.cause_slices[cause]] = 0.0
 
         expected = prepared.y_scaler.inverse_transform(
-            masked_X @ base_weights[0] + base_weights[1]
+            masked_x @ base_weights[0] + base_weights[1]
         )
 
         np.testing.assert_allclose(
-            builder.results.ref_predictions[cause],
+            restricted.predictions,
             expected,
         )
 
-        # Input masking does not require coefficient zeroing.
+        # Input masking does not require zeroing stored coefficients.
         np.testing.assert_array_equal(
-            builder.results.ref_weights[cause],
+            restricted.weights,
             base_snapshot_weights,
+        )
+
+        assert restricted is not shared_u
+        assert not np.shares_memory(
+            restricted.weights,
+            shared_u.weights,
+        )
+        assert not np.shares_memory(
+            restricted.predictions,
+            shared_u.predictions,
         )
 
 
@@ -317,28 +378,39 @@ def test_restricted_blocks_are_selected_by_cause_name_not_test_order(
     builder.fit_base()
     builder.fit_restricted_models()
 
-    # Tested order is [z, x], but x occupies columns 1 and 2.
+    # Tested order is [z, x], but x occupies feature columns 1 and 2.
     assert strategy.model.omitted == [1, 2]
 
     assert builder.results.effects == ["effect"]
     assert builder.results.causes == ["z", "x"]
-    assert set(builder.results.reference_snapshots) == {"z", "x"}
+    assert set(builder.results.restricted_snapshots) == {"z", "x"}
 
-    # Verify the final restricted prediction actually omits x's block,
-    # rather than inferring correctness from the callback run label.
     prepared = builder._prepared_data
     base_weights = builder._base_weights
 
-    masked_X = prepared.X_scaled.copy()
-    masked_X[:, prepared.cause_slices["x"]] = 0.0
+    masked_x = prepared.X_scaled.copy()
+    masked_x[:, prepared.cause_slices["x"]] = 0.0
 
     expected = prepared.y_scaler.inverse_transform(
-        masked_X @ base_weights[0] + base_weights[1]
+        masked_x @ base_weights[0] + base_weights[1]
     )
 
+    restricted = builder.results.get_snapshot("x", "restricted")
+
     np.testing.assert_allclose(
-        builder.results.ref_predictions["x"],
+        restricted.predictions,
         expected,
+    )
+
+    expected_mask = np.asarray(
+        prepared.base_mask,
+        dtype=bool,
+    ).copy()
+    expected_mask[:, prepared.cause_slices["x"]] = False
+
+    np.testing.assert_array_equal(
+        restricted.active_slope_mask,
+        expected_mask,
     )
 
 def test_weights_do_not_change_the_input_mask_and_snapshots_are_independent(
@@ -350,10 +422,21 @@ def test_weights_do_not_change_the_input_mask_and_snapshots_are_independent(
     results_mask_before = builder.results.mask.copy()
 
     builder.fit_base()
-    base_before = builder.results.base_weights.copy()
+
+    unrestricted = builder.results.get_snapshot(
+        "z",
+        "unrestricted",
+    )
+    unrestricted_weights_before = unrestricted.weights.copy()
+    unrestricted_predictions_before = unrestricted.predictions.copy()
+    unrestricted_mask_before = unrestricted.active_slope_mask.copy()
 
     builder.fit_restricted("z")
-    reference_before = builder.results.ref_weights["z"].copy()
+
+    restricted = builder.results.get_snapshot("z", "restricted")
+    restricted_weights_before = restricted.weights.copy()
+    restricted_predictions_before = restricted.predictions.copy()
+    restricted_mask_before = restricted.active_slope_mask.copy()
 
     assert strategy.model.omitted == [3]
 
@@ -365,10 +448,18 @@ def test_weights_do_not_change_the_input_mask_and_snapshots_are_independent(
         builder.results.mask,
         results_mask_before,
     )
-    np.testing.assert_array_equal(
-        builder.results.base_weights,
-        base_before,
-    )
+
+    assert restricted is not unrestricted
+
+    for attribute in (
+        "weights",
+        "predictions",
+        "active_slope_mask",
+    ):
+        assert not np.shares_memory(
+            getattr(unrestricted, attribute),
+            getattr(restricted, attribute),
+        )
 
     strategy.model.set_weights([
         np.full_like(weight, -999.0)
@@ -376,12 +467,29 @@ def test_weights_do_not_change_the_input_mask_and_snapshots_are_independent(
     ])
 
     np.testing.assert_array_equal(
-        builder.results.base_weights,
-        base_before,
+        unrestricted.weights,
+        unrestricted_weights_before,
     )
     np.testing.assert_array_equal(
-        builder.results.ref_weights["z"],
-        reference_before,
+        unrestricted.predictions,
+        unrestricted_predictions_before,
+    )
+    np.testing.assert_array_equal(
+        unrestricted.active_slope_mask,
+        unrestricted_mask_before,
+    )
+
+    np.testing.assert_array_equal(
+        restricted.weights,
+        restricted_weights_before,
+    )
+    np.testing.assert_array_equal(
+        restricted.predictions,
+        restricted_predictions_before,
+    )
+    np.testing.assert_array_equal(
+        restricted.active_slope_mask,
+        restricted_mask_before,
     )
 
     assert strategy.model.omitted == [3]
