@@ -1134,3 +1134,65 @@ cross-backend validation claim.
 - A zero restriction count produces NaN for the test and its p-value, not evidence
   of absence of causality. Neutral restored p-values remain a reporting convention.
 - See docs/results_and_metrics.md for the updated interface and migration table.
+
+## [2.12.2] — Fix
+
+### Fixed
+
+- **`evaluate()` returned `None` on cache hits.** The cached-matrix branch
+  fell through without returning, so any repeated evaluation of the same
+  metric (including repeated `result()` calls) raised `AttributeError`.
+  Restoration now also applies consistently to cache hits.
+- **Restored module responsibilities in the results layer.**
+  - `statistics.py` again owns all numerical formulas: vectorized
+    `f_statistic_values` and `likelihood_ratio_values` (value + per-output
+    status, float DOF, no epsilon clipping), status-aware
+    `f_test_p_values` / `chi_square_p_values` conversions, and the
+    `ols_projection_error` diagnostic helper. `dof.py` consumes
+    `nested_design_geometry` from it.
+  - `metrics.py` is reduced to orchestration: per-cause loops, DOF
+    recording, diagnostics, and metadata. No statistic formulas remain
+    there.
+- **DOF strategy parameters are no longer container attributes.**
+  `rank_rcond` and `active_support_tolerance` were parameters of specific
+  strategies but were stored on `GrangerAnalysisResults` and exposed as
+  dedicated `set_dof_method` keywords. They now travel in a flexible
+  `params` mapping passed through `DofContext.params`:
+  `results.set_dof_method("rank", params={"rank_rcond": 1e-10})`. Custom
+  strategies can define their own parameter names without container
+  changes. The rank-geometry cache key includes the parameter mapping.
+- **Removed redundant delegation methods from `GrangerAnalysisResults`:**
+  `p_value` (referenced an unregistered metric), `n_restrictions_for`,
+  `n_unrestricted_parameters`, `residual_df_for`, `_parameter_counts_for`,
+  `_effective_masks_for`, `_tested_mask_for`, `_sign_matrix`,
+  `_snapshot_for`, and the `unrestricted_rss_per_output` /
+  `restricted_rss_per_output` wrappers. Use `dof_for(cause)` and
+  `rss_per_output(cause, role)`.
+- **Removed dead numerical functions from `statistics.py`:**
+  `wald_test_value`, `estimate_masked_weight_covariance` (Gram-matrix
+  inversion replaced by the SVD-based covariance inside
+  `coefficient_wald_value`), `error_values`, `f_test_value`,
+  `likelihood_ratio_test_value`, and the integer-DOF `p_value_from_*`
+  converters.
+- **`run_group_causality_tests.py`:** removed a duplicated `_resolve_path`
+  definition; `dof_method`/`rank_rcond` config keys replaced by
+  `dof_method` + `dof_params` (forwarded into the DOF context); added
+  `wald_projection` to `--test` choices; summary rows record `dof_params`.
+
+### Added
+
+- Regression tests for the DOF registry and metric consistency
+  (`test_dof_methods_and_metric_consistency.py`): built-in and custom
+  strategies, parameter forwarding, fractional DOF, and numerical
+  verification of `W = q·F` (coefficient and projection Wald), the LR
+  identity `LR = n·log(1 + q·F/df)`, collinearity handling
+  (`q = 0` under `rank` vs. rank-deficient coefficient Wald), and the
+  `zero` / `preserve` / `raise` unavailable-test policies.
+
+### Migration notes
+
+- `test_wald_f_bias_consistency_2_12.py` imports
+  `estimate_masked_weight_covariance` and calls `n_restrictions_for`;
+  migrate to `coefficient_wald_value` and `dof_for(cause).restriction_df`.
+- Config files using `"rank_rcond"` at the top level of the script config
+  should move it under `"dof_params"`.

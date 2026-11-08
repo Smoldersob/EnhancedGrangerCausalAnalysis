@@ -1,3 +1,11 @@
+"""Numerical statistics and distribution conversions.
+
+This module owns statistic formulas and p-value conversions. Functions
+accept plain arrays and return values together with per-item status
+strings; they never access snapshots, result containers, or registries.
+Callers in ``metrics.py`` orchestrate evaluation and record metadata.
+"""
+
 from __future__ import annotations
 
 from typing import Tuple
@@ -10,311 +18,243 @@ from ..core.exceptions import ResultsError
 
 
 def ensure_2d(array: NDArray[np.float64]) -> NDArray[np.float64]:
-	"""Return a 2D float64 array, promoting 1D arrays to shape (n, 1)."""
-	arr = np.asarray(array, dtype=np.float64)
-	if arr.ndim == 1:
-		arr = arr[:, np.newaxis]
-	if arr.ndim != 2:
-		raise ResultsError(f"Expected 1D or 2D array, got shape {arr.shape}")
-	return arr
+    """Return a 2D float64 array, promoting 1D arrays to shape (n, 1)."""
+    arr = np.asarray(array, dtype=np.float64)
+    if arr.ndim == 1:
+        arr = arr[:, np.newaxis]
+    if arr.ndim != 2:
+        raise ResultsError(f"Expected 1D or 2D array, got shape {arr.shape}")
+    return arr
 
 
 def residual_sum_of_squares(
-	y_true: NDArray[np.float64],
-	y_pred: NDArray[np.float64],
+    y_true: NDArray[np.float64],
+    y_pred: NDArray[np.float64],
 ) -> NDArray[np.float64]:
-	"""Compute RSS per output: sum_t (y_true - y_pred)^2."""
-	true_2d = ensure_2d(y_true)
-	pred_2d = ensure_2d(y_pred)
-	if true_2d.shape != pred_2d.shape:
-		raise ResultsError(
-			f"y_true and y_pred must have the same shape, got {true_2d.shape} vs {pred_2d.shape}"
-		)
-	return np.sum((true_2d - pred_2d) ** 2, axis=0)
+    """Compute RSS per output: sum_t (y_true - y_pred)^2."""
+    true_2d = ensure_2d(y_true)
+    pred_2d = ensure_2d(y_pred)
+    if true_2d.shape != pred_2d.shape:
+        raise ResultsError(
+            f"y_true and y_pred must have the same shape, got {true_2d.shape} vs {pred_2d.shape}"
+        )
+    return np.sum((true_2d - pred_2d) ** 2, axis=0)
 
 
-def estimate_masked_weight_covariance(
-	x_train: NDArray[np.float64],
-	y_true: NDArray[np.float64],
-	y_pred: NDArray[np.float64],
-	coefficient_mask: NDArray[np.float64],
-	fit_intercept: bool = True,
-) -> NDArray[np.float64]:
-	"""
-	Estimate OLS covariance matrices for a fixed masked VAR/VARX model.
+def f_statistic_values(
+    rss_u,
+    rss_r,
+    restriction_df,
+    residual_df,
+) -> tuple[NDArray[np.float64], list[str]]:
+    """Compute nested-model F values from RSS and float DOF.
 
-	The returned array has shape:
-		(n_outputs, n_features, n_features)
+    Degrees of freedom are not coerced to integers. When the restricted
+    model attains a lower RSS than the unrestricted model, the value is
+    clipped to zero and the status reports it instead of hiding it.
+    """
+    u = np.atleast_1d(np.asarray(rss_u, dtype=float))
+    r = np.atleast_1d(np.asarray(rss_r, dtype=float))
+    q = np.atleast_1d(np.asarray(restriction_df, dtype=float))
+    df = np.atleast_1d(np.asarray(residual_df, dtype=float))
 
-	Its rows/columns corresponding to inactive mask entries are zero.
-	"""
-	x_arr = np.asarray(x_train, dtype=np.float64)
-	y_true_2d = ensure_2d(y_true)
-	y_pred_2d = ensure_2d(y_pred)
-	mask_arr = np.asarray(coefficient_mask, dtype=bool)
+    if not (u.shape == r.shape == q.shape == df.shape):
+        raise ResultsError("F inputs must share a single shape")
 
-	if x_arr.ndim != 2:
-		raise ResultsError(f"x_train must be 2D, got {x_arr.shape}")
+    values = np.full(u.shape, np.nan)
+    statuses: list[str] = []
 
-	if y_true_2d.shape != y_pred_2d.shape:
-		raise ResultsError(
-			f"y_true and y_pred must match, got "
-			f"{y_true_2d.shape} vs {y_pred_2d.shape}"
-		)
+    for index in range(u.size):
+        if not (
+            np.isfinite(u[index])
+            and np.isfinite(r[index])
+            and u[index] >= 0
+            and r[index] >= 0
+        ):
+            statuses.append("invalid_rss")
+            continue
 
-	n_samples, n_features = x_arr.shape
-	n_outputs = y_true_2d.shape[1]
+        if not np.isfinite(q[index]) or q[index] <= 0:
+            statuses.append("invalid_restriction_df")
+            continue
 
-	if y_true_2d.shape[0] != n_samples:
-		raise ResultsError(
-			f"x_train and y_true must have equal sample count, got "
-			f"{n_samples} vs {y_true_2d.shape[0]}"
-		)
+        if not np.isfinite(df[index]) or df[index] <= 0:
+            statuses.append("invalid_residual_df")
+            continue
 
-	if mask_arr.shape != (n_outputs, n_features):
-		raise ResultsError(
-			f"coefficient_mask must have shape {(n_outputs, n_features)}, "
-			f"got {mask_arr.shape}"
-		)
+        if u[index] == 0 and r[index] == 0:
+            statuses.append("zero_rss_both_models")
+            continue
 
-	residuals = y_true_2d - y_pred_2d
-	covariance = np.zeros((n_outputs, n_features, n_features), dtype=np.float64)
+        if r[index] < u[index]:
+            values[index] = 0.0
+            statuses.append("restricted_rss_below_unrestricted")
+            continue
 
-	for out_idx in range(n_outputs):
-		active_idx = np.flatnonzero(mask_arr[out_idx])
+        if u[index] == 0:
+            values[index] = np.inf
+            statuses.append("ok")
+            continue
 
-		if active_idx.size == 0:
-			continue
+        values[index] = ((r[index] - u[index]) / q[index]) / (
+            u[index] / df[index]
+        )
+        statuses.append("ok")
 
-		x_active = x_arr[:, active_idx]
-
-		if fit_intercept:
-			design = np.column_stack([np.ones(n_samples, dtype=np.float64), x_active])
-		else:
-			design = x_active
-
-		n_parameters = design.shape[1]
-		residual_df = n_samples - n_parameters
-
-		if residual_df <= 0:
-			raise ResultsError(
-				f"Output {out_idx}: insufficient residual degrees of freedom; "
-				f"n_samples={n_samples}, n_parameters={n_parameters}"
-			)
-
-		design_rank = np.linalg.matrix_rank(design)
-		if design_rank != n_parameters:
-			raise ResultsError(
-				f"Output {out_idx}: active design is rank-deficient; "
-				f"rank={design_rank}, n_parameters={n_parameters}"
-			)
-
-		sigma2 = np.sum(residuals[:, out_idx] ** 2) / float(residual_df)
-		covariance_active = sigma2 * np.linalg.inv(design.T @ design)
-
-		if fit_intercept:
-			covariance_active = covariance_active[1:, 1:]
-
-		covariance[out_idx][np.ix_(active_idx, active_idx)] = covariance_active
-
-	return covariance
+    return values, statuses
 
 
-def error_values(
-	y_true: NDArray[np.float64],
-	y_base_pred: NDArray[np.float64],
-	y_ref_pred: NDArray[np.float64],
-) -> Tuple[NDArray[np.float64], NDArray[np.float64]]:
-	"""Compute normalized base and reference errors per output."""
-	y_true_2d = ensure_2d(y_true)
-	rss_base = residual_sum_of_squares(y_true_2d, y_base_pred)
-	rss_ref = residual_sum_of_squares(y_true_2d, y_ref_pred)
+def likelihood_ratio_values(
+    rss_u,
+    rss_r,
+    n_samples: int,
+) -> tuple[NDArray[np.float64], list[str]]:
+    """Compute RSS log-ratio values without epsilon clipping."""
+    u = np.atleast_1d(np.asarray(rss_u, dtype=float))
+    r = np.atleast_1d(np.asarray(rss_r, dtype=float))
 
-	n_samples = y_true_2d.shape[0]
-	base_error = rss_base / float(n_samples)
-	ref_error = rss_ref / float(n_samples)
-	return base_error, ref_error
+    if u.shape != r.shape:
+        raise ResultsError("RSS inputs must share a single shape")
 
+    values = np.full(u.shape, np.nan)
+    statuses: list[str] = []
 
-def wald_test_value(
-	weights: NDArray[np.float64],
-	covariance: NDArray[np.float64],
-	coefficient_mask: NDArray[np.float64],
-	start: int,
-	end: int,
-	tested_mask: NDArray[np.bool_] | None = None,
-) -> NDArray[np.float64]:
-	"""Return one Wald statistic per output; NaN if structurally untestable."""
-	weights_arr = np.asarray(weights, dtype=np.float64)
-	cov_arr = np.asarray(covariance, dtype=np.float64)
-	mask_arr = np.asarray(coefficient_mask, dtype=bool)
+    for index in range(u.size):
+        if n_samples <= 0:
+            statuses.append("no_observations")
+            continue
 
-	n_outputs, n_features = weights_arr.shape
+        if not (
+            np.isfinite(u[index])
+            and np.isfinite(r[index])
+            and u[index] >= 0
+            and r[index] >= 0
+        ):
+            statuses.append("invalid_rss")
+            continue
 
-	if mask_arr.shape != weights_arr.shape:
-		raise ResultsError(
-			f"Mask shape {mask_arr.shape} does not match weights shape {weights_arr.shape}"
-		)
+        if u[index] == 0 and r[index] == 0:
+            statuses.append("zero_rss_both_models")
+            continue
 
-	if cov_arr.shape != (n_outputs, n_features, n_features):
-		raise ResultsError(
-			"Invalid covariance shape: "
-			f"expected {(n_outputs, n_features, n_features)}, got {cov_arr.shape}"
-		)
+        if r[index] < u[index]:
+            values[index] = 0.0
+            statuses.append("restricted_rss_below_unrestricted")
+            continue
 
-	if not (0 <= start < end <= n_features):
-		raise ResultsError(f"Invalid tested coefficient block [{start}:{end}]")
+        if u[index] == 0:
+            values[index] = np.inf
+            statuses.append("ok")
+            continue
 
-	if tested_mask is not None:
-		tested_arr = np.asarray(tested_mask, dtype=bool)
-		if tested_arr.shape != mask_arr.shape:
-			raise ResultsError(
-				f"tested_mask shape {tested_arr.shape} does not match {mask_arr.shape}"
-			)
-	else:
-		tested_arr = np.zeros_like(mask_arr, dtype=bool)
-		tested_arr[:, start:end] = True
-	statistics = np.full(n_outputs, np.nan, dtype=np.float64)
+        values[index] = float(n_samples) * (
+            np.log(r[index]) - np.log(u[index])
+        )
+        statuses.append("ok")
 
-	for out_idx in range(n_outputs):
-		tested_idx = np.flatnonzero(mask_arr[out_idx] & tested_arr[out_idx])
-
-		if tested_idx.size == 0:
-			continue
-
-		beta_block = weights_arr[out_idx, tested_idx]
-		cov_block = cov_arr[out_idx][np.ix_(tested_idx, tested_idx)]
-		cov_block = 0.5 * (cov_block + cov_block.T)
-
-		if np.linalg.matrix_rank(cov_block) != tested_idx.size:
-			raise ResultsError(
-				f"Singular Wald covariance for output {out_idx}, tested indices={tested_idx.tolist()}"
-			)
-
-		statistics[out_idx] = float(beta_block @ np.linalg.solve(cov_block, beta_block))
-
-	return statistics
+    return values, statuses
 
 
-def f_test_value(error_ref, error_base, n_restrictions,
-				 n_unrestricted_parameters, n_samples):
-	"""Compute nested-model F statistics independently for each output."""
-	r = np.asarray(error_ref, dtype=float)
-	u = np.asarray(error_base, dtype=float)
-	if r.shape != u.shape:
-		raise ResultsError("Restricted and unrestricted RSS shapes differ")
-	q = np.broadcast_to(np.asarray(n_restrictions, dtype=float), u.shape)
-	k = np.broadcast_to(np.asarray(n_unrestricted_parameters, dtype=float), u.shape)
-	if (not np.isfinite(r).all() or not np.isfinite(u).all()
-			or np.any(r < 0) or np.any(u < 0)):
-		raise ResultsError("RSS must be finite and nonnegative")
-	if (not np.isfinite(q).all() or not np.isfinite(k).all()
-			or np.any(q < 0) or np.any(k < 0)
-			or np.any(q != np.floor(q)) or np.any(k != np.floor(k))):
-		raise ResultsError("Parameter and restriction counts must be nonnegative integers")
-	df = n_samples - k
-	if np.any(df <= 0):
-		raise ResultsError("Unrestricted residual degrees of freedom must be positive")
-	valid = q > 0
-	improvement = np.maximum(r - u, 0.0)
-	values = np.full(u.shape, np.nan)
-	positive = valid & (u > 0)
-	values[positive] = ((np.maximum(improvement[positive], 0) / q[positive])
-						/ (u[positive] / df[positive]))
-	values[valid & (u == 0) & (r > 0)] = np.inf
-	return values
+def f_test_p_values(
+    statistics,
+    restriction_df,
+    residual_df,
+) -> tuple[NDArray[np.float64], list[str]]:
+    """Convert F values to upper-tail p-values using float DOF."""
+    values = np.atleast_1d(np.asarray(statistics, dtype=float))
+    q = np.atleast_1d(np.asarray(restriction_df, dtype=float))
+    df = np.atleast_1d(np.asarray(residual_df, dtype=float))
+
+    if not (values.shape == q.shape == df.shape):
+        raise ResultsError("F p-value inputs must share a single shape")
+
+    p_values = np.full(values.shape, np.nan)
+    statuses: list[str] = []
+
+    for index in range(values.size):
+        value = values[index]
+
+        if np.isnan(value) or value < 0:
+            statuses.append("statistic_unavailable")
+            continue
+
+        if not np.isfinite(q[index]) or q[index] <= 0:
+            statuses.append("invalid_restriction_df")
+            continue
+
+        if not np.isfinite(df[index]) or df[index] <= 0:
+            statuses.append("invalid_residual_df")
+            continue
+
+        p_value = f.sf(
+            value, dfn=q[index], dfd=df[index]
+        )
+        p_values[index] = p_value
+        statuses.append(
+            "ok"
+            if np.isfinite(p_value)
+            else "distribution_evaluation_failed"
+        )
+
+    return p_values, statuses
 
 
-def likelihood_ratio_test_value(
-	error_ref: NDArray[np.float64],
-	error_base: NDArray[np.float64],
-	n_samples: int,
-) -> NDArray[np.float64]:
-	"""Compute likelihood-ratio statistic vector from reference and base errors."""
-	err_ref = np.asarray(error_ref, dtype=np.float64)
-	err_base = np.asarray(error_base, dtype=np.float64)
-	if err_ref.shape != err_base.shape:
-		raise ResultsError("error_ref and error_base must have the same shape")
+def chi_square_p_values(
+    statistics,
+    restriction_df,
+) -> tuple[NDArray[np.float64], list[str]]:
+    """Convert chi-square values to upper-tail p-values using float DOF."""
+    values = np.atleast_1d(np.asarray(statistics, dtype=float))
+    q = np.atleast_1d(np.asarray(restriction_df, dtype=float))
 
-	ratio = np.maximum(err_ref, np.finfo(np.float64).eps) / np.maximum(
-		err_base, np.finfo(np.float64).eps
-	)
-	return float(n_samples) * np.maximum(np.log(ratio), 0.0)
+    if values.shape != q.shape:
+        raise ResultsError("Chi-square p-value inputs must share a single shape")
 
+    p_values = np.full(values.shape, np.nan)
+    statuses: list[str] = []
 
-def p_value_from_f_test(
-	f_values: NDArray[np.float64],
-	n_restrictions: NDArray[np.int_],
-	residual_df: NDArray[np.int_],
-) -> NDArray[np.float64]:
-	"""Convert per-output F statistics to upper-tail p-values."""
-	f_values_arr = np.asarray(f_values, dtype=np.float64)
-	n_restrictions_arr = np.asarray(n_restrictions, dtype=np.int_)
-	residual_df_arr = np.asarray(residual_df, dtype=np.int_)
+    for index in range(values.size):
+        value = values[index]
 
-	if f_values_arr.shape != n_restrictions_arr.shape:
-		raise ResultsError(
-			"f_values and n_restrictions must have equal shapes, got "
-			f"{f_values_arr.shape} and {n_restrictions_arr.shape}"
-		)
+        if np.isnan(value) or value < 0:
+            statuses.append("statistic_unavailable")
+            continue
 
-	if f_values_arr.shape != residual_df_arr.shape:
-		raise ResultsError(
-			"f_values and residual_df must have equal shapes, got "
-			f"{f_values_arr.shape} and {residual_df_arr.shape}"
-		)
+        if not np.isfinite(q[index]) or q[index] <= 0:
+            statuses.append("invalid_restriction_df")
+            continue
 
-	if np.any(n_restrictions_arr < 0):
-		raise ResultsError("n_restrictions cannot contain negative values")
+        p_value = chi2.sf(value, df=q[index])
+        p_values[index] = p_value
+        statuses.append(
+            "ok"
+            if np.isfinite(p_value)
+            else "distribution_evaluation_failed"
+        )
 
-	if np.any(residual_df_arr <= 0):
-		raise ResultsError("residual_df must be > 0 for every output, got " f"{residual_df_arr}")
-
-	p_values = np.full(f_values_arr.shape, np.nan, dtype=np.float64)
-	valid = (n_restrictions_arr > 0) & ~np.isnan(f_values_arr) & (f_values_arr >= 0)
-	p_values[valid] = f.sf(np.maximum(f_values_arr[valid], 0.0), dfn=n_restrictions_arr[valid], dfd=residual_df_arr[valid])
-	return p_values
+    return p_values, statuses
 
 
-def p_value_from_chi_square_test(
-	test_values: NDArray[np.float64],
-	df: NDArray[np.int_],
-) -> NDArray[np.float64]:
-	"""
-	Convert per-output chi-square statistics to upper-tail p-values.
-	"""
-	values = np.asarray(test_values, dtype=np.float64)
-	df_arr = np.asarray(df, dtype=np.int_)
+def ols_projection_error(
+    basis,
+    target,
+    prediction,
+) -> tuple[float, float]:
+    """Return (error, tolerance) for a prediction against its OLS projection.
 
-	if values.shape != df_arr.shape:
-		raise ResultsError(
-			"test_values and df must have equal shapes, got "
-			f"{values.shape} and {df_arr.shape}"
-		)
+    ``basis`` is an orthonormal basis of a retained design space. The
+    error compares the stored prediction with the OLS projection of the
+    target onto that space, so the check covers both membership in the
+    space and equivalence with the OLS fit.
+    """
+    basis = np.asarray(basis, dtype=float)
+    target = np.asarray(target, dtype=float)
+    prediction = np.asarray(prediction, dtype=float)
 
-	if np.any(df_arr < 0):
-		raise ResultsError(f"Chi-square df cannot be negative, got {df_arr}")
-
-	p_values = np.full(values.shape, np.nan, dtype=np.float64)
-	valid = (df_arr > 0) & ~np.isnan(values) & (values >= 0)
-	p_values[valid] = chi2.sf(np.maximum(values[valid], 0.0), df=df_arr[valid])
-	return p_values
-
-
-def p_value_from_wald_test(
-	test_values: NDArray[np.float64],
-	df: NDArray[np.int_],
-) -> NDArray[np.float64]:
-	"""Convert Wald statistics to chi-square p-values."""
-	return p_value_from_chi_square_test(test_values, df)
-
-
-def p_value_from_likelihood_ratio_test(
-	test_values: NDArray[np.float64],
-	df: NDArray[np.int_],
-) -> NDArray[np.float64]:
-	"""Convert likelihood-ratio statistics to chi-square p-values."""
-	return p_value_from_chi_square_test(test_values, df)
+    expected = basis @ (basis.T @ target)
+    error = float(np.linalg.norm(prediction - expected))
+    tolerance = 1e-7 * max(1.0, float(np.linalg.norm(target)))
+    return error, tolerance
 
 
 def nested_design_geometry(design_u, design_r, rcond=None):
@@ -417,6 +357,7 @@ def nested_design_geometry(design_u, design_r, rcond=None):
         added_basis_valid=added_basis_valid,
         geometry_status=geometry_status,
     )
+
 
 def rank_wald_test_value(
     y_true: NDArray[np.float64],
@@ -556,3 +497,85 @@ def rank_wald_test_value(
             )
 
     return values, reasons
+
+
+def coefficient_wald_value(
+    design,
+    coefficients,
+    tested_positions,
+    residual,
+    residual_df,
+    *,
+    rcond=None,
+):
+    """Compute a coefficient Wald statistic for one output.
+
+    Inputs use one shared coefficient space. The design must have
+    full retained column rank. Returns a value and availability status.
+    """
+    design = np.asarray(design, dtype=float)
+    coefficients = np.asarray(coefficients, dtype=float)
+    tested = np.asarray(tested_positions, dtype=int)
+    residual = np.asarray(residual, dtype=float)
+
+    if (
+        design.ndim != 2
+        or coefficients.shape != (design.shape[1],)
+        or residual.shape != (design.shape[0],)
+    ):
+        raise ResultsError("Invalid coefficient-Wald dimensions")
+
+    if tested.size == 0:
+        return np.nan, "no_tested_parameters"
+
+    if not (
+        np.isfinite(design).all()
+        and np.isfinite(coefficients).all()
+        and np.isfinite(residual).all()
+    ):
+        return np.nan, "nonfinite_wald_inputs"
+
+    if not np.isfinite(residual_df) or residual_df <= 0:
+        return np.nan, "invalid_residual_df"
+
+    _, singular, vt = np.linalg.svd(design, full_matrices=False)
+
+    relative = (
+        np.finfo(float).eps * max(design.shape)
+        if rcond is None
+        else float(rcond)
+    )
+    cutoff = relative * singular[0] if singular.size else 0.0
+
+    if np.count_nonzero(singular > cutoff) != design.shape[1]:
+        return np.nan, "coefficient_design_rank_deficient"
+
+    sigma2 = float(residual @ residual / residual_df)
+
+    # Rows of this factor correspond to coefficient coordinates.
+    factor = vt.T / singular
+    tested_factor = factor[tested]
+    covariance_unit = tested_factor @ tested_factor.T
+    covariance_unit = 0.5 * (
+        covariance_unit + covariance_unit.T
+    )
+    beta = coefficients[tested]
+
+    if sigma2 == 0:
+        if np.any(beta != 0):
+            return np.inf, "zero_residual_variance"
+        return np.nan, "zero_variance_and_zero_effect"
+
+    try:
+        np.linalg.cholesky(covariance_unit)
+        value = float(
+            beta @ np.linalg.solve(covariance_unit, beta)
+            / sigma2
+        )
+    except np.linalg.LinAlgError:
+        return np.nan, "singular_tested_covariance"
+
+    if np.isnan(value) or value < 0:
+        return np.nan, "invalid_wald_value"
+
+    return value, "ok"

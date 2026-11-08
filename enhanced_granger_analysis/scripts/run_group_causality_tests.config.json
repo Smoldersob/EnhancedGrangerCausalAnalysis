@@ -3,6 +3,11 @@
   "ground_truth_path": "./ground_truth.csv",
   "group_config_path": "./group_config.json",
   "threshold": 0.01,
+  "test_type": "wald_projection",
+  "dof_method": "rank",
+  "dof_params": {
+    "rank_rcond": 1e-10
+  },
   "data": {
     "csv_paths": [
       "./data.csv"
