@@ -89,6 +89,44 @@ Unknown names do not silently fall back. Ready model instances cannot be combine
 
 Implement the existing `GrangerModelProtocol`, not the removed shared model base class. Model construction must not retain training observations.
 
+### Conditional and Classical Model Selection
+
+The built-in model families are selected through existing backend-local
+registries:
+
+| Selection | Baseline | Cause-specific operation |
+| --- | --- | --- |
+| `"conditional"` or `"conditional_linear"` | Unrestricted | Omit the tested cause |
+| `"classical"` or `"classical_linear"` | Restricted autoregressive | Add the tested cause |
+
+For example, given a valid `input_spec` whose outputs have positive-lag
+own-history features:
+
+```python
+strategy = BackendFactory.get_strategy("numpy")
+
+model = strategy.build_model(
+    "classical_linear",
+    config={
+        "input_spec": input_spec,
+        "solver": "auto",
+        "epochs": 1000,
+    },
+)
+```
+
+This is a low-level construction example. It does not prepare constraints,
+resolve relation rules, or run complete Granger comparisons.
+
+PyTorch and Keras use the same registered model names with their existing
+backend-specific ready components and constructor configuration.
+
+Classical adapters do not introduce a separate optimizer, callback,
+constraint, or regularizer resolution path. The default conditional model
+selection is unchanged.
+
+See [Classical Granger models](classical_granger_models.md).
+
 ## Components and lifecycle
 
 Constraint and regularizer classes receive prepared layout-dependent data. Callbacks, optimizers, and losses are resolved by their backend-specific paths. Similar callback hook names do not make objects portable across backends.

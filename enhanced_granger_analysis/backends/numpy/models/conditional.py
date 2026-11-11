@@ -281,6 +281,10 @@ class NumpyConditionalAdapter:
 				"'auto', 'restricted_lstsq', 'coefficient'."
 			)
 
+	def _training_design(self, X: np.ndarray) -> np.ndarray:
+		"""Prepare the design matrix used by the optimization loop."""
+		return self._require_model().variable_control_layer(X)
+
 	def _require_model(self) -> LinearGrangerNetwork:
 		if self.model is None:
 			raise RuntimeError(
@@ -336,12 +340,9 @@ class NumpyConditionalAdapter:
 				"Constraint output order does not match input_spec."
 			)
 
-		network = LinearGrangerNetwork(
-			n_features=self._n_features,
-			n_outputs=self._n_outputs,
+		network = self._build_network(
 			constraint=constraint,
 			regularizer=regularizer,
-			use_bias=self.use_bias,
 		)
 
 		self.model = network
@@ -717,6 +718,19 @@ class NumpyConditionalAdapter:
 
 		layer.weight[...] = candidate
 
+	def _data_gradient(
+		self,
+		X_centered: np.ndarray,
+		y_centered: np.ndarray,
+	) -> np.ndarray:
+		weights = self._require_model().coefficient_layer.weight
+
+		return (
+			2.0
+			* (X_centered @ weights.T - y_centered).T
+			@ X_centered
+			/ (len(X_centered) * self._n_outputs)
+		)
 
 	def fit(
 		self,
@@ -780,7 +794,7 @@ class NumpyConditionalAdapter:
 				network.variable_control_layer.mask,
 				copy=True,
 			)
-			x_masked = network.variable_control_layer(x_array)
+			x_masked = self._training_design(x_array)
 
 			if self.use_bias:
 				x_mean = x_masked.mean(axis=0)
@@ -909,15 +923,7 @@ class NumpyConditionalAdapter:
 							network.coefficient_layer.weight
 						)
 
-						gradient = (
-							2.0
-							* (xb @ weights.T - yb).T
-							@ xb
-							/ (
-								(end - start)
-								* self._n_outputs
-							)
-						)
+						gradient = self._data_gradient(xb, yb)
 
 						step_size = (
 							relaxation / curvature
@@ -1092,5 +1098,18 @@ class NumpyConditionalAdapter:
 		)
 		return structural & network.variable_control_layer.mask.astype(bool)[None, :]
 
+	def _build_network(
+		self,
+		*,
+		constraint: BaseNumpyConstraint | None,
+		regularizer: BaseNumpyRegularizer | None,
+	) -> LinearGrangerNetwork:
+		return LinearGrangerNetwork(
+			n_features=self._n_features,
+			n_outputs=self._n_outputs,
+			constraint=constraint,
+			regularizer=regularizer,
+			use_bias=self.use_bias,
+		)
 
 NumpyConstrainedGrangerModel = NumpyConditionalAdapter

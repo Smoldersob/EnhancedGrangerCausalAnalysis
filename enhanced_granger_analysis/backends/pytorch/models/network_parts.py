@@ -1,10 +1,14 @@
 from __future__ import annotations
 
 from typing import Any
+from collections.abc import Sequence
 
 import numpy as np
 import torch
+import torch.nn.functional as F
 from torch import nn
+
+from ....core.models.input_spec import ModelInputSpec
 
 from ..constraints.base import BasePyTorchConstraint
 from ..regularizers.base import BasePyTorchRegularizer
@@ -166,3 +170,173 @@ class LinearGrangerNetwork(nn.Module):
         with torch.no_grad():
             for parameter, value in zip(parameters, tensors):
                 parameter.copy_(value)
+
+
+### Classical autoregressive baseline network with additional inputs.
+
+def validate_feature_indices(
+    variable_indices: Sequence[int],
+    *,
+    n_features: int,
+) -> np.ndarray:
+    """Validate column indices of the already prepared, lagged X."""
+    indices = list(variable_indices)
+
+    if any(
+        isinstance(index, (bool, np.bool_))
+        or not isinstance(index, (int, np.integer))
+        for index in indices
+    ):
+        raise TypeError(
+            "Feature indices must be integers, not booleans."
+        )
+
+    if any(index < 0 or index >= n_features for index in indices):
+        raise ValueError("Feature index is out of range.")
+
+    return np.asarray(indices, dtype=np.intp)
+
+
+def _build_ar_selector(input_spec: ModelInputSpec) -> np.ndarray:
+    """Select positive-lag own-history features for each output."""
+    selector = np.zeros(
+        (input_spec.n_outputs, input_spec.n_features),
+        dtype=bool,
+    )
+    lags = np.asarray(input_spec.feature_lags, dtype=np.int64)
+
+    for output_index, effect in enumerate(input_spec.effects):
+        block = input_spec.cause_slices.get(effect)
+
+        if block is None:
+            raise ValueError(
+                f"Output {effect!r} has no own-history block in X. "
+                "The classical restricted baseline requires its "
+                "lagged values among the prepared predictors."
+            )
+
+        columns = np.arange(
+            block.start,
+            block.stop,
+            dtype=np.intp,
+        )
+        own_history = columns[lags[columns] > 0]
+
+        if own_history.size == 0:
+            raise ValueError(
+                f"Output {effect!r} has no positive-lag "
+                "own-history features in X."
+            )
+
+        selector[output_index, own_history] = True
+
+    return selector
+
+
+class ClassicalLinearGrangerNetwork(LinearGrangerNetwork):
+    """Multi-output linear predictor with an autoregressive baseline.
+
+    Owns one coefficient matrix with shape:
+        (n_outputs, n_features)
+
+    Prediction:
+        AR(X, W * A) + EXT(X * m, W * E) + bias
+
+    A and E are fixed complementary selectors.
+    m is the dynamic feature-control vector.
+
+    Constraints, regularization and predictor-weight import/export
+    retain the contracts inherited from LinearGrangerNetwork.
+    """
+
+    def __init__(
+        self,
+        *,
+        input_spec: ModelInputSpec,
+        constraint: BasePyTorchConstraint | None = None,
+        regularizer: BasePyTorchRegularizer | None = None,
+        use_bias: bool = True,
+    ) -> None:
+        if not isinstance(input_spec, ModelInputSpec):
+            raise TypeError("input_spec must be a ModelInputSpec.")
+
+        ar_selector = _build_ar_selector(input_spec)
+
+        super().__init__(
+            n_features=input_spec.n_features,
+            n_outputs=input_spec.n_outputs,
+            constraint=constraint,
+            regularizer=regularizer,
+            use_bias=use_bias,
+        )
+
+        self.register_buffer(
+            "ar_selector",
+            torch.from_numpy(ar_selector.copy()),
+        )
+        self.register_buffer(
+            "external_selector",
+            torch.from_numpy(~ar_selector),
+        )
+
+        self.reset_to_base()
+
+    def forward(self, inputs: torch.Tensor) -> torch.Tensor:
+        if inputs.ndim != 2 or inputs.shape[1] != self.n_features:
+            raise ValueError(
+                "Expected inputs with shape "
+                f"(n_samples, {self.n_features})."
+            )
+
+        layer = self.coefficient_layer
+        weights = layer.weight
+
+        autoregressive = F.linear(
+            inputs,
+            weights * self.ar_selector,
+            bias=None,
+        )
+
+        additional = F.linear(
+            self.variable_control_layer(inputs),
+            weights * self.external_selector,
+            bias=None,
+        )
+
+        prediction = autoregressive + additional
+
+        if layer.bias is not None:
+            prediction = prediction + layer.bias
+
+        return prediction
+
+    @torch.no_grad()
+    def reset_to_base(self) -> None:
+        """Disable all additional inputs, preserving predictor weights."""
+        self.variable_control_layer.mask.zero_()
+
+    @torch.no_grad()
+    def select_additional_features(
+        self,
+        variable_indices: Sequence[int],
+    ) -> None:
+        """Replace the selected additional inputs; never accumulate."""
+        indices = validate_feature_indices(
+            variable_indices,
+            n_features=self.n_features,
+        )
+
+        mask = np.zeros(self.n_features, dtype=np.float32)
+        mask[indices] = 1.0
+
+        self.variable_control_layer.set_mask(mask)
+
+    def get_controlled_slope_mask(self) -> np.ndarray:
+        """Return architectural activity before structural constraints."""
+        control = self.variable_control_layer.mask.bool()
+
+        active = self.ar_selector | (
+            self.external_selector & control.unsqueeze(0)
+        )
+
+        return active.detach().cpu().numpy().copy()

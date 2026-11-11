@@ -272,13 +272,9 @@ class KerasConditionalAdapter:
 				if (tuple(data.output_names) != self.input_spec.effects
 						or data.n_features != self.input_spec.n_features):
 					raise ValueError("Constraint layout does not match input_spec.")
-			network = LinearGrangerNetwork(
-				n_features=self.input_spec.n_features,
-				n_outputs=self.input_spec.n_outputs,
+			network = self._build_network(
 				constraint=constraint,
 				regularizer=regularizer,
-				use_bias=self.use_bias,
-				dtype="float32",
 			)
 			network.build((None, self.input_spec.n_features))
 
@@ -584,4 +580,20 @@ class KerasConditionalAdapter:
 			reset_callbacks=True,
 			run_name=run_name,
 			callback_updates=callback_updates,
+		)
+
+	def _build_network(
+		self,
+		*,
+		constraint: Any,
+		regularizer: Any,
+	) -> LinearGrangerNetwork:
+		"""Construct the predictor independently of its training lifecycle."""
+		return LinearGrangerNetwork(
+			n_features=self.input_spec.n_features,
+			n_outputs=self.input_spec.n_outputs,
+			constraint=constraint,
+			regularizer=regularizer,
+			use_bias=self.use_bias,
+			dtype="float32",
 		)

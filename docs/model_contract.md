@@ -28,17 +28,19 @@ tested-cause selection, or training diagnostics.
 
 ## Adapter and predictor
 
-| Backend | Adapter | Native coefficient layout |
-| --- | --- | --- |
-| NumPy | `NumpyConditionalAdapter` | `(n_outputs, n_features)` |
-| PyTorch | `PyTorchConditionalAdapter` | `(n_outputs, n_features)` |
-| Keras | `KerasConditionalAdapter` | `(n_features, n_outputs)` |
+| Backend | Conditional adapter | Classical adapter | Native coefficient layout |
+| --- | --- | --- | --- |
+| NumPy | `NumpyConditionalAdapter` | `NumpyClassicalAdapter` | `(n_outputs, n_features)` |
+| PyTorch | `PyTorchConditionalAdapter` | `PyTorchClassicalAdapter` | `(n_outputs, n_features)` |
+| Keras | `KerasConditionalAdapter` | `KerasClassicalAdapter` | `(n_features, n_outputs)` |
 
-Predictors own the input-control layer and coefficient layer. Adapters manage
-construction, fitting, component resets, diagnostics, and parameter access.
+Predictor architectures are defined in backend-local
+`models/network_parts.py`. Conditional and classical adapters are defined
+in `models/conditional.py` and `models/classic.py`, respectively.
 
-Built-in constructors create an unfitted predictor without retaining training
-observations.
+The adapters manage construction, fitting, component resets, diagnostics,
+and parameter access. Predictors own coefficient parameters and input
+control.
 
 ## Training inputs
 
@@ -64,7 +66,8 @@ inverse-transform predictions, or calculate Granger significance tests.
 | `fit(X, y)` | Updated from current values | Preserved | Reset by default |
 | `get_weights()` | Independent copies returned | Not exported | Not exported |
 | `set_weights()` | Restored | Preserved | Preserved |
-| `omit_variables()` | Preserved | Replaced | Preserved |
+| `omit_variables()` | Preserved | Replaced according to model-family semantics | Preserved |
+| `add_variables()` | Preserved | Replaced according to model-family semantics | Preserved |
 | `reset_components()` | Preserved | Preserved | Reset selectively |
 
 `set_weights()` invalidates fitted status. Component reset and input omission
@@ -72,6 +75,14 @@ preserve fitted status.
 
 `fit()` never implicitly rebuilds the predictor. Repeated fitting can warm-start
 from existing parameters while resetting optimizer and callback state.
+
+The baseline restored by `rebuild()` is model-dependent:
+
+- Conditional adapters restore the unrestricted input configuration.
+- Classical adapters restore the restricted autoregressive configuration.
+
+Input-control operations preserve fitted status but do not imply that the
+new configuration has been independently fitted.
 
 ## Parameter export
 
@@ -87,20 +98,39 @@ registered model.
 Input masks, optimizer slots, callback state, and diagnostics are excluded from
 weight export.
 
-## Feature omission
+## Input Control and Baseline Role
 
-`omit_variables()` accepts prepared feature-column indices, not unlagged
-variable positions or cause names.
+`omit_variables()` and `add_variables()` accept prepared feature-column
+indices, not raw variable positions or cause names.
 
-Use the named cause slice to omit all prepared features belonging to one cause.
-Each call replaces the previous omission set.
+Use `ModelInputSpec.cause_slices` or `PreparedData.cause_slices` to select
+all prepared columns belonging to a cause.
 
-Input omission and structural coefficient constraints are different mechanisms.
-Omission suppresses input columns across outputs; structural constraints may
-differ by output-feature pair.
+| Family | `base_model_role` | `omit_variables(indices)` | `add_variables(indices)` |
+| --- | --- | --- | --- |
+| Conditional | `"unrestricted"` | Disable exactly the selected input columns across outputs | Restore all inputs |
+| Classical | `"restricted"` | Restore the own-history-only baseline | Enable exactly the selected additional columns relative to that baseline |
 
-Regularization acts on coefficient parameters and is not automatically disabled
-for coefficients whose input columns are omitted.
+Selections replace previous input-control state; they do not accumulate.
+
+Classical own-history terms bypass the additional-input control vector.
+Each output requires at least one positive-lag own-history feature in X.
+
+Input control is distinct from structural coefficient constraints.
+Constraints may differ by output-feature pair, while dynamic additional
+input selection remains vector-valued.
+
+Regularization operates on coefficient parameters and is not automatically
+disabled for connections inactive in prediction.
+
+Changing input control does not restore baseline weights. Weight
+restoration remains a separate operation.
+
+Built-in `get_active_mask()` reports architectural/input-control activity
+intersected with the structural allowance mask, in shape
+`(n_outputs, n_features)`. It does not report fitted nonzero support.
+
+See [Classical Granger models](classical_granger_models.md).
 
 ## Training diagnostics
 

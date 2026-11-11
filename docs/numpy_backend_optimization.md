@@ -12,9 +12,9 @@ This document describes the adapter with automatic solver selection,
 
 The predictor has the form
 
-\[
+$
 \widehat{Y} = X_{\mathrm{masked}} W^\top + \mathbf{1}b^\top,
-\]
+$
 
 where:
 
@@ -35,7 +35,7 @@ but does not use it to randomize coefficients.
 
 The fitting objective is
 
-\[
+$
 F(W,b)
 =
 \frac{1}{nm}
@@ -44,7 +44,7 @@ X_{\mathrm{masked}}W^\top+\mathbf{1}b^\top-Y
 \right\|_F^2
 +
 R(W),
-\]
+$
 
 subject to the configured coefficient constraint, where:
 
@@ -149,11 +149,11 @@ Feature omission is applied before fitting.
 When an intercept is enabled, the backend centers the masked inputs and
 targets using full-dataset means:
 
-\[
+$
 X_c = X_{\mathrm{masked}}-\mathbf{1}\bar{x}^\top,
 \qquad
 Y_c = Y-\mathbf{1}\bar{y}^\top.
-\]
+$
 
 Without an intercept, the centering offsets are zero.
 
@@ -164,14 +164,14 @@ the feature-omission mask and the coefficient zero mask.
 
 It solves
 
-\[
+$
 W^\star_{j,A_j}
 =
 \arg\min_v
 \left\|
 X_{c,A_j}v-Y_{c,j}
 \right\|_2^2
-\]
+$
 
 using:
 
@@ -199,11 +199,11 @@ is explicitly constructed for this path.
 
 The target is applied during the epoch loop:
 
-\[
+$
 W_{k+1}
 =
 (1-\alpha_k)W_k+\alpha_kW^\star,
-\]
+$
 
 followed by explicit zeroing of forbidden and omitted coefficients.
 
@@ -229,12 +229,12 @@ mini-batch fitting while retaining the existing component interfaces.
 
 For a batch containing \(n_b\) samples, the data gradient is
 
-\[
+$
 G_b
 =
 \frac{2}{n_bm}
 \left(X_bW^\top-Y_b\right)^\top X_b.
-\]
+$
 
 With an intercept enabled, batches are taken from arrays centered using
 full-dataset means. They are not centered independently per batch.
@@ -243,19 +243,19 @@ full-dataset means. They are not centered independently per batch.
 
 For each batch, the backend computes
 
-\[
+$
 L_b
 =
 \frac{2\|X_b\|_2^2}{n_bm},
-\]
+$
 
 where \(\|X_b\|_2\) is the matrix spectral norm.
 
 The coefficient step size is
 
-\[
+$
 \eta_b=\frac{\alpha_k}{L_b}.
-\]
+$
 
 A zero computed curvature is replaced by `1.0` to avoid division by zero.
 
@@ -282,11 +282,11 @@ thresholds according to their configuration.
 If no callable proximal operator is available, the backend obtains the
 penalty gradient from the network and uses:
 
-\[
+$
 W_{\mathrm{candidate}}
 =
 W-\eta_b\left(G_b+\nabla R(W)\right).
-\]
+$
 
 The batch curvature accounts for the data term only. It does not include
 additional curvature introduced by an arbitrary custom regularizer.
@@ -314,9 +314,9 @@ regularizer–constraint combinations.
 
 After coefficient updates, the intercept is recomputed analytically:
 
-\[
+$
 b=\bar{y}-W\bar{x}.
-\]
+$
 
 For the direct solver, this occurs after the epoch's coefficient update.
 For the iterative solver, it occurs after each batch.
@@ -329,7 +329,7 @@ The backend does not construct a native optimizer object. A compatibility
 object exposes:
 
 ```python
-state["optimizer"].param_groups["lr"]
+state["optimizer"].param_groups[0]["lr"]
 ```
 
 to existing learning-rate callbacks.
@@ -401,6 +401,118 @@ predictor. Existing coefficients can therefore act as a warm start.
 
 Callback reset creates callbacks for a new run. Predictor rebuilding and
 callback resetting are separate operations.
+
+## Classical Adapter: Output-Specific Active Inputs
+
+The preceding masked-design equations describe the conditional adapter.
+`NumpyClassicalAdapter` preserves the solver framework but changes the
+design, gradient, and intercept calculations.
+
+Let A select each output's positive-lag own-history coefficients, let
+E = 1 - A, and let c be the additional-input control vector.
+
+The architectural activity mask is
+
+$
+M=A\lor(E\land c[None,:])
+$.
+
+The classical prediction is
+
+$
+\widehat Y=X(W\odot M)^\top+\mathbf{1}b^\top
+$
+.
+
+### Training Design
+
+The classical adapter does not apply the control vector to the complete X
+before fitting. Doing so would also remove own-history features required
+by the autoregressive path.
+
+With an intercept, full-dataset means are used to center the complete X
+and Y. Output-specific selection is applied through M.
+
+### Direct Least Squares
+
+Solver eligibility remains unchanged.
+
+For each output, the direct solver selects columns permitted by both:
+
+- the architectural activity mask M;
+- the pure zero mask returned by the configured constraint.
+
+It then uses `np.linalg.lstsq(..., rcond=None)` on those columns.
+Inactive coefficients receive canonical zeros.
+
+The target is computed once per fit. Existing relaxation, callback
+processing, constraint checks, and stopping behavior are preserved.
+Damped updates also zero inactive coefficients.
+
+Per-output solving is an implementation of this separable least-squares
+problem. It does not create separate model-adapter instances.
+
+### Iterative Data Gradient
+
+For a centered batch with n_b samples and q outputs,
+
+$
+G_b=
+\left[
+\frac{2}{n_bq}
+\left(X_b(W\odot M)^\top-Y_b\right)^\top X_b
+\right]\odot M.
+$
+
+Only the data gradient is masked. Regularizer proximal operations or
+penalty gradients still act on raw W, followed by the existing constraint
+enforcement.
+
+Inactive parameters are not forcibly zeroed after generic constraint
+enforcement on this path, because doing so could violate constraints
+coupling coefficients.
+
+### Curvature Scaling
+
+The existing scalar curvature estimate uses the complete centered batch:
+
+$
+L_b=\frac{2\|X_b\|_2^2}{n_bq}.
+$
+
+It bounds the data-term curvature for the output-specific column subsets.
+It may be more conservative than an estimate based only on each output's
+active columns.
+
+A shared scalar step preserves the existing proximal-operator interface.
+It does not account for arbitrary extra curvature from custom
+regularizers.
+
+### Intercept
+
+After coefficient updates, the classical intercept is
+
+$
+b=\bar y-(W\odot M)\bar x.
+$
+
+Using raw W here would allow inactive coefficients to affect predictions
+through the intercept, even though their direct contribution is masked.
+
+### Extension Hooks
+
+`NumpyConditionalAdapter` exposes:
+
+- `_build_network(...)`;
+- `_training_design(X)`;
+- `_data_gradient(X_centered, y_centered)`.
+
+The classical adapter specializes these hooks and the existing direct
+least-squares and bias-update methods. It reuses `fit()`, solver
+selection, regularizer updates, constraint enforcement, callbacks, and
+training-result construction.
+
+See [Classical Granger models](classical_granger_models.md).
 
 ## Limitations and Interpretation
 

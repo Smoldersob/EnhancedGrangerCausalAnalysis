@@ -1,51 +1,118 @@
-# Single-model Restricted-run Lifecycle
+# Single-model Granger Fitting Lifecycle
 
-The standard workflow reuses one model for the full fit and subsequent restricted fits. Array dimensions remain unchanged; omission controls prepared feature columns.
+The standard workflow reuses one working model-adapter instance.
+Prepared X and y retain their dimensions across cause-specific runs.
 
-Implementation is split between `execution/granger_trainer.py` (one fit) and `execution/runner.py` (fit order and snapshot storage), not embedded in the builder.
+The baseline role determines which fitted state can be shared across
+tested causes:
 
-## Base fit
+| Model family | Shared fitted baseline | Cause-specific fit |
+| --- | --- | --- |
+| Conditional | Unrestricted model | Restricted model with the tested cause omitted |
+| Classical | Restricted autoregressive model | Unrestricted extension with the tested cause added |
+
+Each predictor jointly predicts all configured outputs.
+
+Implementation is split between `execution/granger_trainer.py`, which
+performs individual fits and captures outcomes, and
+`execution/runner.py`, which chooses fit order and stores snapshots.
+
+## Shared Base Fit
 
 1. Restore optional configured initial weights.
-2. Clear omitted columns with `omit_variables([])`.
-3. Reset optimizer and callbacks with run name `base_model`.
-4. Call the executor with prepared `X_scaled`, `y_scaled`, and `reset_components=False`.
-5. Capture model-scale predictions, full copied weights, training diagnostics, and timings in `FitOutcome`.
-6. The runner inverse-scales predictions and saves the base snapshot.
-7. Save copied full-model weights for restricted starts.
+2. Select the adapter's baseline with `add_variables([])`.
+3. Reset training components with run name `base_model`.
+4. Fit on prepared `X_scaled` and `y_scaled`, with
+   `reset_components=False`.
+5. Capture independent predictions, parameter arrays, active coefficient
+   masks, diagnostics, and timings.
+6. Store the snapshot under the adapter's `base_model_role`.
+7. Save copied baseline weights for subsequent fits.
 
-## Restricted fit
+For conditional adapters, the baseline is unrestricted.
+For classical adapters, it contains only each output's own history.
 
-A completed base fit is required. For each effective tested cause:
+## Conditional Cause-specific Fits
 
-1. Restore initial weights when explicitly requested and available; otherwise restore base weights when requested (the standard default).
-2. Select `prepared.cause_slices[cause]` and replace omitted columns with that block.
-3. Reset optimizer and callbacks using `reference_cause_{index}`, where index is the cause's position among effective causes, not among tested causes.
-4. Fit on the same prepared observations with `reset_components=False`.
-5. Capture `FitOutcome` and immediately store the reference snapshot.
+For each tested cause:
 
-If neither weight restoration applies, current model weights are retained. The model is not rebuilt for each cause and is not restored to the full-model state after the loop.
+1. Restore copied unrestricted baseline weights.
+2. Obtain the cause's prepared columns from `cause_slices`.
+3. Call `omit_variables(indices)`.
+4. Reset training components.
+5. Fit the restricted configuration.
+6. Capture and store the corresponding restricted snapshot.
 
-## Separation of concerns
+Omission replaces the previous omitted block.
 
-`FitExecutor` performs one protocol fit. `GrangerTrainer` controls weights, omission, component reset, and artifact capture. `AnalysisRunner` stores outcomes as analysis snapshots. `GrangerAnalysisResults` evaluates saved snapshots rather than fitting models.
+## Classical Cause-specific Fits
 
-Construction uses structural `ModelInputSpec`, not training observations. Optional initialization is a separate operation using `InitializationContext`.
+For each tested cause:
 
-## Isolation requirements
+1. Restore copied restricted autoregressive baseline weights.
+2. Obtain the cause's prepared columns from `cause_slices`.
+3. Call `add_variables(indices)`.
+4. Reset training components.
+5. Fit the unrestricted extension.
+6. Capture and store the corresponding unrestricted snapshot.
 
-- Weight restoration must preserve the intended input-control contract.
-- Omission replaces, rather than accumulates, omitted blocks.
-- Optimizer and callbacks reset explicitly for independent runs.
-- Predictions and weights captured for completed runs must remain independent of later training.
-- Compared predictions must share observation alignment, output order, and scale.
+Additional-input selection starts from the autoregressive baseline and
+does not accumulate across causes.
 
-These are implementation contracts, not automatic consequences of sharing a Python model object.
+Calling `omit_variables(...)` restores only the baseline input
+configuration. It does not restore baseline coefficient values.
 
-## Results and failures
+## Restricted Capture Without Refitting
 
-Result snapshots store inverse-scaled predictions and the current first-weight-array coefficient representation. Completed snapshots remain stored if a later fit fails. Exceptions propagate; partially populated results are not a completed analysis.
+A workflow may capture a restricted snapshot by applying input control to
+a fitted unrestricted model and predicting without another fit.
 
-`get_results()` does not trigger training. `fit()` is a complete run, not resume. Internal progress bookkeeping is not a public resume API.
+Such a snapshot retains coefficients learned in the unrestricted fit.
+It is not equivalent to independently refitting the restricted model.
 
-See [Architecture](execution_architecture.md), [API](api_usage.md), [Model contract](model_contract.md), and [Results](results_and_metrics.md).
+For classical models, this also differs from reusing a fitted shared
+autoregressive baseline. Preserve fit provenance and do not describe a
+masked capture as a fitted baseline.
+
+## Separation of Concerns
+
+- The predictor implements prediction and owns coefficient parameters.
+- The adapter implements the fitting and input-control contract.
+- `FitExecutor` performs one protocol fit.
+- `GrangerTrainer` controls weight restoration, input selection,
+  component reset, and outcome capture.
+- `AnalysisRunner` determines comparison order and stores snapshots.
+- `GrangerAnalysisResults` evaluates saved snapshots rather than
+  training models.
+
+Construction uses `ModelInputSpec`, not training observations.
+Initialization remains a separate operation.
+
+## Isolation Requirements
+
+- Weight restoration must preserve input-control state.
+- Input selection replaces rather than accumulates previous selections.
+- Independent runs explicitly reset training components.
+- Captured arrays must remain independent of later model mutation.
+- Compared predictions must share observation alignment, output order,
+  and scale.
+- Active coefficient masks must describe the actual captured
+  configuration.
+- Restoring input configuration and restoring fitted weights are
+  separate operations.
+
+## Results and Failures
+
+The working model remains in its last run's state. No automatic
+restoration of baseline parameters follows the cause loop.
+
+Completed snapshots may remain available when a later fit fails; they do
+not constitute a completed analysis.
+
+`get_results()` does not trigger training. A complete fit is not a resume
+operation, and internal progress bookkeeping is not a public session API.
+
+See [Execution architecture](execution_architectur.md),
+[Model contract](model_contract.md),
+[Classical Granger models](classical_granger_models.md), and
+[Results](results_and_metrics.md).

@@ -1196,3 +1196,76 @@ cross-backend validation claim.
   migrate to `coefficient_wald_value` and `dof_for(cause).restriction_df`.
 - Config files using `"rank_rcond"` at the top level of the script config
   should move it under `"dof_params"`.
+
+## [3.0.0] Unreleased — Classical Granger Model Adapters
+
+### Added
+
+- Added classical linear Granger adapters for PyTorch, Keras, and NumPy:
+  `PyTorchClassicalAdapter`, `KerasClassicalAdapter`, and
+  `NumpyClassicalAdapter`.
+- Registered the adapters under `classical` and `classical_linear` in the
+  existing backend-local model registries.
+- Added backend-local `ClassicalLinearGrangerNetwork` implementations in
+  `models/network_parts.py`, with adapters defined separately in
+  `models/classic.py`.
+- Added a shared restricted autoregressive baseline: each output initially
+  uses only its own positive-lag features.
+- Added non-cumulative additional-input selection through
+  `add_variables(feature_indices)`.
+- Added effective coefficient-mask reporting for classical model snapshots.
+- Added documentation describing classical versus conditional model
+  semantics and NumPy-specific fitting behavior.
+
+### Changed
+
+- Added a `_build_network()` construction hook to conditional adapters,
+  allowing classical adapters to reuse the existing training lifecycle,
+  component reconstruction, callbacks, and parameter access.
+- Classical adapters report `base_model_role="restricted"`, enabling one
+  fitted autoregressive baseline to be reused across tested causes.
+- In classical adapters, `omit_variables(...)` restores the autoregressive
+  baseline, while `add_variables(...)` replaces the selected additional
+  inputs rather than accumulating them.
+- Kept dynamic input control vector-valued. Fixed autoregressive and
+  additional-input selectors determine which coefficient connections use
+  that vector.
+- Preserved a single coefficient matrix and optional bias per predictor.
+  Existing regularizers and constraints continue to operate on raw
+  coefficient parameters.
+- Preserved parameter-only adapter weight export: input-control masks and
+  fixed architectural selectors are excluded from `get_weights()`.
+
+### NumPy Optimization
+
+- Preserved both `restricted_lstsq` and iterative `coefficient` fitting,
+  including the existing automatic solver-selection rules.
+- Added training-design and data-gradient hooks without replacing the
+  existing fitting loop.
+- Updated classical least-squares fitting to select active columns
+  separately for each output using both architectural activity and the
+  constraint's pure zero mask.
+- Updated the iterative data gradient and analytic intercept calculation
+  to use the effective coefficient matrix.
+- Preserved curvature-scaled steps, proximal regularization, the
+  gradient/subgradient fallback, constraint enforcement, callback control,
+  and damped least-squares updates.
+
+### Compatibility and Limitations
+
+- Existing conditional adapters retain their unrestricted-baseline and
+  feature-omission semantics.
+- Classical adapters retain the constructor and training-method signatures
+  of their backend-local conditional adapters.
+- Classical models require positive-lag own-history features for every
+  configured output. Output histories are not automatically added to X.
+- Additional-input indices refer to columns of the already prepared,
+  lag-expanded X, not raw variable positions.
+- Restoring the baseline input configuration does not restore fitted
+  baseline weights; weight restoration remains a separate trainer action.
+- Regularization and constraints may involve coefficients that are
+  currently inactive in prediction.
+- A restricted snapshot captured by masking a fitted unrestricted model
+  is not equivalent to a separately fitted restricted baseline.
+- Cross-backend numerical equivalence, runtime compatibility, and
+  statistical calibration require separate validation.

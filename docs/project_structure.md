@@ -81,3 +81,34 @@ Do not introduce parallel versions of these contracts in the new packages.
 `README.md` provides navigation and quick start; `Changelog.md` records changes. `docs/execution_architecture.md` describes responsibilities and data flow; `docs/api_refactor_migration.md` describes migration.
 
 The detailed preprocessing, lag-selection, model-contract, result-metric, NumPy-solver, and ground-truth pages retain their subsystem scope. Future sessions/procedures are not part of the tree above.
+
+## Backend-local Linear Model Families
+
+Each built-in backend uses the following model-package organization:
+
+```text
+models/
+├── conditional.py
+├── classic.py
+├── network_parts.py
+├── registry.py
+└── __init__.py
+```
+
+- `conditional.py` defines the unrestricted-baseline adapter and reusable
+  training lifecycle.
+- `classic.py` defines the restricted autoregressive-baseline adapter.
+- `network_parts.py` defines predictor architectures and input-control
+  helpers.
+- `registry.py` uses the existing registry infrastructure for model
+  selection.
+- `__init__.py` imports model implementations so registration is executed.
+
+Classical adapters specialize predictor construction through
+`_build_network()`. NumPy additionally specializes training-design and
+gradient calculations while preserving its existing solver framework.
+
+No new backend strategy, component resolver, preprocessing contract, or
+result-container type is introduced.
+
+See [Classical Granger models](classical_granger_models.md).

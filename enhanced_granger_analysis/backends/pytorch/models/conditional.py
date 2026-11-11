@@ -233,12 +233,9 @@ class PyTorchConditionalAdapter:
 					or data.n_features != self.input_spec.n_features):
 				raise ValueError("Constraint layout does not match input_spec.")
 
-		network = LinearGrangerNetwork(
-			n_features=self.input_spec.n_features,
-			n_outputs=self.input_spec.n_outputs,
+		network = self._build_network(
 			constraint=constraint,
 			regularizer=regularizer,
-			use_bias=self.use_bias,
 		).to(self.device)
 
 		runtime_loss = (
@@ -566,6 +563,20 @@ class PyTorchConditionalAdapter:
 		control = network.variable_control_layer.mask.detach().cpu().numpy().astype(bool)
 		return np.array(structural & control[None, :], dtype=bool, copy=True)
 
+	def _build_network(
+		self,
+		*,
+		constraint: BasePyTorchConstraint | None,
+		regularizer: BasePyTorchRegularizer | None,
+	) -> LinearGrangerNetwork:
+		"""Construct the predictor without owning its training lifecycle."""
+		return LinearGrangerNetwork(
+			n_features=self.input_spec.n_features,
+			n_outputs=self.input_spec.n_outputs,
+			constraint=constraint,
+			regularizer=regularizer,
+			use_bias=self.use_bias,
+		)
 
 # Backwards-compatible name; does not register a second model class.
 PyTorchGrangerModel = PyTorchConditionalAdapter

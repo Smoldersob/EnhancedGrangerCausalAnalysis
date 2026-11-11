@@ -25,7 +25,10 @@ Builder / Orchestrator / direct specification
               model.fit
 ```
 
-The diagram summarizes dependencies rather than exact chronological placement of every operation. Actual order is preparation, component/model construction, initialization, base fit, and optional restricted fits.
+The diagram summarizes dependencies rather than exact chronological
+placement. Preparation, component/model construction, and initialization
+precede fitting. The model's baseline role determines whether the shared
+fit is unrestricted or restricted and which cause-specific fits follow.
 
 ## Configuration is not execution state
 
@@ -57,15 +60,33 @@ The runner inverse-transforms target predictions and preserves the current snaps
 
 Training diagnostics are not automatically inserted into final snapshot metadata. Current metadata preserves timings and requested backend information. Calling standard fit without history collection produces a valid empty `TrainingResult`, not evidence of zero training iterations.
 
-## Standard trainer
+## Standard Trainer
 
-`GrangerTrainer` operates on the supplied working model. It returns one `FitOutcome` per successful fit and has no dependency on `GrangerAnalysisResults`.
+`GrangerTrainer` operates on the supplied working model and returns one
+`FitOutcome` per successful fit. It does not own the result container.
 
-Base fitting restores optional initial weights, clears omission, explicitly resets optimizer and callbacks, and calls fit with `reset_components=False`.
+The base fit selects the configured baseline through
+`add_variables([])`, restores optional initial weights, resets training
+components, and fits on the prepared arrays.
 
-Restricted fitting requires saved base weights, chooses the start state, replaces the omitted cause block, resets optimizer/callbacks, and fits on the same prepared arrays. Default start is copied base weights.
+Cause-specific operations use named `cause_slices`:
 
-The model is left in its last fit's state. No automatic restoration of the full model follows the restricted loop.
+- unrestricted fitting calls `add_variables(indices)`;
+- restricted fitting calls `omit_variables(indices)`.
+
+The adapter defines how these operations map to its model family.
+Conditional adapters use an unrestricted baseline; classical adapters use
+a restricted own-history baseline.
+
+Weight restoration and input selection are separate actions. Each
+independent fit resets training components before execution.
+
+The trainer may also capture a restricted configuration from a fitted
+unrestricted predictor without refitting. This preserves unrestricted
+coefficients and must remain distinguishable from a fitted restricted
+snapshot.
+
+The model remains in its last operation's state.
 
 ## Runner
 
@@ -74,6 +95,20 @@ The model is left in its last fit's state. No automatic restoration of the full 
 The lower-level `run(model=..., prepared=..., progress=...)` coordinates fitting for already constructed inputs. It is not a resume API.
 
 The runner creates the result context and stores outcomes immediately after each fit, preserving completed snapshots if a later fit fails. It does not create a cross-call preparation cache.
+
+`base_model_role` determines shared-fit reuse:
+
+- `"unrestricted"`: fit one shared U and obtain cause-specific R states;
+- `"restricted"`: fit one shared R and obtain cause-specific U states
+  in the fitted-baseline workflow;
+- no shared baseline role: obtain matching cause-specific states.
+
+Classical adapters use `"restricted"`. A shared restricted snapshot is
+associated with multiple tested causes without retraining the baseline
+for each cause.
+
+See [Single-model lifecycle](reference_loop.md) for fitted and
+capture-only distinctions.
 
 ## Builder synchronization
 
