@@ -11,15 +11,10 @@ from numbers import Integral
 from collections.abc import Sequence
 from joblib import Parallel, delayed
 
-from ...core.lag_config import (
-    LagEngineConfig,
-    LagFeature,
-    LagFittedConfig,
-    LaggedData,
-    LagPreparationResult,
-    LagSegmentInfo,
-    LagSpec,
-)
+from ...core.data.provenance import LagSegmentInfo
+from ...core.lags.specification import LagFeature, LagSpec
+from ..configuration.lag import LagEngineConfig
+from .artifacts import LagFittedConfig, LaggedData, LagPreparationResult
 from .registry import LagSelector
 
 

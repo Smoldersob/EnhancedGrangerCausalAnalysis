@@ -6,7 +6,7 @@ from collections.abc import Mapping
 from dataclasses import replace
 
 from ..configuration.modeling_spec import ModelingSpec
-from ..core.components.regularizer_parsing import (
+from ..core.components.regularizers.parsing import (
     parse_regularizer_spec,
 )
 from ..hiperopt.space.application import apply_candidate

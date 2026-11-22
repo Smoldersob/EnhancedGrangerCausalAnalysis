@@ -1,9 +1,7 @@
-from ...core.lag_config import (
-    LagEngineConfig,
-    LagPreparationResult,
-    LagSegmentInfo,
-    LagSpec,
-)
+from ...core.data.provenance import LagSegmentInfo
+from ...core.lags.specification import LagSpec
+from ..configuration.lag import LagEngineConfig
+from .artifacts import LagPreparationResult
 from .lag_engine import LagEngine
 from .configuration import resolve_lag_engine_config
 from .registry import (

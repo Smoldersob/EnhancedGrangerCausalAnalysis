@@ -9,7 +9,7 @@ import numpy as np
 import pandas as pd
 from statsmodels.tsa.vector_ar.var_model import VAR
 
-from ....core.lag_config import LagSpec
+from ....core.lags.specification import LagSpec
 from .base import BaseLagSelector
 from .incremental import _integer
 from .order_utils import (

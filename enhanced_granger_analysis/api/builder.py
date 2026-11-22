@@ -23,24 +23,26 @@ from ..execution.runner import (
 )
 
 from ..core.exceptions import DataValidationError, ConstraintConfigurationError
-from ..core.components.constraint_parsing import (
+from ..core.components.constraints.parsing import (
     RelationsInput,
     parse_relations_spec,
 )
-from ..core.components.constraint_spec import (
+from ..core.components.constraints.prepared import (
     PreparedConstraintData,
+)
+from ..core.components.constraints.specification import (
     RelationConstraintsSpec,
 )
-from ..core.components.regularizer_parsing import (
+from ..core.components.regularizers.parsing import (
     parse_regularizer_spec,
 )
-from ..core.components.regularizer_spec import (
+from ..core.components.regularizers.prepared import (
     PreparedRegularizerData,
 )
 
 from ..backends import BackendFactory
 from ..backends.base_backend import BackendStrategy
-from ..preprocessing.prepare_data import PreparedData
+from ..preprocessing.artifacts import PreparedData
 from ..results.granger_results import GrangerAnalysisResults
 
 

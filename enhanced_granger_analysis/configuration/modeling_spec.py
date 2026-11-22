@@ -3,7 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Any, Mapping
 
-from ..core.components.constraint_spec import RelationConstraintsSpec
+from ..core.components.constraints.specification import RelationConstraintsSpec
 
 
 def _default_constraint_spec() -> dict[str, Any]:

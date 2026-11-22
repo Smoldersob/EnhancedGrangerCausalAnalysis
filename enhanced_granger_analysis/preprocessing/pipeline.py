@@ -12,42 +12,22 @@ import numpy as np
 import pandas as pd
 
 from ..core.exceptions import DataValidationError
+from .configuration.preparation import DataPreparationConfig
 from .lag import (
     LagEngine,
     resolve_lag_engine_config,
     resolve_lag_selector,
 )
 from .missing import BaseImputer
-from .prepare_data import PreparedData, RemovedVariable, VariableRoles
+from .artifacts import PreparedData
+from ..core.data.provenance import RemovedVariable
+from ..core.data.analysis_roles import VariableRoles
 from .sampling import NoSampling, SamplingStrategy
 from .scaling import resolve_scaler, BlockScaler
 from .splitting import DataSplit, resolve_data_splitter
 from .stationarity import resolve_stationarity_enforcer
 
 _UNSET = object()
-
-@dataclass(frozen=True)
-class DataPreparationConfig:
-    """Configuration shared by the staged preparation builder."""
-
-    schema_policy: str = "error"
-    backend_sample_fraction: float = 1.0
-    backend_max_samples: Optional[int] = None
-    random_state: Optional[int] = None
-    x_scaler: Any = "standard"
-    y_scaler: Any = "standard"
-    lag_config: Any = None
-    lag_selector: Any = None
-    lag_selector_params: Mapping[str, Any] = field(
-        default_factory=dict
-    )
-    lag_n_jobs: int = 1
-    stationarity: Any = None
-    missing_value_imputer: Optional[BaseImputer] = None
-    sampling_strategy: Optional[SamplingStrategy] = field(
-        default_factory=NoSampling
-    )
-    splitter: Any = None
 
 def _to_dataframe_list(data: pd.DataFrame | Sequence[pd.DataFrame]) -> list[pd.DataFrame]:
     if isinstance(data, pd.DataFrame):

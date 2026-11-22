@@ -5,13 +5,13 @@ from typing import Any
 import keras
 import numpy as np
 
-from ....core.components.regularizer_parameters import (
+from ....core.components.regularizers.parameters import (
     L1_DEFAULT_PARAMS,
     LAG_L1_DEFAULT_PARAMS,
     prepare_l1_data,
     prepare_lag_l1_data,
 )
-from ....core.components.regularizer_spec import (
+from ....core.components.regularizers.prepared import (
     PreparedRegularizerData,
 )
 from .base import BaseKerasRegularizer

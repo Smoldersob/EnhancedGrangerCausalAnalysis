@@ -10,7 +10,7 @@ from typing import Any
 import keras
 
 from ....core.exceptions import ConstraintConfigurationError
-from ....core.components.callback_lifecycle import (
+from ....core.components.callbacks.lifecycle import (
     clone_custom_callback,
     reset_callback_list,
     validate_run_name,

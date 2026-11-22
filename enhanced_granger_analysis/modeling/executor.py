@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from ..preprocessing.prepare_data import PreparedData
+from ..preprocessing.artifacts import PreparedData
 from ..core.models.protocol import (
 	CallbackUpdates,
 	FloatArray,

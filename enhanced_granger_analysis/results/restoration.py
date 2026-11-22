@@ -9,7 +9,7 @@ import pandas as pd
 from .causality_matrix import CausalityMatrix
 
 if TYPE_CHECKING:
-    from ..preprocessing.prepare_data import RemovedVariable
+    from ..core.data.provenance import RemovedVariable
 
 
 def restore_removed_matrix(

@@ -17,19 +17,19 @@ from ..configuration.loader import (
 from ..experiments.config_iterator import (
     TestGroupConfigIterator as GroupConfigIterator,
 )
-from ..core.components.constraint_parsing import (
+from ..core.components.constraints.parsing import (
     parse_relations_spec,
 )
-from ..core.components.constraint_preparation import (
+from ..modeling.components.constraint_preparation import (
     prepare_constraint_data,
 )
-from ..core.components.constraint_spec import (
+from ..core.components.constraints.specification import (
     MinAbsSumRelationRule,
-    PreparedConstraintData,
     RelationConstraint,
     RelationConstraintsSpec,
     ZeroRelationRule,
 )
+from ..core.components.constraints.prepared import PreparedConstraintData
 from ..core.exceptions import (
     ConstraintConfigurationError,
     DataValidationError,

@@ -5,8 +5,8 @@ from typing import Any, Dict, Mapping, Optional, Sequence
 import pandas as pd
 
 from ..configuration.analysis_spec import AnalysisSpec
-from ..core.components.constraint_parsing import RelationsInput
-from ..core.components.constraint_spec import RelationConstraintsSpec
+from ..core.components.constraints.parsing import RelationsInput
+from ..core.components.constraints.specification import RelationConstraintsSpec
 from ..execution.runner import AnalysisRunner
 from ..preprocessing.missing import BaseImputer
 from ..preprocessing.sampling import SamplingStrategy

@@ -21,7 +21,7 @@ from ..modeling.search_configuration import (
     apply_modeling_candidate,
 )
 from ..modeling.search_evaluator import ModelCandidateEvaluator
-from ..preprocessing.prepare_data import PreparedData
+from ..preprocessing.artifacts import PreparedData
 
 
 class ModelSearchRunner:

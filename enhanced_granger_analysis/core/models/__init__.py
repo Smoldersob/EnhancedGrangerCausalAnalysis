@@ -4,7 +4,7 @@ from .protocol import (
     GrangerModelProtocol,
     ModelWeights,
 )
-from .model_registry import ModelClassRegistry
+from .registry import ModelClassRegistry
 from .validation import (
     validate_training_arrays,
 )

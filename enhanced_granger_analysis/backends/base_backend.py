@@ -4,8 +4,8 @@ from abc import ABC, abstractmethod
 from collections.abc import Mapping, Callable
 from typing import Any
 
-from ..core.components.constraint_spec import PreparedConstraintData
-from ..core.components.regularizer_spec import PreparedRegularizerData
+from ..core.components.constraints.prepared import PreparedConstraintData
+from ..core.components.regularizers.prepared import PreparedRegularizerData
 from ..core.models.protocol import GrangerModelProtocol
 
 

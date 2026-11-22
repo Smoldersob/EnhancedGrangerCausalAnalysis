@@ -5,7 +5,7 @@ import numpy as np
 import pandas as pd
 
 from ..core.exceptions import BackendNotAvailableError, DataValidationError
-from ..core.outputs import SimpleGrangerOutput
+from .outputs import SimpleGrangerOutput
 from ..preprocessing.stationarity import resolve_stationarity_enforcer
 from ..results.causality_matrix import CausalityMatrix
 

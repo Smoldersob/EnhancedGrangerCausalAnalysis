@@ -7,7 +7,7 @@ from collections.abc import Sequence
 
 import pandas as pd
 
-from ....core.lag_config import LagSpec
+from ....core.lags.specification import LagSpec
 
 
 class BaseLagSelector(ABC):

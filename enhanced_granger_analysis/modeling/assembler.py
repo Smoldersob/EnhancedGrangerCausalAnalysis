@@ -3,27 +3,27 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Mapping, Any
 
-from ..preprocessing.prepare_data import PreparedData
+from ..preprocessing.artifacts import PreparedData
 
 from ..backends.base_backend import BackendStrategy
 
 from ..core.models.input_spec import ModelInputSpec
 from ..core.models.protocol import GrangerModelProtocol
 
-from ..core.components.constraint_parsing import (
+from ..core.components.constraints.parsing import (
     RelationsInput,
     parse_relations_spec,
 )
-from ..core.components.constraint_preparation import (
+from ..modeling.components.constraint_preparation import (
     prepare_constraint_data as compile_constraint_data,
 )
-from ..core.components.constraint_spec import PreparedConstraintData
+from ..core.components.constraints.prepared import PreparedConstraintData
 
-from ..core.components.regularizer_parsing import parse_regularizer_spec
-from ..core.components.regularizer_preparation import (
+from ..core.components.regularizers.parsing import parse_regularizer_spec
+from ..modeling.components.regularizer_preparation import (
     prepare_regularization_layout,
 )
-from ..core.components.regularizer_spec import PreparedRegularizerData
+from ..core.components.regularizers.prepared import PreparedRegularizerData
 
 from ..core.exceptions import (
     ConstraintConfigurationError,

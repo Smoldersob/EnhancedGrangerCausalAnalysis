@@ -1,7 +1,7 @@
 from collections.abc import Callable
 from typing import Any, TypeVar
 
-from ....core.components.callback_registry import CallbackClassRegistry
+from ....core.components.callbacks.registry import CallbackClassRegistry
 from .base import Callback
 
 

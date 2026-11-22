@@ -3,7 +3,7 @@ from __future__ import annotations
 from collections.abc import Callable
 from typing import Any, TypeVar
 
-from ....core.components.constraint_registry import ConstraintClassRegistry
+from ....core.components.constraints.registry import ConstraintClassRegistry
 from .base import BaseKerasConstraint
 
 

@@ -5,7 +5,7 @@ from __future__ import annotations
 from collections.abc import Callable
 from typing import Any, TypeVar
 
-from ...core.protocols import Scaler
+from .protocol import Scaler
 from ...core.registry import Registry
 
 

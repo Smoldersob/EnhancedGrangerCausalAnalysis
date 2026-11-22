@@ -8,7 +8,7 @@ from typing import Any, Protocol, TypeVar
 import pandas as pd
 
 from ...core.registry import Registry
-from ...core.lag_config import LagSpec
+from ...core.lags.specification import LagSpec
 
 class LagSelector(Protocol):
     """Minimal interface required by lag-selector resolution."""

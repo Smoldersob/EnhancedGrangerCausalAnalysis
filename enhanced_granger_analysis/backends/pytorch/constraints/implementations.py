@@ -6,7 +6,7 @@ import torch
 
 from .base import BasePyTorchConstraint
 from .registry import register_constraint
-from ....core.components.constraint_spec import PreparedConstraintData
+from ....core.components.constraints.prepared import PreparedConstraintData
 from ....core.exceptions import ConstraintConfigurationError
 
 @register_constraint("MaskConstraint", "mask_constraint", "mask")

@@ -3,7 +3,7 @@ from __future__ import annotations
 from collections.abc import Callable
 from typing import Any, TypeVar
 
-from ....core.components.regularizer_registry import RegularizerClassRegistry
+from ....core.components.regularizers.registry import RegularizerClassRegistry
 from .base import BasePyTorchRegularizer
 
 

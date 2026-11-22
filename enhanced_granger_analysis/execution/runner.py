@@ -26,7 +26,7 @@ from ..modeling.initialization import ModelInitializer
 
 from ..preprocessing.pipeline import DataPreparer
 from ..preprocessing.search_preparation import resolve_search_preparation
-from ..preprocessing.prepare_data import PreparedData
+from ..preprocessing.artifacts import PreparedData
 
 from ..results.granger_results import (
     GrangerAnalysisResults,

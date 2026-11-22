@@ -15,7 +15,8 @@ import pandas as pd
 from numpy.typing import NDArray
 
 if TYPE_CHECKING:
-    from ..preprocessing.prepare_data import PreparedData, RemovedVariable, VariableRoles
+    from ..preprocessing.artifacts import PreparedData, RemovedVariable
+    from ..core.data.analysis_roles import VariableRoles
 
 from .causality_matrix import CausalityMatrix
 from .restoration import restore_removed_matrix

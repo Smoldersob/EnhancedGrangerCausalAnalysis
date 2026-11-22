@@ -1,35 +1,12 @@
-import importlib.util
-
-from . import ( 
-	components,
-	exceptions,
-	initialization,
-	lag_config,
-	protocols,
-	registry,
-	training_config,
-	search,
-)
-
+from . import components, data, exceptions, initialization, lags, models, registry, search
 
 __all__ = [
     "components",
-	"constraints_config",
+    "data",
     "exceptions",
-	"initialization",
-    "lag_config",
-    "protocols",
+    "initialization",
+    "lags",
+    "models",
     "registry",
-    "training_config",
     "search",
 ]
-
-
-def __getattr__(name: str):
-	"""Lazy-load optional submodules to avoid circular imports at package init time."""
-	if name == "outputs":
-		if importlib.util.find_spec("pandas") is None:
-			raise AttributeError("core.outputs requires pandas")
-		from . import outputs as _outputs
-		return _outputs
-	raise AttributeError(f"module {__name__!r} has no attribute {name!r}")

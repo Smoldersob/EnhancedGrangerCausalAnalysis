@@ -5,8 +5,8 @@ from collections.abc import Mapping, Sequence
 from typing import TYPE_CHECKING, Any
 
 from ..base_backend import BackendStrategy
-from ...core.components.constraint_spec import PreparedConstraintData
-from ...core.components.regularizer_spec import PreparedRegularizerData
+from ...core.components.constraints.prepared import PreparedConstraintData
+from ...core.components.regularizers.prepared import PreparedRegularizerData
 from ...core.exceptions import BackendNotAvailableError
 from ...core.models.protocol import GrangerModelProtocol
 

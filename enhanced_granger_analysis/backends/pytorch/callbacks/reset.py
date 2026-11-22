@@ -3,7 +3,7 @@ from __future__ import annotations
 from collections.abc import Mapping
 from typing import Any
 
-from ....core.components.callback_lifecycle import (
+from ....core.components.callbacks.lifecycle import (
     clone_custom_callback,
     reset_callback_list,
 )

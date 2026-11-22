@@ -9,8 +9,10 @@ import pandas as pd
 import pytest
 
 from ..core.exceptions import DataValidationError
-from ..core.lag_config import (
-    LagEngineConfig,
+from ..core.lags.specification import LagSpec
+from ..core.data.provenance import LagSegmentInfo
+from ..preprocessing.configuration.lag import LagEngineConfig
+from ..preprocessing.lag.artifacts import (
     LagFittedConfig,
     LaggedData,
     LagPreparationResult,
@@ -20,7 +22,7 @@ from ..preprocessing.pipeline import (
     DataPreparationConfig,
     DataPreparer,
 )
-from ..preprocessing.prepare_data import VariableRoles
+from ..core.data.analysis_roles import VariableRoles
 from ..preprocessing.splitting import (
     DataSplit,
     RandomRowSplitter,

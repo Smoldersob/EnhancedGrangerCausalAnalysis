@@ -7,7 +7,7 @@ from copy import deepcopy
 from dataclasses import fields
 from typing import Any
 
-from ...core.lag_config import LagEngineConfig
+from ...preprocessing.configuration.lag import LagEngineConfig
 
 
 def _resolve_explicit_lags(

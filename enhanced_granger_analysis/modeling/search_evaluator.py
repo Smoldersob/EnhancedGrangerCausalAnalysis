@@ -14,7 +14,7 @@ from ..backends import BackendFactory
 from ..configuration.modeling_spec import ModelingSpec
 
 from ..core.exceptions import DataValidationError
-from ..core.components.regularizer_parsing import (
+from ..core.components.regularizers.parsing import (
     parse_regularizer_spec,
 )
 
@@ -26,7 +26,7 @@ from ..hiperopt.objectives.base import (
 from ..hiperopt.results import TrialError, TrialResult
 from ..hiperopt.space.base import SearchCandidate
 
-from ..preprocessing.prepare_data import PreparedData
+from ..preprocessing.artifacts import PreparedData
 
 from .assembler import ModelAssembler
 from .executor import FitExecutor

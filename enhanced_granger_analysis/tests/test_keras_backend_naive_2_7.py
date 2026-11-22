@@ -69,9 +69,8 @@ def input_spec(api):
 
 @pytest.fixture
 def regularizer_data(input_spec):
-	from ..core.components.regularizer_spec import (
-		PreparedRegularizerData, RegularizationLayout,
-	)
+	from ..core.components.regularizers.prepared import PreparedRegularizerData
+	from ..core.components.regularizers.layout import RegularizationLayout
 
 	layout = RegularizationLayout(
 		cause_slices=input_spec.cause_slices,
@@ -84,7 +83,7 @@ def regularizer_data(input_spec):
 
 @pytest.fixture
 def constraint_data(input_spec):
-	from ..core.components.constraint_spec import PreparedConstraintData
+	from ..core.components.constraints.prepared import PreparedConstraintData
 
 	return PreparedConstraintData(
 		output_names=input_spec.effects,
@@ -253,7 +252,7 @@ class TestRegularizerConstruction:
 	@pytest.mark.parametrize("selector", ["name", "mapping", "class", "normalized"])
 	def test_project_regularizer(self, strategy, regularizer_data, selector):
 		from ..backends.keras.regularizers import L1Regularizer
-		from ..core.components.regularizer_spec import RegularizerSpec
+		from ..core.components.regularizers.specification import RegularizerSpec
 
 		spec = {
 			"name": "l1", "mapping": {"type": "l1", "params": {"l1": 0.025}},

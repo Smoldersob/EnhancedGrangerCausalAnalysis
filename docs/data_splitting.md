@@ -74,8 +74,9 @@ Both `prepared`-stage splitters emit a warning when constructed:
   values).
 - `LagEngine.prepare(...)` — kept for compatibility: `fit` + `transform`
   returning the legacy `LagPreparationResult`.
-- `LagPreparationResult` remains in `core/lag_config.py` as a compatibility
-  container; the new contract is the pair `LagFittedConfig` + `LaggedData`.
+- `LagPreparationResult` remains in `preprocessing/lag/artifacts.py` as the
+  compatibility container for `LagEngine.prepare()`; fitted and transformed
+  contracts are `LagFittedConfig` and `LaggedData`.
 - In `DataPreparer.lag()`: selection runs on the training frames
   (`select_for_fitting`), matrices are built from the full series
   (`transform`), and `PreparedData.lag_result` is replaced by
@@ -213,9 +214,8 @@ DataPreparationConfig(
 The full fragments are in `podzial_danych_2_9.patch` (apply with
 `git apply podzial_danych_2_9.patch`). In short:
 
-1. `core/lag_config.py` — `LagFittedConfig` and `LaggedData` inserted before
-   `LagPreparationResult`; the latter annotated as the compatibility
-   container.
+1. `preprocessing/lag/artifacts.py` — `LagFittedConfig`, `LaggedData`, and
+   `LagPreparationResult` are defined in the preprocessing artifact layer.
 2. `preprocessing/lag/lag_engine.py` — `prepare` split into `fit`
    (selection + layout → `LagFittedConfig`, stored in `self.fitted_config_`)
    and `transform` (segment loop → `LaggedData`); `_validate_transform_inputs`

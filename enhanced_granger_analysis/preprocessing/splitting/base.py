@@ -30,7 +30,7 @@ import numpy as np
 import pandas as pd
 
 from ...core.exceptions import DataValidationError
-from ...core.lag_config import LaggedData
+from ...preprocessing.lag.artifacts import LaggedData
 
 SplitStage = Literal["source", "prepared"]
 

@@ -64,11 +64,21 @@ enhanced_granger_analysis/
 - `core/models/input_spec.py`: `ModelInputSpec`.
 - `core/models/protocol.py`: `GrangerModelProtocol` and related types.
 - `core/models/training_result.py`: `TrainingResult`.
-- `core/initialization.py`: `InitializationContext`.
-- `core/components/`: relation/regularizer parsing, preparation data, registry support, and serialization.
-- `core/lag_config.py`: lag specifications, engine settings, preparation result metadata.
-- `preprocessing/pipeline.py`: existing `DataPreparationConfig` and `DataPreparer`.
-- `preprocessing/prepare_data.py`: `PreparedData`, `VariableRoles`, and removed-variable metadata.
+- `core/initialization/context.py`: `InitializationContext`.
+- `core/initialization/protocol.py`: initializer protocol.
+- `core/components/`: constraints, regularizers, and callback registries/contracts.
+- `core/lags/specification.py`: lag declarations.
+- `core/data/variables.py`: value types and process roles.
+- `core/data/analysis_roles.py`: causes, effects, and tested causes.
+- `core/data/provenance.py`: removed-variable and source correspondence metadata.
+- `core/data/feature_layout.py`: shared feature-block layout.
+- `preprocessing/scaling/protocol.py`: scaler protocol.
+- `configuration/training_spec.py`: training configuration.
+- `api/outputs.py`: API-owned `SimpleGrangerOutput`.
+- `preprocessing/pipeline.py`: `DataPreparer`.
+- `preprocessing/configuration/preparation.py`: `DataPreparationConfig`.
+- `preprocessing/artifacts.py`: `PreparedData`.
+- `preprocessing/prepare_data.py`: functional preparation entry point.
 
 Do not introduce parallel versions of these contracts in the new packages.
 
@@ -112,3 +122,22 @@ No new backend strategy, component resolver, preprocessing contract, or
 result-container type is introduced.
 
 See [Classical Granger models](classical_granger_models.md).
+
+## Variable descriptions and future interpretation
+
+`core.data.variables` is the shared description boundary:
+
+- `ValueType` describes continuous, binary, categorical, ordinal, or count
+  values.
+- `ProcessRole` describes physical/process meaning. Multiple roles are
+  allowed on one `VariableDescription`.
+- `VariableRoles`/`AnalyticalRoles` describes causes, effects, and tested
+  causes for a concrete analysis.
+- `domain_constraints` is reserved for later value-domain metadata; it is
+  not process-role semantics.
+
+These descriptions are metadata only. They do not alter preprocessing,
+lags, masks, models, or Granger tests. Future role interpretation policies
+should be placed in `preprocessing/` and use the existing registry
+infrastructure. Algebraic, loop, origin, and temporal relationship
+metadata is intentionally outside this initial description boundary.

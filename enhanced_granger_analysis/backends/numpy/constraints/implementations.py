@@ -5,7 +5,7 @@ from numpy.typing import NDArray
 
 from .base import BaseNumpyConstraint
 from .registry import register_constraint 
-from ....core.components.constraint_spec import PreparedConstraintData
+from ....core.components.constraints.prepared import PreparedConstraintData
 from ....core.exceptions import ConstraintConfigurationError
 
 

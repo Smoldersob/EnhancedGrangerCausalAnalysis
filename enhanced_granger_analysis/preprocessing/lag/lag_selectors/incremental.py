@@ -9,7 +9,7 @@ from typing import Literal
 import numpy as np
 import pandas as pd
 
-from ....core.lag_config import LagSpec
+from ....core.lags.specification import LagSpec
 from ..registry import register_lag_selector
 from .base import BaseLagSelector
 from .splitting import time_series_splits

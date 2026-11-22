@@ -7,8 +7,8 @@ from typing import Any
 import numpy as np
 from numpy.typing import NDArray
 
-from ....core.components.constraint_spec import PreparedConstraintData
-from ....core.components.constraint_serialization import (
+from ....core.components.constraints.prepared import PreparedConstraintData
+from ....core.components.constraints.serialization import (
     constraint_data_from_config,
     constraint_data_to_config,
     copy_constraint_data,

@@ -4,7 +4,7 @@ import warnings
 
 import numpy as np
 
-from ..core.initialization import (
+from ..core.initialization.context import (
     InitializationContext,
     WeightArray,
 )

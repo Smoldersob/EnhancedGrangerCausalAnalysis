@@ -73,9 +73,8 @@ def input_spec(api):
 
 @pytest.fixture
 def regularizer_data(input_spec):
-    from enhanced_granger_analysis.core.components.regularizer_spec import (
-        PreparedRegularizerData, RegularizationLayout,
-    )
+    from enhanced_granger_analysis.core.components.regularizers.prepared import PreparedRegularizerData
+    from enhanced_granger_analysis.core.components.regularizers.layout import RegularizationLayout
 
     return PreparedRegularizerData(
         layout=RegularizationLayout(
@@ -90,7 +89,7 @@ def regularizer_data(input_spec):
 
 @pytest.fixture
 def constraint_data(input_spec):
-    from enhanced_granger_analysis.core.components.constraint_spec import PreparedConstraintData
+    from enhanced_granger_analysis.core.components.constraints.prepared import PreparedConstraintData
 
     return PreparedConstraintData(
         output_names=input_spec.effects, n_features=input_spec.n_features,
@@ -337,7 +336,7 @@ class TestRegularizersAndConstraints:
     @pytest.mark.parametrize("selector", ["name", "mapping", "class", "normalized"])
     def test_project_regularizer(self, strategy, regularizer_data, selector):
         from enhanced_granger_analysis.backends.pytorch.regularizers import L1Regularizer
-        from enhanced_granger_analysis.core.components.regularizer_spec import RegularizerSpec
+        from enhanced_granger_analysis.core.components.regularizers.specification import RegularizerSpec
 
         spec = {
             "name": "l1", "mapping": {"type": "l1", "params": {"l1": 0.025}},

@@ -5,10 +5,10 @@ from typing import Any, Sequence
 import numpy as np
 
 from ..core.exceptions import DataValidationError, RegistryError
-from ..core.initialization import InitializationContext
+from ..core.initialization.context import InitializationContext
 from ..core.models.protocol import GrangerModelProtocol
 from ..initializers.registry import resolve_initializer_spec
-from ..preprocessing.prepare_data import PreparedData
+from ..preprocessing.artifacts import PreparedData
 
 
 class ModelInitializer:

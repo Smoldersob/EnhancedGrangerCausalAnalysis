@@ -9,7 +9,7 @@ from .model_search_spec import ModelSearchSpec
 from ..core.exceptions import DataValidationError
 
 from ..preprocessing.pipeline import DataPreparationConfig
-from ..preprocessing.prepare_data import VariableRoles
+from ..core.data.analysis_roles import VariableRoles
 
 from ..backends import BackendFactory
 

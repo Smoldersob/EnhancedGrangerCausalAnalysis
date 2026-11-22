@@ -9,7 +9,7 @@ from typing import Any
 import numpy as np
 import pandas as pd
 
-from ....core.lag_config import LagSpec
+from ....core.lags.specification import LagSpec
 from .base import BaseLagSelector
 from .incremental import (
     CandidateEvaluationError,

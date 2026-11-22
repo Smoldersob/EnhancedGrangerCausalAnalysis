@@ -6,11 +6,11 @@ from typing import Any
 
 import numpy as np
 
-from ....core.components.regularizer_serialization import (
+from ....core.components.regularizers.serialization import (
     deserialize_regularizer_data,
     serialize_regularizer_data,
 )
-from ....core.components.regularizer_spec import (
+from ....core.components.regularizers.prepared import (
     PreparedRegularizerData,
 )
 

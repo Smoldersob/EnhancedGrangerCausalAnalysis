@@ -10,7 +10,7 @@ from pathlib import Path
 from ..core.models.training_result import TrainingResult
 from ..api.builder import MultiTaskGrangerBuilder
 from ..core.exceptions import DataValidationError
-from ..preprocessing.prepare_data import PreparedData, VariableRoles
+from ..preprocessing.artifacts import PreparedData, VariableRoles
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 builder = importlib.import_module(
