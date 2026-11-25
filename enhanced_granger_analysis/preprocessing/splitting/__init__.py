@@ -12,6 +12,7 @@ from .registry import (
     register_data_splitter,
     resolve_data_splitter,
 )
+from .scope import FitScope, FitSegment
 # Importing the implementation module executes its registration decorators.
 from . import splitters as _splitters
 from .splitters import (
@@ -28,6 +29,8 @@ __all__ = [
     "PreparedDataSplitter",
     "SourceBlock",
     "SourceDataSplitter",
+    "FitScope",
+    "FitSegment",
     "available_data_splitters",
     "get_data_splitter_class",
     "register_data_splitter",

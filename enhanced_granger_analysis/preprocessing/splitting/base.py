@@ -20,179 +20,16 @@ from abc import ABC, abstractmethod
 from dataclasses import dataclass
 from typing import (
     ClassVar, 
-    Literal, 
     Mapping, 
     Sequence, 
 )
-from types import MappingProxyType
 
 import numpy as np
 import pandas as pd
 
+from ...core.data.split import TRAINING_PART, DataSplit, SplitStage
 from ...core.exceptions import DataValidationError
 from ...preprocessing.lag.artifacts import LaggedData
-
-SplitStage = Literal["source", "prepared"]
-
-#: Conventional part name used when fitting downstream components.
-TRAINING_PART = "training"
-
-
-@dataclass(frozen=True)
-class DataSplit:
-    """Assign prepared rows to named parts.
-
-    Empty validation and test parts are allowed.
-    Unassigned rows remain excluded from all parts.
-    """
-
-    stage: SplitStage
-    splitter_name: str | None
-    parts: Mapping[str, np.ndarray]
-
-    def __post_init__(self) -> None:
-        """Copy indices and add missing evaluation parts."""
-        parts = {}
-
-        for name, indices in self.parts.items():
-            if not isinstance(name, str) or not name.strip():
-                raise DataValidationError(
-                    "Split part names must be non-empty strings."
-                )
-
-            array = np.array(indices, copy=True)
-
-            if array.ndim != 1 or array.dtype.kind not in {"i", "u"}:
-                raise DataValidationError(
-                    f"Split part {name!r} must use a 1D integer array."
-                )
-
-            array.setflags(write=False)
-            parts[name] = array
-
-        for name in ("validation", "test"):
-            if name not in parts:
-                array = np.empty(0, dtype=np.intp)
-                array.setflags(write=False)
-                parts[name] = array
-
-        object.__setattr__(
-            self,
-            "parts",
-            MappingProxyType(parts),
-        )
-
-    @classmethod
-    def all_training(cls, n_rows: int) -> "DataSplit":
-        """Assign every prepared row to training."""
-        if (
-            isinstance(n_rows, (bool, np.bool_))
-            or not isinstance(n_rows, (int, np.integer))
-            or n_rows < 0
-        ):
-            raise DataValidationError(
-                "n_rows must be a non-negative integer."
-            )
-
-        return cls(
-            stage="prepared",
-            splitter_name=None,
-            parts={
-                TRAINING_PART: np.arange(n_rows, dtype=np.intp),
-            },
-        ).validate(n_rows)
-
-    @property
-    def part_names(self) -> tuple[str, ...]:
-        return tuple(self.parts)
-
-    def indices_for(
-        self,
-        part: str,
-        *,
-        require_nonempty: bool = False,
-    ) -> np.ndarray:
-        """Return positional indices for one part."""
-        if part not in self.parts:
-            raise DataValidationError(
-                f"Unknown split part {part!r}. "
-                f"Available parts: {self.part_names}."
-            )
-
-        indices = self.parts[part]
-
-        if require_nonempty and indices.size == 0:
-            raise DataValidationError(
-                f"Split part {part!r} is empty."
-            )
-
-        return indices
-
-    @property
-    def training_indices(self) -> np.ndarray | None:
-        """Return training indices, if the part exists."""
-        return self.parts.get(TRAINING_PART)
-
-    def validate(self, n_rows: int) -> "DataSplit":
-        """Validate bounds, ordering and disjointness."""
-        if (
-            isinstance(n_rows, (bool, np.bool_))
-            or not isinstance(n_rows, (int, np.integer))
-            or n_rows < 0
-        ):
-            raise DataValidationError(
-                "n_rows must be a non-negative integer."
-            )
-
-        if self.stage not in {"source", "prepared"}:
-            raise DataValidationError(
-                f"Unknown split stage: {self.stage!r}."
-            )
-
-        if TRAINING_PART not in self.parts:
-            raise DataValidationError(
-                "A data split must define the 'training' part."
-            )
-
-        collected = []
-
-        for name, array in self.parts.items():
-            if np.any(array < 0) or np.any(array >= n_rows):
-                raise DataValidationError(
-                    f"Split part {name!r} contains out-of-range indices."
-                )
-
-            if np.any(array[1:] <= array[:-1]):
-                raise DataValidationError(
-                    f"Split part {name!r} must be strictly increasing."
-                )
-
-            collected.append(array)
-
-        combined = np.concatenate(collected)
-
-        if np.unique(combined).size != combined.size:
-            raise DataValidationError(
-                "Split parts must not share prepared rows."
-            )
-
-        return self
-
-    def to_dict(self, *, n_rows: int) -> dict:
-        """Return a serializable snapshot of prepared-row assignments."""
-        self.validate(n_rows)
-
-        return {
-            "stage": self.stage,
-            "splitter": self.splitter_name,
-            "index_space": "prepared_rows",
-            "n_samples": int(n_rows),
-            "parts": {
-                name: indices.tolist()
-                for name, indices in self.parts.items()
-            },
-        }
-
 
 @dataclass(frozen=True)
 class SourceBlock:
@@ -325,6 +162,21 @@ class SourceDataSplitter(BaseDataSplitter):
             )
 
         return training_frames
+
+    @property
+    def fitting_blocks(self) -> tuple[SourceBlock, ...]:
+        """Contiguous source ranges authorized for fitting decisions."""
+        if self._blocks_by_dataset is None:
+            raise RuntimeError(
+                f"{type(self).__name__}.fit() must be called before "
+                "reading fitting_blocks."
+            )
+        return tuple(
+            block
+            for blocks in self._blocks_by_dataset
+            for block in blocks
+            if block.part == TRAINING_PART
+        )
 
     def split(self, lagged: LaggedData) -> DataSplit:
         """Map prepared rows to parts through recorded row correspondence."""

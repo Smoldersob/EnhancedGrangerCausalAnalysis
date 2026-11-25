@@ -16,6 +16,7 @@ def prepare_regularization_layout(
     output_names: Sequence[str],
     feature_lags: Any,
     base_mask: Any = None,
+    components: tuple[str | None, ...] = (),
 ) -> RegularizationLayout:
     output_names = tuple(output_names)
     feature_lags = np.asarray(feature_lags)
@@ -34,6 +35,7 @@ def prepare_regularization_layout(
         output_names=output_names,
         feature_lags=feature_lags,
         base_mask=base_mask,
+        components=components,
     )
 
 

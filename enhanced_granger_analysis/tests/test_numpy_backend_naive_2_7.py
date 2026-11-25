@@ -467,7 +467,10 @@ class TestExtraConstructionBoundaries:
             strategy.build_model(model_class, components={"regularizer": regularizer}, config={"input_spec": mismatched})
 
     def test_regularizer_cause_blocks_must_match_input_spec(self, strategy, model_class, input_spec, regularizer_data):
-        mismatched = replace(input_spec, cause_slices={"x": slice(0, 1), "z": slice(1, 4)})
+        mismatched = replace(
+            input_spec, cause_slices={"x": slice(0, 1), "z": slice(1, 4)},
+            feature_lags=(1, 1, 2, 3),
+        )
         regularizer = strategy.build_regularizer("l1", data=regularizer_data)
         with pytest.raises(ValueError, match="Regularizer layout does not match input_spec"):
             strategy.build_model(model_class, components={"regularizer": regularizer}, config={"input_spec": mismatched})

@@ -27,8 +27,32 @@ def test_prepare_data_skips_stationarity_when_selection_is_none() -> None:
         stationarity=None,
     )
 
-    assert prepared.stationarity_enforcer is None
     assert prepared.X_raw.shape[0] == prepared.y_raw.shape[0]
+    assert prepared.segments[0].retained_index.equals(_dataframe().index[12:])
+
+
+def test_prepare_data_tracks_original_size_and_labels_after_trimming_and_sampling():
+    from ..core.data import PreparedData
+    from ..preprocessing.stationarity.base import BaseStationarityEnforcer
+
+    class TrimLeading(BaseStationarityEnforcer):
+        def fit(self, frames):
+            return self
+
+        def transform(self, frames):
+            return [frame.iloc[2:] for frame in frames]
+
+    frame = _dataframe().set_axis(pd.Index([f"t{i}" for i in range(20)]))
+    prepared = prepare_data(
+        frame, effects=["y"], stationarity=TrimLeading,
+        backend_max_samples=2, sampling_strategy=StridedSampling(),
+    )
+    assert isinstance(prepared, PreparedData)
+    segment, = prepared.segments
+    assert segment.original_row_count == 20
+    assert segment.dropped_leading_rows == 12
+    assert segment.retained_index[prepared.sample_indices].tolist() == ["t14", "t19"]
+    assert prepared.indices_for("training").tolist() == [0, 1]
 
 
 def test_prepare_data_maps_cause_names_to_lagged_feature_blocks() -> None:
@@ -229,7 +253,6 @@ def test_union_schema_supports_preparation_with_explicit_imputation() -> None:
 
     assert prepared.causes == ("x", "y", "target")
     assert prepared.effects == ("x", "y", "target")
-    assert prepared.stationarity_enforcer is None
 
     assert prepared.X_raw.shape[0] > 0
     assert prepared.X_raw.shape[0] == prepared.y_raw.shape[0]

@@ -3,12 +3,14 @@
 from __future__ import annotations
 
 from collections.abc import Callable, Sequence, Mapping
+from inspect import Parameter, signature
 from typing import Any, Protocol, TypeVar
 
 import pandas as pd
 
 from ...core.registry import Registry
 from ...core.lags.specification import LagSpec
+from .space import LagSelectionSpace
 
 class LagSelector(Protocol):
     """Minimal interface required by lag-selector resolution."""
@@ -18,9 +20,79 @@ class LagSelector(Protocol):
         data: pd.DataFrame,
         *,
         outputs: Sequence[str] | None = None,
+        space: LagSelectionSpace | None = None,
     ) -> LagSpec:
         """Select lags from one dataset."""
         ...
+
+
+class UnsupportedLagSelectionSpaceError(ValueError):
+    """Raised before fitting when a selector cannot enforce a resolved space."""
+
+
+_SPACE_CAPABILITIES = frozenset(
+    {"allowed_lags", "required_lags", "fixed_lags"}
+)
+
+
+def validate_selector_space_capability(
+    selector: LagSelector,
+    space: LagSelectionSpace,
+) -> None:
+    """Check declared support before invoking a potentially costly fit.
+
+    Plan-aware selectors declare a ``selection_space_capabilities`` iterable.
+    They must also accept the canonical ``space`` keyword in ``fit``. A
+    missing declaration is deliberately not treated as unrestricted support.
+    """
+    fit = getattr(selector, "fit", None)
+    if not callable(fit):
+        raise TypeError("selector must provide a callable fit method.")
+    try:
+        parameters = signature(fit).parameters
+    except (TypeError, ValueError):
+        parameters = {}
+    accepts_space = (
+        "space" in parameters
+        or any(
+            parameter.kind is Parameter.VAR_KEYWORD
+            for parameter in parameters.values()
+        )
+    )
+
+    declared = getattr(selector, "selection_space_capabilities", None)
+    if isinstance(declared, str):
+        capabilities = {declared}
+    else:
+        try:
+            capabilities = set(declared)
+        except TypeError:
+            capabilities = set()
+    unknown = capabilities.difference(_SPACE_CAPABILITIES)
+    missing: set[str] = set()
+    if not accepts_space:
+        missing.add("space fit argument")
+    if "allowed_lags" not in capabilities:
+        missing.add("allowed_lags")
+    if any(
+        space.required_lags[output][predictor]
+        for output in space.outputs
+        for predictor in space.predictors
+    ) and "required_lags" not in capabilities:
+        missing.add("required_lags")
+    if any(space.fixed_lags[output] for output in space.outputs) and "fixed_lags" not in capabilities:
+        missing.add("fixed_lags")
+    if unknown:
+        raise UnsupportedLagSelectionSpaceError(
+            f"Selector {type(selector).__name__} declares unknown "
+            f"selection-space capabilities: {sorted(unknown)!r}."
+        )
+    if missing:
+        raise UnsupportedLagSelectionSpaceError(
+            f"Selector {type(selector).__name__} cannot honor the supplied "
+            "LagSelectionSpace; missing support for "
+            f"{sorted(missing)!r}. No unrestricted fallback is performed."
+        )
 
 
 LagSelectorClass = TypeVar(

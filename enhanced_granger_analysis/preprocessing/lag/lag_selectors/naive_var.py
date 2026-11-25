@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import warnings
 from collections.abc import Sequence
+from typing import TYPE_CHECKING
 
 import numpy as np
 import pandas as pd
@@ -17,6 +18,13 @@ from .order_utils import (
     validate_order_selector_input,
 )
 from ..registry import register_lag_selector
+from ._space import (
+    LagSelectionCapabilityError,
+    resolve_lag_space,
+)
+
+if TYPE_CHECKING:
+    from ..space import LagSelectionSpace
 
 
 @register_lag_selector(
@@ -89,11 +97,38 @@ class NaiveVARLagSelector(BaseLagSelector):
         data: pd.DataFrame,
         *,
         outputs: Sequence[str] | None = None,
+        space: LagSelectionSpace | None = None,
     ) -> LagSpec:
         names, targets, values = validate_order_selector_input(
             data,
             outputs,
         )
+
+        resolved = resolve_lag_space(space, outputs, names)
+        if resolved is not None:
+            effective_max = 10 if self.max_lag is None else self.max_lag
+            expected = tuple(range(1, effective_max + 1))
+            supported = (
+                resolved.outputs == names
+                and resolved.predictors == names
+                and not self.use_lag_zero
+                and all(
+                    resolved.optional[output][predictor] == expected
+                    and not resolved.required[output][predictor]
+                    and not resolved.fixed[output][predictor]
+                    for output in names
+                    for predictor in names
+                )
+            )
+            if not supported:
+                raise LagSelectionCapabilityError(
+                    "NaiveVARLagSelector only supports an unconstrained "
+                    "full VAR plan: all data columns must be both outputs "
+                    "and predictors, every pair must allow exactly lags "
+                    "1..max_lag, with no required/fixed lags and "
+                    "use_lag_zero=False. Use an incremental or common-order "
+                    "selector for asymmetric or sparse plans."
+                )
 
         for name in (
             "selected_order_",

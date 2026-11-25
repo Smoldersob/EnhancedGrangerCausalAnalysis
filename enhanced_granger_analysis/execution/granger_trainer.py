@@ -10,7 +10,7 @@ from ..core.models.protocol import GrangerModelProtocol
 from ..core.models.training_result import TrainingResult
 from ..modeling.artifacts import FitOutcome
 from ..modeling.executor import FitExecutor
-from ..preprocessing.artifacts import PreparedData
+from ..core.data.prepared import PreparedData
 
 
 class GrangerTrainer:

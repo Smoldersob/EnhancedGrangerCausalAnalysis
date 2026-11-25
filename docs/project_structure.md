@@ -67,17 +67,29 @@ enhanced_granger_analysis/
 - `core/initialization/context.py`: `InitializationContext`.
 - `core/initialization/protocol.py`: initializer protocol.
 - `core/components/`: constraints, regularizers, and callback registries/contracts.
-- `core/lags/specification.py`: lag declarations.
+- `core/lags/specification.py`: complete selected-lag specs and partial structural lag constraints.
 - `core/data/variables.py`: value types and process roles.
 - `core/data/analysis_roles.py`: causes, effects, and tested causes.
 - `core/data/provenance.py`: removed-variable and source correspondence metadata.
-- `core/data/feature_layout.py`: shared feature-block layout.
+- `core/data/feature_layout.py`: shared feature-block layout and feature identity.
+- `core/data/prepared.py`: `PreparedData` and target-scale inverse contract.
+- `core/data/relations.py`: signal relations, evidence and decisions.
+- `core/data/split.py`: final-row `DataSplit` contract.
 - `preprocessing/scaling/protocol.py`: scaler protocol.
 - `configuration/training_spec.py`: training configuration.
 - `api/outputs.py`: API-owned `SimpleGrangerOutput`.
 - `preprocessing/pipeline.py`: `DataPreparer`.
 - `preprocessing/configuration/preparation.py`: `DataPreparationConfig`.
-- `preprocessing/artifacts.py`: `PreparedData`.
+- `preprocessing/configuration/plan.py` and `preprocessing/planning.py`:
+  schema-bound, value-independent preparation plans.
+- `preprocessing/fitting.py` and `preprocessing/fitted.py`: fit coordination,
+  explicit `FitScope`, fitted components, and transform-only execution.
+- `preprocessing/diagnostics.py` and `preprocessing/policies/`: observations
+  separated from representation and process-policy decisions.
+- `preprocessing/lag/space.py`: resolved lag-search constraints supplied to
+  selectors and lag construction.
+- `preprocessing/artifacts.py`: private mutable fit workspace, distinct from
+  the final immutable `PreparedData`.
 - `preprocessing/prepare_data.py`: functional preparation entry point.
 
 Do not introduce parallel versions of these contracts in the new packages.

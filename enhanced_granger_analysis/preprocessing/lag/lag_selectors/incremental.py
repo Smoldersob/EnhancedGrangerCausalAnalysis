@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from abc import abstractmethod
 from collections.abc import Iterable, Sequence
-from typing import Literal
+from typing import TYPE_CHECKING, Literal
 
 import numpy as np
 import pandas as pd
@@ -13,12 +13,19 @@ from ....core.lags.specification import LagSpec
 from ..registry import register_lag_selector
 from .base import BaseLagSelector
 from .splitting import time_series_splits
-from .base import BaseLagSelector
 from .utils import (
-    _augment_intercept, 
-    _nonnegative_finite, 
+    _augment_intercept,
+    _nonnegative_finite,
     _integer,
 )
+from ._space import (
+    ResolvedLagSpace,
+    resolve_lag_space,
+    validate_method_lags,
+)
+
+if TYPE_CHECKING:
+    from ..space import LagSelectionSpace
 
 Reference = Literal["initial", "current"]
 
@@ -124,14 +131,39 @@ class BaseIncrementalLagSelector(BaseLagSelector):
         data: pd.DataFrame,
         *,
         outputs: Sequence[str] | None = None,
+        space: LagSelectionSpace | None = None,
     ) -> LagSpec:
+        """Select explicit lag sets, optionally constrained by ``space``."""
         names, targets, values = self._validate_input(
             data, outputs
         )
 
-        if len(values) <= self.max_lag:
+        resolved = resolve_lag_space(space, outputs, names)
+        if resolved is not None:
+            validate_method_lags(
+                resolved,
+                use_lag_zero=self.use_lag_zero,
+                max_lag=self.max_lag,
+            )
+
+        mandatory_max = (
+            max(
+                (
+                    lag
+                    for output in resolved.outputs
+                    for predictor in resolved.predictors
+                    for lag in resolved.mandatory(output, predictor)
+                ),
+                default=0,
+            )
+            if resolved is not None
+            else 0
+        )
+        selection_horizon = max(self.max_lag, mandatory_max)
+        if len(values) <= selection_horizon:
             raise ValueError(
-                "The dataset must contain more rows than max_lag."
+                "The dataset must contain more rows than the largest "
+                "selection lag."
             )
 
         # Clear the previous fitted result before starting a new run.
@@ -150,13 +182,14 @@ class BaseIncrementalLagSelector(BaseLagSelector):
             "failed_candidates": [],
         }
 
-        start = self.max_lag
+        start = selection_horizon
         response = values[start:]
         name_to_index = {
             name: index for index, name in enumerate(names)
         }
 
         first_lag = 0 if self.use_lag_zero else 1
+        predictors = names if resolved is None else resolved.predictors
 
         columns = {
             (name, lag): values[
@@ -164,7 +197,8 @@ class BaseIncrementalLagSelector(BaseLagSelector):
                 index,
             ]
             for index, name in enumerate(names)
-            for lag in range(first_lag, self.max_lag + 1)
+            if name in predictors
+            for lag in range(first_lag, selection_horizon + 1)
         }
 
         result: LagSpec = {}
@@ -172,12 +206,21 @@ class BaseIncrementalLagSelector(BaseLagSelector):
         for target in targets:
             y = response[:, name_to_index[target]]
 
-            selected = self._initial_selection(
-                y=y,
-                target=target,
-                predictors=names,
-                columns=columns,
-            )
+            if resolved is None:
+                selected = self._initial_selection(
+                    y=y,
+                    target=target,
+                    predictors=predictors,
+                    columns=columns,
+                )
+                protected = {}
+            else:
+                selected, protected = self._initial_selection_in_space(
+                    y=y,
+                    target=target,
+                    space=resolved,
+                    columns=columns,
+                )
 
             if self.prune_lags:
                 selected = self._prune(
@@ -185,6 +228,7 @@ class BaseIncrementalLagSelector(BaseLagSelector):
                     target=target,
                     selected=selected,
                     columns=columns,
+                    protected_lags=protected,
                 )
             else:
                 score = self._evaluate(
@@ -210,6 +254,112 @@ class BaseIncrementalLagSelector(BaseLagSelector):
         self.lag_spec_ = result
 
         return result
+
+    def _initial_selection_in_space(
+        self,
+        *,
+        y: np.ndarray,
+        target: str,
+        space: ResolvedLagSpace,
+        columns: dict[tuple[str, int], np.ndarray],
+    ) -> tuple[
+        dict[str, tuple[int, ...]],
+        dict[str, tuple[int, ...]],
+    ]:
+        predictors = space.predictors
+        protected = {
+            predictor: space.mandatory(target, predictor)
+            for predictor in predictors
+        }
+        baseline = {
+            predictor: protected[predictor]
+            for predictor in predictors
+        }
+        own_optional = (
+            space.optional[target][target]
+            if target in predictors
+            else ()
+        )
+
+        if target in predictors:
+            own_mandatory = protected[target]
+            missing_minimum = max(
+                0,
+                self.min_ar_order - len(own_mandatory),
+            )
+            if missing_minimum > len(own_optional):
+                raise ValueError(
+                    f"Output {target!r} has fewer admissible own-history "
+                    "lags than min_ar_order requires."
+                )
+            own_prefix = own_optional[:missing_minimum]
+            baseline[target] = tuple(sorted(
+                set(own_mandatory + own_prefix)
+            ))
+            own_candidates = (
+                tuple(sorted(set(own_mandatory + own_optional[:count])))
+                for count in range(missing_minimum + 1, len(own_optional) + 1)
+            )
+            ar_selected = self._expand_predictor(
+                y=y,
+                target=target,
+                predictor=target,
+                baseline=baseline,
+                candidates=own_candidates,
+                columns=columns,
+                mandatory=own_mandatory,
+            )
+        else:
+            # The finite plan, not the selector default, decides whether
+            # own history is eligible.
+            ar_selected = self._evaluate_baseline(
+                y=y,
+                target=target,
+                baseline=baseline,
+                columns=columns,
+            )
+
+        selected = ar_selected.copy()
+        for predictor in predictors:
+            if predictor == target:
+                continue
+            optional = space.optional[target][predictor]
+            candidates = (
+                tuple(sorted(set(
+                    protected[predictor] + optional[:count]
+                )))
+                for count in range(1, len(optional) + 1)
+            )
+            expanded = self._expand_predictor(
+                y=y,
+                target=target,
+                predictor=predictor,
+                baseline=ar_selected,
+                candidates=candidates,
+                columns=columns,
+                mandatory=protected[predictor],
+            )
+            selected[predictor] = expanded[predictor]
+
+        return selected, protected
+
+    def _evaluate_baseline(
+        self,
+        *,
+        y: np.ndarray,
+        target: str,
+        baseline: dict[str, tuple[int, ...]],
+        columns: dict[tuple[str, int], np.ndarray],
+    ) -> dict[str, tuple[int, ...]]:
+        score = self._evaluate(
+            y, baseline, columns, target=target, stage="addition_baseline"
+        )
+        if score is None:
+            raise ValueError(
+                f"The mandatory baseline for output {target!r} cannot "
+                "be scored. See diagnostics_."
+            )
+        return baseline.copy()
 
     def _initial_selection(
         self,
@@ -275,6 +425,7 @@ class BaseIncrementalLagSelector(BaseLagSelector):
         baseline: dict[str, tuple[int, ...]],
         candidates: Iterable[tuple[int, ...]],
         columns: dict[tuple[str, int], np.ndarray],
+        mandatory: tuple[int, ...] = (),
     ) -> dict[str, tuple[int, ...]]:
         best = baseline.copy()
 
@@ -289,7 +440,7 @@ class BaseIncrementalLagSelector(BaseLagSelector):
 
         for lags in candidates:
             candidate = baseline.copy()
-            candidate[predictor] = lags
+            candidate[predictor] = tuple(sorted(set(mandatory + lags)))
 
             score = self._evaluate(
                 y,
@@ -341,8 +492,10 @@ class BaseIncrementalLagSelector(BaseLagSelector):
         target: str,
         selected: dict[str, tuple[int, ...]],
         columns: dict[tuple[str, int], np.ndarray],
+        protected_lags: dict[str, tuple[int, ...]] | None = None,
     ) -> dict[str, tuple[int, ...]]:
         current = selected.copy()
+        protected_lags = protected_lags or {}
 
         current_score = self._evaluate(
             y,
@@ -371,6 +524,8 @@ class BaseIncrementalLagSelector(BaseLagSelector):
                 )
 
                 if len(lags) <= minimum_count:
+                    continue
+                if lags[-1] in protected_lags.get(predictor, ()):
                     continue
 
                 candidate = current.copy()

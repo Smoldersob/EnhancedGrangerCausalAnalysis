@@ -3,6 +3,7 @@ from dataclasses import dataclass
 import numpy as np
 from numpy.typing import NDArray
 
+from ...data.feature_layout import binary_mask
 from ...exceptions import ConstraintConfigurationError
 
 
@@ -24,13 +25,11 @@ class PreparedConstraintData:
 
     def __post_init__(self) -> None:
         output_names = tuple(self.output_names)
-        mask = np.array(self.mask, dtype=bool, copy=True)
         expected = (len(output_names), self.n_features)
-        if mask.shape != expected:
-            raise ConstraintConfigurationError(
-                f"mask shape {mask.shape} does not match {expected}"
-            )
-        mask.setflags(write=False)
+        try:
+            mask = binary_mask(self.mask, expected)
+        except (TypeError, ValueError) as exc:
+            raise ConstraintConfigurationError(str(exc)) from exc
         object.__setattr__(self, "output_names", output_names)
         object.__setattr__(self, "mask", mask)
         object.__setattr__(self, "rules", tuple(self.rules))

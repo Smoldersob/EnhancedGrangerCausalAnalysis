@@ -1,15 +1,12 @@
 import pandas as pd
 from typing import Any, Mapping, Optional, Sequence
 
-from .lag.lag_engine import LagEngine
-from .splitting.base import DataSplit
-from .stationarity import BaseStationarityEnforcer
 from .missing import BaseImputer
 from .sampling import NoSampling, SamplingStrategy
 
-from ..core.exceptions import DataValidationError
 from ..core.data.analysis_roles import VariableRoles
-from .artifacts import PreparedData
+from ..core.data.prepared import PreparedData
+from ..core.data.variables import ValueType, VariableDescription
 
 
 def prepare_data(
@@ -31,6 +28,8 @@ def prepare_data(
 		x_scaler: Optional[Any] = "standard",
 		y_scaler: Optional[Any] = "standard",
 		splitter: Any = None,
+		variable_descriptions: Optional[Mapping[str, VariableDescription]] = None,
+		default_value_type: ValueType = ValueType.CONTINUOUS,
 ) -> PreparedData:
 	from .pipeline import DataPreparer, DataPreparationConfig
 
@@ -56,11 +55,25 @@ def prepare_data(
 		missing_value_imputer=missing_value_imputer,
 		sampling_strategy=sampling_strategy,
 		splitter=splitter,
+		variable_descriptions=(
+			{} if variable_descriptions is None else dict(variable_descriptions)
+		),
+		default_value_type=default_value_type,
 	)
 	preparer = DataPreparer(config=config)
-	roles = VariableRoles(
-		causes=tuple(causes) if causes is not None else (),
-		tested_causes=tuple(tested_causes) if tested_causes is not None else (),
-		effects=tuple(effects) if effects is not None else (),
-	)
+	roles = None
+	if causes is not None or tested_causes is not None or effects is not None:
+		from .configuration.plan import SourceSchema
+
+		schema = SourceSchema.from_frames(data, policy=config.schema_policy)
+		cause_names = tuple(causes) if causes is not None else schema.columns
+		effect_names = tuple(effects) if effects is not None else schema.columns
+		tested_names = (
+			tuple(tested_causes) if tested_causes is not None else cause_names
+		)
+		roles = VariableRoles(
+			causes=cause_names,
+			tested_causes=tested_names,
+			effects=effect_names,
+		)
 	return preparer.fit(data, roles=roles).prepared_data_

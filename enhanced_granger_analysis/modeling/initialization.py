@@ -8,7 +8,7 @@ from ..core.exceptions import DataValidationError, RegistryError
 from ..core.initialization.context import InitializationContext
 from ..core.models.protocol import GrangerModelProtocol
 from ..initializers.registry import resolve_initializer_spec
-from ..preprocessing.artifacts import PreparedData
+from ..core.data.prepared import PreparedData
 
 
 class ModelInitializer:

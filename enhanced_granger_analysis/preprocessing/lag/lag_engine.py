@@ -8,14 +8,14 @@ import pandas as pd
 from collections.abc import Mapping, Sequence
 from copy import deepcopy
 from numbers import Integral
-from collections.abc import Sequence
 from joblib import Parallel, delayed
 
 from ...core.data.provenance import LagSegmentInfo
 from ...core.lags.specification import LagFeature, LagSpec
 from ..configuration.lag import LagEngineConfig
 from .artifacts import LagFittedConfig, LaggedData, LagPreparationResult
-from .registry import LagSelector
+from .registry import LagSelector, validate_selector_space_capability
+from .space import LagSelectionSpace
 
 
 def _select_one_dataset(
@@ -23,6 +23,7 @@ def _select_one_dataset(
     data: pd.DataFrame,
     outputs: tuple[str, ...],
     dataset_index: int,
+    selection_space: LagSelectionSpace | None = None,
 ) -> LagSpec:
     """Run selection using an independent selector instance."""
     try:
@@ -34,7 +35,13 @@ def _select_one_dataset(
         ) from exc
 
     try:
-        return local_selector.fit(data, outputs=outputs)
+        if selection_space is None:
+            return local_selector.fit(data, outputs=outputs)
+        return local_selector.fit(
+            data,
+            outputs=outputs,
+            space=selection_space,
+        )
     except Exception as exc:
         raise RuntimeError(
             f"Lag selection failed for dataset {dataset_index}. Exception: {exc}"
@@ -88,6 +95,7 @@ class LagEngine:
         *,
         outputs: Sequence[str],
         predictors: Sequence[str] | None = None,
+        selection_space: LagSelectionSpace | None = None,
     ) -> LagFittedConfig:
         """
         Select, merge, override, and validate the final lag layout.
@@ -118,6 +126,23 @@ class LagEngine:
             )
         )
 
+        selector_space: LagSelectionSpace | None = None
+        if selection_space is not None:
+            if not isinstance(selection_space, LagSelectionSpace):
+                raise TypeError(
+                    "selection_space must be a resolved LagSelectionSpace."
+                )
+            if (
+                selection_space.outputs != output_names
+                or selection_space.predictors != predictor_names
+            ):
+                raise ValueError(
+                    "selection_space axes must exactly match the requested "
+                    "outputs and predictors, in order."
+                )
+            self._validate_space_config(selection_space)
+            selector_space = selection_space.for_predictors(selection_names)
+
         predictor_overrides, pair_overrides = (
             self._validate_overrides(
                 output_names,
@@ -125,19 +150,26 @@ class LagEngine:
             )
         )
 
+        if selection_space is not None and self.selector is not None:
+            validate_selector_space_capability(self.selector, selector_space)
+
         if self.selector is None:
             selection_results: tuple[LagSpec, ...] = ()
 
-            aggregated = self._build_fixed_baseline(
-                output_names,
-                predictor_names,
-            )
+            if selection_space is None:
+                aggregated = self._build_fixed_baseline(
+                    output_names,
+                    predictor_names,
+                )
+            else:
+                aggregated = self._build_space_baseline(selection_space)
         else:
             selection_results = self._select_per_dataset(
                 frames,
                 output_names,
                 predictor_names,
                 selection_names,
+                selector_space,
             )
 
             aggregated = self._aggregate_selections(
@@ -146,11 +178,32 @@ class LagEngine:
                 predictor_names,
             )
 
+        if selection_space is not None:
+            selection_space.validate_selection(
+                aggregated,
+                context="Aggregated lag specification",
+            )
+            for predictor, lags in predictor_overrides.items():
+                if any(
+                    output == predictor and 0 in lags
+                    for output in output_names
+                ):
+                    raise ValueError(
+                        "A predictor-wide override cannot request own-variable "
+                        f"lag 0 for {predictor!r}."
+                    )
+
         final_lags = self._apply_overrides(
             aggregated,
             predictor_overrides,
             pair_overrides,
         )
+
+        if selection_space is not None:
+            selection_space.validate_selection(
+                final_lags,
+                context="Final lag specification after overrides",
+            )
 
         final_lags = self._validate_lag_spec(
             final_lags,
@@ -213,6 +266,16 @@ class LagEngine:
             final_lags=final_lags,
             aggregated_lags=deepcopy(aggregated),
             selection_results=selection_results,
+            selection_space=selection_space,
+            overridden_pairs=tuple(
+                (output, predictor)
+                for output in output_names
+                for predictor in predictor_names
+                if (
+                    predictor in predictor_overrides
+                    or predictor in pair_overrides.get(output, {})
+                )
+            ),
         )
 
         self.fitted_config_ = fitted
@@ -298,6 +361,7 @@ class LagEngine:
         *,
         outputs: Sequence[str],
         predictors: Sequence[str] | None = None,
+        selection_space: LagSelectionSpace | None = None,
     ) -> LagPreparationResult:
         """Fit and transform in one call; compatibility for the legacy API.
 
@@ -308,6 +372,7 @@ class LagEngine:
             datasets,
             outputs=outputs,
             predictors=predictors,
+            selection_space=selection_space,
         )
 
         lagged = self.transform(datasets)
@@ -326,6 +391,8 @@ class LagEngine:
             aggregated_lags=fitted.aggregated_lags,
             selection_results=fitted.selection_results,
             segments=lagged.segments,
+            selection_space=fitted.selection_space,
+            overridden_pairs=fitted.overridden_pairs,
         )
 
     @staticmethod
@@ -442,6 +509,22 @@ class LagEngine:
 
         if not isinstance(cfg.pair_overrides, Mapping):
             raise TypeError("pair_overrides must be a mapping.")
+
+    def _validate_space_config(self, space: LagSelectionSpace) -> None:
+        """Ensure the resolved finite space fits engine lag settings."""
+        for output in space.outputs:
+            for predictor in space.predictors:
+                lags = space.allowed_lags[output][predictor]
+                if any(lag > self.config.max_lag for lag in lags):
+                    raise ValueError(
+                        f"selection_space contains a lag above config.max_lag "
+                        f"for {output!r} <- {predictor!r}."
+                    )
+                if not self.config.use_lag_zero and 0 in lags:
+                    raise ValueError(
+                        "selection_space contains lag 0 while "
+                        "config.use_lag_zero is False."
+                    )
 
     @staticmethod
     def _validate_names(
@@ -753,12 +836,27 @@ class LagEngine:
             for output in outputs
         }
 
+    @staticmethod
+    def _build_space_baseline(space: LagSelectionSpace) -> LagSpec:
+        """Select all allowed candidates, except exact fixed relations."""
+        return {
+            output: {
+                predictor: space.fixed_lags[output].get(
+                    predictor,
+                    space.allowed_lags[output][predictor],
+                )
+                for predictor in space.predictors
+            }
+            for output in space.outputs
+        }
+
     def _select_per_dataset(
         self,
         frames: tuple[pd.DataFrame, ...],
         outputs: tuple[str, ...],
         predictors: tuple[str, ...],
         selection_names: tuple[str, ...],
+        selection_space: LagSelectionSpace | None,
     ) -> tuple[LagSpec, ...]:
         assert self.selector is not None
 
@@ -768,6 +866,7 @@ class LagEngine:
                 frame.loc[:, list(selection_names)].copy(),
                 outputs,
                 dataset_index,
+                selection_space,
             )
             for dataset_index, frame in enumerate(frames)
         )
@@ -781,6 +880,12 @@ class LagEngine:
                 selection_names,
                 context=f"Selector result for dataset {index}",
             )
+
+            if selection_space is not None:
+                selection_space.validate_selection(
+                    validated,
+                    context=f"Selector result for dataset {index}",
+                )
 
             # Selector output includes target-only columns, but these
             # are not necessarily eligible final predictors.

@@ -26,7 +26,7 @@ from ..hiperopt.objectives.base import (
 from ..hiperopt.results import TrialError, TrialResult
 from ..hiperopt.space.base import SearchCandidate
 
-from ..preprocessing.artifacts import PreparedData
+from ..core.data.prepared import PreparedData
 
 from .assembler import ModelAssembler
 from .executor import FitExecutor
@@ -224,16 +224,8 @@ class ModelCandidateEvaluator:
                 )
 
             if objective_scale == "prepared_raw":
-                if prepared.y_scaler is None:
-                    raise DataValidationError(
-                        "prepared_raw scoring requires a fitted "
-                        "y_scaler or an identity scaler."
-                    )
-
                 predictions = np.asarray(
-                    prepared.y_scaler.inverse_transform(
-                        predictions.copy()
-                    ),
+                    prepared.inverse_transform_targets(predictions),
                     dtype=float,
                 )
                 targets = prepared.y_raw[validation]
@@ -540,17 +532,6 @@ class ModelCandidateEvaluator:
         )
 
         if objective_scale == "prepared_raw":
-            if (
-                prepared.y_scaler is None
-                or not callable(
-                    getattr(prepared.y_scaler, "inverse_transform", None)
-                )
-            ):
-                raise DataValidationError(
-                    "prepared_raw scoring requires a fitted y_scaler "
-                    "providing inverse_transform()."
-                )
-
             if not np.isfinite(prepared.y_raw[validation]).all():
                 raise DataValidationError(
                     "Raw validation targets must be finite."

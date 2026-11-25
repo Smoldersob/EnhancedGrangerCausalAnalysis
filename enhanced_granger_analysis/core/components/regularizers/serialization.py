@@ -104,17 +104,21 @@ def serialize_regularizer_data(
 
     layout = data.layout
 
-    return {
-        "schema_version": 1,
-        "layout": {
-            "cause_slices": {
-                name: [block.start, block.stop]
-                for name, block in layout.cause_slices.items()
-            },
-            "output_names": list(layout.output_names),
-            "feature_lags": layout.feature_lags.tolist(),
-            "base_mask": layout.base_mask.tolist(),
+    coordinates = {
+        "cause_slices": {
+            name: [block.start, block.stop]
+            for name, block in layout.cause_slices.items()
         },
+        "output_names": list(layout.output_names),
+        "feature_lags": layout.feature_lags.tolist(),
+        "base_mask": layout.base_mask.tolist(),
+    }
+    has_components = any(component is not None for component in layout.components)
+    if has_components:
+        coordinates["components"] = list(layout.components)
+    return {
+        "schema_version": 2 if has_components else 1,
+        "layout": coordinates,
         "params": _to_json_value(data.params),
     }
 
@@ -134,7 +138,7 @@ def deserialize_regularizer_data(
 
     version = payload["schema_version"]
 
-    if type(version) is not int or version != 1:
+    if type(version) is not int or version not in (1, 2):
         raise ValueError("Unsupported regularizer data schema version.")
 
     raw_layout = payload["layout"]
@@ -148,6 +152,8 @@ def deserialize_regularizer_data(
         "feature_lags",
         "base_mask",
     }
+    if version == 2:
+        expected_layout_keys.add("components")
 
     if set(raw_layout) != expected_layout_keys:
         raise ValueError(
@@ -169,11 +175,18 @@ def deserialize_regularizer_data(
 
         cause_slices[name] = slice(bounds[0], bounds[1])
 
+    components = raw_layout.get("components", ())
+    if version == 2 and (
+        not isinstance(components, (list, tuple)) or not components
+        or not any(component is not None for component in components)
+    ):
+        raise ValueError("Schema version 2 requires explicit representation components.")
     layout = RegularizationLayout(
         cause_slices=cause_slices,
         output_names=raw_layout["output_names"],
         feature_lags=raw_layout["feature_lags"],
         base_mask=raw_layout["base_mask"],
+        components=components,
     )
 
     data = PreparedRegularizerData(

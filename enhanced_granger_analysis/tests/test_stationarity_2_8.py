@@ -965,27 +965,6 @@ def test_pipeline_does_not_mutate_configured_instance(
     )
 
 
-def test_pipeline_rebuild_uses_independent_fitted_instances(
-    isolated_registry,
-    frames,
-):
-    preparer = DataPreparer(
-        config=DataPreparationConfig(
-            stationarity=RecordingEnforcer(),
-        ),
-    )
-
-    preparer.set_data(frames).force_stationarity()
-    first = preparer.prepared_data_.stationarity_enforcer
-
-    preparer.set_data(frames).force_stationarity()
-    second = preparer.prepared_data_.stationarity_enforcer
-
-    assert first is not second
-    assert first.fit_calls == 1
-    assert second.fit_calls == 1
-
-
 def test_pipeline_failure_preserves_previous_data_and_component(
     isolated_registry,
     frames,

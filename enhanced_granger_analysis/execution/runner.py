@@ -26,7 +26,7 @@ from ..modeling.initialization import ModelInitializer
 
 from ..preprocessing.pipeline import DataPreparer
 from ..preprocessing.search_preparation import resolve_search_preparation
-from ..preprocessing.artifacts import PreparedData
+from ..core.data.prepared import PreparedData
 
 from ..results.granger_results import (
     GrangerAnalysisResults,
@@ -378,7 +378,7 @@ class AnalysisRunner:
 		else:
 			causes = (cause,)
 
-		predictions = prepared.y_scaler.inverse_transform(
+		predictions = prepared.inverse_transform_targets(
 			outcome.predictions
 		)
 

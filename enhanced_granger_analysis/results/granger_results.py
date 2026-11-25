@@ -6,16 +6,17 @@ causality matrices computed from restricted and unrestricted model fits.
 
 from __future__ import annotations
 
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING, Any, Iterable, Literal, Optional, Mapping
+from typing import TYPE_CHECKING, Any, Iterable, Literal, Optional
 
 import numpy as np
 import pandas as pd
 from numpy.typing import NDArray
 
 if TYPE_CHECKING:
-    from ..preprocessing.artifacts import PreparedData, RemovedVariable
+    from ..core.data.prepared import PreparedData
+    from ..core.data.provenance import RemovedVariable
     from ..core.data.analysis_roles import VariableRoles
 
 from .causality_matrix import CausalityMatrix
@@ -58,19 +59,6 @@ class PreparationContext:
     metadata: dict[str, Any] | None = None
 
     @property
-    def stationarity_enforcer(self):
-        """Return the fitted stationarity enforcer, or None if disabled."""
-        return self.prepared_data.stationarity_enforcer
-
-    @property
-    def lag_engine(self):
-        """Return the lag-generation engine used by the analysis.
-
-        Returns: Lag-engine object producing time-lagged regression features.
-        """
-        return self.prepared_data.lag_engine
-
-    @property
     def split(self):
         """Return the active data split, or None when splitting is disabled.
 
@@ -79,23 +67,7 @@ class PreparationContext:
         return self.prepared_data.split
 
     @property
-    def x_scaler(self):
-        """Return the feature scaler attached to the model inputs.
-
-        Returns: Scaling transformer applied to explanatory variables.
-        """
-        return self.prepared_data.x_scaler
-
-    @property
-    def y_scaler(self):
-        """Return the target scaler attached to the response variables.
-
-        Returns: Scaling transformer applied to dependent variables.
-        """
-        return self.prepared_data.y_scaler
-
-    @property
-    def removed_variables(self) -> dict[str, RemovedVariable]:
+    def removed_variables(self) -> Mapping[str, RemovedVariable]:
         """Return typed metadata for variables removed during preparation."""
         return self.prepared_data.removed_variables
 

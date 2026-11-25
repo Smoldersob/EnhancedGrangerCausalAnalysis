@@ -4,6 +4,9 @@ from types import SimpleNamespace
 import numpy as np
 import pytest
 
+from enhanced_granger_analysis.core.data import (
+    DataSplit, FeatureLayout, PreparedData, VariableRoles, identity_target_inverse,
+)
 from enhanced_granger_analysis.execution.runner import AnalysisRunner, AnalysisRunProgress
 from enhanced_granger_analysis.execution.granger_trainer import GrangerTrainer
 from enhanced_granger_analysis.results.granger_results import GrangerAnalysisResults
@@ -75,11 +78,14 @@ class DummyTrainer(GrangerTrainer):
 
 def setup_case(role):
     X = np.array([[1., 2.], [3., 4.], [5., 6.]])
-    prepared = SimpleNamespace(
-        X_scaled=X, X_raw=X, tested_causes=["a", "b"], causes=["a", "b"],
-        cause_slices={"a": slice(0, 1), "b": slice(1, 2)},
-        y_scaler=SimpleNamespace(inverse_transform=lambda y: y.copy()),
-        indices_for=lambda *args, **kwargs: np.arange(len(X)),
+    y = np.zeros((len(X), 1))
+    roles = VariableRoles(("y",), ("a", "b"), ("a", "b"))
+    prepared = PreparedData(
+        X_raw=X, X_scaled=X, y_raw=y, y_scaled=y,
+        feature_layout=FeatureLayout(("a", "b"), {"a": slice(0, 1), "b": slice(1, 2)}, (1, 1)),
+        requested_roles=roles, effective_roles=roles,
+        base_mask=np.ones((1, 2), dtype=bool), split=DataSplit.all_training(len(X)),
+        target_inverse=identity_target_inverse, sample_indices=np.arange(len(X)),
     )
     results = GrangerAnalysisResults(effects=["y"], causes=["a", "b"],
         mask=np.ones((1, 2), dtype=bool), cause_slices=prepared.cause_slices,

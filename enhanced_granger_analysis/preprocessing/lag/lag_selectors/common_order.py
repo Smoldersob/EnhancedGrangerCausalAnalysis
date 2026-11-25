@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from abc import abstractmethod
 from collections.abc import Mapping, Sequence
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 import numpy as np
 import pandas as pd
@@ -23,6 +23,14 @@ from .order_utils import (
     validate_order_selector_input,
 )
 from ..registry import register_lag_selector
+from ._space import (
+    ResolvedLagSpace,
+    resolve_lag_space,
+    validate_method_lags,
+)
+
+if TYPE_CHECKING:
+    from ..space import LagSelectionSpace
 
 
 def _validate_scoring_params(
@@ -41,8 +49,11 @@ def _validate_scoring_params(
 class BaseCommonOrderLagSelector(BaseLagSelector):
     """Evaluate every common order from 1 through max_lag.
 
-    All candidates use the same response timestamps. Every supplied
-    data column is a predictor; only requested outputs are scored.
+    All candidates use the same response timestamps. Without a finite
+    plan every supplied column is a predictor; with a plan, each equation
+    uses only its allowed sparse lag terms and mandatory context.
+    This is not a full VAR with a shared order: the common threshold only
+    controls which allowed optional terms are added to each equation.
 
     Cross-variable lag 0, when enabled, is included in every candidate.
     Own-variable lag 0 is never included.
@@ -95,15 +106,39 @@ class BaseCommonOrderLagSelector(BaseLagSelector):
         data: pd.DataFrame,
         *,
         outputs: Sequence[str] | None = None,
+        space: LagSelectionSpace | None = None,
     ) -> LagSpec:
         names, targets, values = validate_order_selector_input(
             data,
             outputs,
         )
 
-        if len(values) <= self.max_lag:
+        resolved = resolve_lag_space(space, outputs, names)
+        if resolved is not None:
+            validate_method_lags(
+                resolved,
+                use_lag_zero=self.use_lag_zero,
+                max_lag=self.max_lag,
+            )
+
+        mandatory_max = (
+            max(
+                (
+                    lag
+                    for output in resolved.outputs
+                    for predictor in resolved.predictors
+                    for lag in resolved.mandatory(output, predictor)
+                ),
+                default=0,
+            )
+            if resolved is not None
+            else 0
+        )
+        selection_horizon = max(self.max_lag, mandatory_max)
+        if len(values) <= selection_horizon:
             raise ValueError(
-                "The dataset must contain more rows than max_lag."
+                "The dataset must contain more rows than the largest "
+                "selection lag."
             )
 
         for name in (
@@ -133,7 +168,7 @@ class BaseCommonOrderLagSelector(BaseLagSelector):
             columns=["order", "score", "valid", "error"]
         )
 
-        start = self.max_lag
+        start = selection_horizon
         n_rows = len(values) - start
 
         name_to_index = {
@@ -147,6 +182,7 @@ class BaseCommonOrderLagSelector(BaseLagSelector):
         ]
 
         first_lag = 0 if self.use_lag_zero else 1
+        predictors = names if resolved is None else resolved.predictors
 
         columns = {
             (name, lag): values[
@@ -154,7 +190,8 @@ class BaseCommonOrderLagSelector(BaseLagSelector):
                 index,
             ]
             for index, name in enumerate(names)
-            for lag in range(first_lag, self.max_lag + 1)
+            if name in predictors
+            for lag in range(first_lag, selection_horizon + 1)
         }
 
         rows: list[dict[str, Any]] = []
@@ -165,10 +202,11 @@ class BaseCommonOrderLagSelector(BaseLagSelector):
             designs = tuple(
                 self._build_design(
                     columns,
-                    names,
+                    predictors,
                     target,
                     order,
                     n_rows,
+                    space=resolved,
                 )
                 for target in targets
             )
@@ -241,12 +279,28 @@ class BaseCommonOrderLagSelector(BaseLagSelector):
                 "Inspect order_scores_ and diagnostics_."
             )
 
-        result = common_order_lag_spec(
-            names,
-            targets,
-            best_order,
-            use_lag_zero=self.use_lag_zero,
-        )
+        if resolved is None:
+            result = common_order_lag_spec(
+                names,
+                targets,
+                best_order,
+                use_lag_zero=self.use_lag_zero,
+            )
+        else:
+            result = {
+                target: {
+                    predictor: tuple(sorted(set(
+                        resolved.mandatory(target, predictor)
+                        + tuple(
+                            lag
+                            for lag in resolved.optional[target][predictor]
+                            if lag <= best_order
+                        )
+                    )))
+                    for predictor in resolved.predictors
+                }
+                for target in targets
+            }
 
         self.selected_order_ = best_order
         self.feature_names_in_ = names
@@ -265,17 +319,30 @@ class BaseCommonOrderLagSelector(BaseLagSelector):
         target: str,
         order: int,
         n_rows: int,
+        *,
+        space: ResolvedLagSpace | None = None,
     ) -> np.ndarray:
         active_columns = []
 
         for predictor in predictors:
-            first_lag = (
-                0
-                if self.use_lag_zero and predictor != target
-                else 1
-            )
+            if space is None:
+                first_lag = (
+                    0
+                    if self.use_lag_zero and predictor != target
+                    else 1
+                )
+                lags = range(first_lag, order + 1)
+            else:
+                lags = tuple(sorted(set(
+                    space.mandatory(target, predictor)
+                    + tuple(
+                        lag
+                        for lag in space.optional[target][predictor]
+                        if lag <= order
+                    )
+                )))
 
-            for lag in range(first_lag, order + 1):
+            for lag in lags:
                 active_columns.append(
                     columns[(predictor, lag)]
                 )

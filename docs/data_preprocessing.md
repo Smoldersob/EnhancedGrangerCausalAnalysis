@@ -1,14 +1,18 @@
 # Data Preprocessing
 
-This document explains the components in the `preprocessing` frolder, their purpose,
+This document explains the components in the `preprocessing` folder, their purpose,
 and the data contract passed to the backend model.
 
 ## Module Scope
 
 The `preprocessing` package contains:
 
-- `preprocessing/prepare_data.py` and `preprocessing/pipeline.py`: the public
-  preparation entry point and staged preparation pipeline.
+- `preprocessing/configuration/plan.py` and `preprocessing/planning.py`: the
+  value-independent schema, role, and value-strategy plan.
+- `preprocessing/fitting.py` and `preprocessing/fitted.py`: the fit coordinator
+  and reusable transform-only state.
+- `preprocessing/prepare_data.py` and `preprocessing/pipeline.py`: the
+  one-shot helper and public `DataPreparer` façade.
 - `preprocessing/stationarity`: stationarity testing and differencing.
 - `preprocessing/lag`: lag selection and lagged feature matrix construction.
 - `preprocessing/scaling`: deterministic scaling for inputs and targets.
@@ -17,7 +21,8 @@ The `preprocessing` package contains:
 
 ## Standard preparation order
 
-`prepare_data(...)` creates a `DataPreparer` and executes:
+`prepare_data(...)` delegates to the same plan → fit → transform lifecycle as
+`DataPreparer.fit(...)`:
 
 1. Schema alignment.
 2. Optional missing-value imputation.
@@ -44,9 +49,22 @@ order. History is never carried from one segment into the next, and segment
 sizes are not equalized. Missing values occurring inside a segment are handled
 by the separate missing-value preprocessing stage.
 
-This workflow does not automatically create training, validation, and test
-partitions. Applications requiring held-out evaluation must define the split
-and transformation-fitting policy explicitly.
+`FitScope` and `DataSplit` have different jobs. A source-stage splitter
+defines contiguous source ranges authorized to fit data-dependent decisions;
+the final `DataSplit` assigns prepared-row positions to training, validation,
+and test. A prepared-stage splitter cannot authorize its own preprocessing
+fit: provide an independent source `FitScope` or fitting fails explicitly.
+Without a splitter, fitting on the whole supplied sample is the explicit
+default. Restricted scopes require unique source index labels so a range
+cannot expand to unrelated rows when preprocessing changes row counts.
+
+After fitting, `DataPreparer.transform(...)` aligns input names to the fitted
+schema and reuses the fitted imputer, stationarity transformation, lag layout,
+and scalers. It does not refit, reselect lags, rediagnose variables, or sample
+rows. `fitted_preprocessor_` contains fitted components only; the fit result is
+published separately as `prepared_data_`. New columns are ignored; missing
+required columns fail unless union schema and a fitted imputer can handle them.
+Sampling is a separate postprocessing operation.
 
 ## Defaults differ between entry points
 
@@ -68,22 +86,14 @@ For schema alignment:
 
 ## Optional transformations
 
-For `DataPreparer`, omitting a stage argument uses its configuration.
-Passing `None` explicitly disables the optional transformation:
-
-```python
-preparer.imput(None)
-preparer.force_stationarity(None)
-```
-
-For example:
+Optional transformations are selected in `DataPreparationConfig`. A successful
+fit snapshots that configuration; later changes do not alter the fitted
+transformer.
 
 ```python
 from enhanced_granger_analysis.preprocessing.pipeline import (
     DataPreparer,
     DataPreparationConfig,
-)from enhanced_granger_analysis.preprocessing.stationarity import (
-    StationarityTransformer,
 )
 
 preparer = DataPreparer(
@@ -98,30 +108,15 @@ preparer = DataPreparer(
         missing_value_imputer=None,
     ),
 )
+fitted = preparer.fit(data, roles=roles)
+prepared = preparer.prepared_data_
+external = preparer.transform(new_data)
 ```
 
-After assigning data, the stationarity stage supports configuration
-inheritance and explicit overrides:
-
-```python
-preparer.set_data(data_list)
-
-preparer.force_stationarity()        # Use configured ADF specification.
-```
-
-Alternatively, start from the original data and override the stage:
-
-```python
-preparer.set_data(data_list).force_stationarity("kpss")
-preparer.set_data(data_list).force_stationarity(None)
-```
-
-Stage operations modify the current preparation data. Disabling a stage
-does not reverse a transformation already applied. Start again with
-`set_data()` when rebuilding from original observations.
-
-Stationarity processing is disabled by default in the preparation
-configuration, convenience function, builder, orchestrator, and simple API.
+`DataPreparer.prepared_data_` is available only after a successful fit and is
+the final `PreparedData`, not the mutable workspace. The old explicit stage
+builder remains a migration-only compatibility surface; its workspace is
+separate and is not accepted by modeling consumers.
 
 Enable it explicitly in the builder:
 
@@ -150,11 +145,10 @@ For explicit no-op scaling, use `"identity"`:
 builder.scaling(x_scaler="identity", y_scaler="identity")
 ```
 
-## Staged `DataPreparer` Example
+## Reusable `DataPreparer` Example
 
-Use `DataPreparer` when preprocessing should be inspected or modified before the
-model is built. Its methods mutate one preparation object and return `self`, so
-they can be chained or executed one at a time.
+Use the plan and fit once, then transform later datasets with the fixed
+representation:
 
 ```python
 import numpy as np
@@ -165,9 +159,7 @@ from enhanced_granger_analysis.preprocessing.pipeline import (
     DataPreparer,
     DataPreparationConfig,
 )
-from enhanced_granger_analysis.preprocessing.stationarity import (
-    StationarityTransformer,
-)
+from enhanced_granger_analysis.core.data import VariableRoles
 
 first = pd.DataFrame(
     {
@@ -207,39 +199,24 @@ config = DataPreparationConfig(
 )
 
 preparer = DataPreparer(config=config)
-preparer.set_data([first, second])
-preparer.set_roles(
-    causes=["cause", "context"],
-    tested_causes=["cause"],
-    effects=["effect"],
+roles = VariableRoles(
+    causes=("cause", "context"),
+    tested_causes=("cause",),
+    effects=("effect",),
 )
-
-# These calls follow the same order as DataPreparer.fit().
-preparer.align()
-preparer.imput()
-preparer.remove_redundant()
-preparer.force_stationarity()
-preparer.lag()
-preparer.scale()
-preparer.reduce_workload()
-
-prepared = preparer.prepared_data_
-print(preparer.get_report())
-print(preparer.get_feature_map())
+prepared = preparer.fit([first, second], roles=roles).prepared_data_
+external = preparer.transform([first.copy(), second.copy()])
+print(preparer.fitted_preprocessor_.report)
 print(prepared.X_scaled.shape, prepared.y_scaled.shape)
 print(prepared.cause_slices.get("cause"))
-print(prepared.lag_result.removed_predictors)
+print(prepared.removed_variables)
 ```
 
 Automatic lag preparation can remove an input entirely, so a requested
 cause is not guaranteed to appear in `cause_slices`.
 
-The complete lag-preparation result is available through
-`prepared.lag_result`, including per-dataset selections, aggregated lags,
-the final specification, the feature layout, and removed predictors.
-
-`prepared_data_` can be passed directly to the analysis builder. This avoids
-running preprocessing a second time:
+The returned `PreparedData`, or the result of `prepare_data(...)`, can be
+passed directly to the builder:
 
 ```python
 from enhanced_granger_analysis.api import MultiTaskGrangerBuilder
@@ -342,12 +319,9 @@ The staged pipeline performs this resolution automatically.
 | `selection_results` | Per-dataset lag specifications |
 | `segments` | Source-dataset and prepared-row correspondence |
 
-`PreparedData.lag_result` retains this result before subsequent scaling
-and workload reduction. Its arrays and segment slices are not updated
-by later pipeline sampling.
-
-Use `PreparedData.sample_indices` to map sampled rows back to the
-pre-sampling prepared rows.
+`PreparedData` does not retain `LagPreparationResult`. Its `segments` retain
+source labels and describe pre-sampling prepared rows. Use
+`PreparedData.sample_indices` to map final rows to those pre-sampling rows.
 
 Selector-specific diagnostic attributes belong to the selector instances.
 The current engine result stores per-dataset lag specifications, not
@@ -379,9 +353,9 @@ values are not consecutive.
 `feature_lags` must match the exact column order of both raw and scaled
 inputs. Scaling changes values, not the feature layout.
 
-The pipeline copies this metadata into `PreparedData.feature_lags`,
-`cause_slices`, and `base_mask`. It also stores the complete engine result
-as `PreparedData.lag_result`.
+`PreparedData.feature_layout` describes the physical column order and exposes
+`feature_lags` and `cause_slices`. `PreparedData.final_lags` describes the
+effective output-predictor pairs using the layout and `base_mask`.
 
 Externally supplied prepared data must contain consistent feature
 metadata. Changing builder lag settings does not regenerate an externally
@@ -546,13 +520,8 @@ observations remain in a dataset.
 
 ### Fitted state and isolation
 
-The preparation result stores the fitted component as:
-
-```python
-prepared.stationarity_enforcer
-```
-
-It is `None` when processing is disabled.
+The final `PreparedData` does not expose the fitted stationarity component.
+To inspect fitted diagnostic state, use a stationarity enforcer directly.
 
 Built-in fitted components expose:
 
@@ -564,12 +533,6 @@ Built-in fitted components expose:
 Registered classes are instantiated for each resolution.
 Supplied instances are deep-copied before pipeline fitting, so the
 caller's object is not fitted in place.
-
-After analysis, the same fitted component is accessible through:
-
-```python
-enforcer = results.preparation_context.stationarity_enforcer
-```
 
 ### Interpretation and limitations
 
@@ -753,13 +716,13 @@ be recorded as part of the experiment configuration.
 In the public preparation function and builder:
 
 - `prepare_data(...)` returns a `PreparedData` object containing scaled and raw
-  arrays, scalers, masks, role metadata, and feature slices;
+  arrays, a target inverse, a feature layout, masks, roles and provenance;
 - `MultiTaskGrangerBuilder.prepare_data()` stores that object and initializes
   the result context;
 - `build_model()` passes the same scaled arrays to the backend's
   `initialize(X, targets=y)`;
 - predictions are mapped back with
-  `prepared_data.y_scaler.inverse_transform(...)`;
+  `prepared_data.inverse_transform_targets(...)`;
 - `fit_base()` and `fit_restricted()` save snapshots directly to the result
   object.
 
@@ -767,7 +730,8 @@ This keeps preprocessing consistent across all supported backends (`pytorch`, `t
 
 ## PreparedData contract
 
-`PreparedData` connects preprocessing with model execution.
+`enhanced_granger_analysis.core.data.PreparedData` connects preprocessing
+with model execution and can be constructed without a preprocessing facade.
 
 ### Arrays and transforms
 
@@ -775,13 +739,12 @@ This keeps preprocessing consistent across all supported backends (`pytorch`, `t
 - `y_raw`: aligned targets before scaling.
 - `X_scaled`: model inputs after scaling.
 - `y_scaled`: model targets after scaling.
-- `x_scaler` and `y_scaler`: fitted scaling objects.
-- `stationarity_enforcer`: fitted stationarity component used before lag construction, or `None` when disabled.
-  or `None`.
-- `lag_engine`: engine used to prepare the data;
-- `lag_result`: structured lag-preparation result, including the final
-  specification, layout, selection provenance, and segment metadata;
+- `target_inverse`: explicit scaling-only inverse, called through
+  `inverse_transform_targets`. Use `identity_target_inverse` if no scaling was applied.
+- `feature_layout`: one shared definition of column order and feature identities.
 - `base_mask`: final output-by-feature lag-activity mask.
+- `split`: assignment in final-row coordinates, distinct from `segments`
+  and `sample_indices` in pre-sampling coordinates.
 
 
 `raw` means unscaled at this preparation stage. It does not necessarily mean
@@ -820,9 +783,8 @@ The variable is not removed from effective `effects` merely because it is
 unused as an input.
 
 If all tested causes are excluded, execution must skip restricted-model
-fits and retain the preparation context for restoration. If all predictors
-are excluded, the backend and scaling path must support a zero-feature
-design; engine support alone does not guarantee end-to-end execution.
+fits and retain the preparation context for restoration. The current
+prepared-result contract requires at least one predictor block.
 
 ### Named input blocks
 
@@ -846,7 +808,7 @@ already stores both boundaries.
 The equivalent positional boundary array is:
 
 ```python
-block_boundaries =[0][2][4][6]
+block_boundaries = [0, 2, 4, 6]
 ```
 
 It contains four entries because adjacent boundaries define each block.

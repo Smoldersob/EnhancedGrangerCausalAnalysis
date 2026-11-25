@@ -24,13 +24,13 @@ def constraint_data_to_config(data: PreparedConstraintData) -> dict[str, Any]:
     validate_prepared_constraint_data(data)
     return {
         "output_names": list(data.output_names),
-        "n_features": data.n_features,
+        "n_features": int(data.n_features),
         "mask": data.mask.tolist(),
         "rules": [
             {
-                "output_index": rule.output_index,
-                "feature_indices": list(rule.feature_indices),
-                "min_abs_sum": rule.min_abs_sum,
+                "output_index": int(rule.output_index),
+                "feature_indices": [int(index) for index in rule.feature_indices],
+                "min_abs_sum": float(rule.min_abs_sum),
             }
             for rule in data.rules
         ],

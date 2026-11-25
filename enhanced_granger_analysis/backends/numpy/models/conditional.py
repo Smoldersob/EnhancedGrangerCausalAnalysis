@@ -322,10 +322,7 @@ class NumpyConditionalAdapter:
 
 			if (
 				tuple(layout.output_names) != self.input_spec.effects
-				or dict(layout.cause_slices)
-				!= dict(self.input_spec.cause_slices)
-				or tuple(layout.feature_lags)
-				!= self.input_spec.feature_lags
+				or layout.feature_layout != self.input_spec.feature_layout
 			):
 				raise ValueError(
 					"Regularizer layout does not match input_spec."

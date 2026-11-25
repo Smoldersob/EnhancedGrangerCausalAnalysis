@@ -42,7 +42,7 @@ from ..core.components.regularizers.prepared import (
 
 from ..backends import BackendFactory
 from ..backends.base_backend import BackendStrategy
-from ..preprocessing.artifacts import PreparedData
+from ..core.data.prepared import PreparedData
 from ..results.granger_results import GrangerAnalysisResults
 
 

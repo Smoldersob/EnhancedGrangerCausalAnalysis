@@ -3,7 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Mapping, Any
 
-from ..preprocessing.artifacts import PreparedData
+from ..core.data.prepared import PreparedData
 
 from ..backends.base_backend import BackendStrategy
 
@@ -82,6 +82,7 @@ class ModelAssembler:
             output_names=prepared.effects,
             feature_lags=prepared.feature_lags,
             base_mask=prepared.base_mask,
+            components=prepared.feature_layout.components,
         )
 
         if layout.n_features != prepared.X_scaled.shape[1]:
@@ -187,6 +188,7 @@ class ModelAssembler:
             effects=tuple(prepared.effects),
             cause_slices=prepared.cause_slices,
             feature_lags=tuple(prepared.feature_lags),
+            components=prepared.feature_layout.components,
         )
 
         constructor_config = dict(config)

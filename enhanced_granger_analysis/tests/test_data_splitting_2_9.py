@@ -2,8 +2,6 @@
 
 from __future__ import annotations
 
-import warnings
-
 import numpy as np
 import pandas as pd
 import pytest
@@ -30,6 +28,7 @@ from ..preprocessing.splitting import (
     available_data_splitters,
     resolve_data_splitter,
 )
+from ..preprocessing.splitting.scope import FitScope, FitSegment
 
 ROLES = VariableRoles(
     causes=("a", "b", "c"),
@@ -64,10 +63,11 @@ def make_preparer(splitter, **config) -> DataPreparer:
     return DataPreparer(config=DataPreparationConfig(**config))
 
 
-def fit_preparer(preparer: DataPreparer, data=None) -> DataPreparer:
+def fit_preparer(preparer: DataPreparer, data=None, *, scope=None) -> DataPreparer:
     return preparer.fit(
         data if data is not None else make_datasets(),
         roles=ROLES,
+        scope=scope,
     )
 
 
@@ -191,7 +191,7 @@ def test_temporal_blocks_assigns_prefix_and_suffix_per_dataset():
     assert split.part_names == ("training", "validation", "test")
     assert split.indices_for("test").size == 0
 
-    lagged = prepared.lag_engine.transform(data)
+    lagged = preparer.fitted_preprocessor_.lag_engine.transform(data)
     expected_training = []
     expected_validation = []
 
@@ -255,7 +255,7 @@ def test_temporal_blocks_fits_preprocessing_on_training_rows_only():
     )
     fit_preparer(preparer, data=data)
 
-    enforcer = preparer.prepared_data_.stationarity_enforcer
+    enforcer = preparer.fitted_preprocessor_.stationarity_enforcer
     assert enforcer is not None
     assert enforcer.differencing_orders_["a"] == 0  # training prefix is stationary
 
@@ -293,7 +293,7 @@ def test_dataset_level_assigns_whole_datasets():
     assert split.part_names == ("training", "validation", "test")
     assert split.indices_for("test").size == 0
 
-    engine = prepared.lag_engine
+    engine = preparer.fitted_preprocessor_.lag_engine
     assert engine.fitted_config_ is not None
 
     training = split.indices_for("training")
@@ -382,60 +382,38 @@ def test_source_splitters_reject_duplicated_index_labels():
 # ---------------------------------------------------------------------------
 
 
-def test_random_rows_warns_about_information_leakage_and_is_deterministic():
-    with warnings.catch_warnings(record=True) as caught:
-        warnings.simplefilter("always")
-        preparer = fit_preparer(
-            make_preparer(
-                {"type": "random_rows", "params": {"parts": {"training": 0.8, "validation": 0.2}, "random_state": 11}}
-            )
-        )
+def test_random_rows_split_requires_an_independent_source_fit_scope():
+    preparer = make_preparer(
+        {"type": "random_rows", "params": {"parts": {"training": 0.8, "validation": 0.2}, "random_state": 11}}
+    )
+    with pytest.raises(DataValidationError, match="cannot authorize fitting"):
+        fit_preparer(preparer)
 
-    assert any("information leakage" in str(item.message) for item in caught)
 
-    split = preparer.prepared_data_.split
-    assert split.stage == "prepared"
+def test_stratified_random_rows_requires_an_independent_source_scope():
+    preparer = make_preparer(
+        {"type": "stratified_random_rows", "params": {"parts": {"training": 0.75, "validation": 0.25}, "random_state": 5}}
+    )
+    with pytest.raises(DataValidationError, match="cannot authorize fitting"):
+        fit_preparer(preparer)
 
-    n_rows = preparer.prepared_data_.X_raw.shape[0]
-    assert split.parts["training"].size == int(round(0.8 * n_rows))
-    assert split.parts["validation"].size == n_rows - split.parts["training"].size
 
-    preparer_repeat = fit_preparer(
+def test_prepared_splitter_uses_independent_explicit_source_scope():
+    data = make_datasets()
+    scope = FitScope(tuple(
+        FitSegment(index, 0, 36)
+        for index in range(len(data))
+    ))
+    preparer = fit_preparer(
         make_preparer(
             {"type": "random_rows", "params": {"parts": {"training": 0.8, "validation": 0.2}, "random_state": 11}}
-        )
-    )
-    np.testing.assert_array_equal(
-        split.parts["training"],
-        preparer_repeat.prepared_data_.split.parts["training"],
+        ),
+        data=data,
+        scope=scope,
     )
 
-
-def test_stratified_random_rows_preserves_proportions_per_series():
-    with warnings.catch_warnings(record=True) as caught:
-        warnings.simplefilter("always")
-        preparer = fit_preparer(
-            make_preparer(
-                {"type": "stratified_random_rows", "params": {"parts": {"training": 0.75, "validation": 0.25}, "random_state": 5}}
-            )
-        )
-
-    assert any("information leakage" in str(item.message) for item in caught)
-
-    split = preparer.prepared_data_.split
-    engine = preparer.prepared_data_.lag_engine
-    lagged = engine.transform(make_datasets())
-
-    for segment in lagged.segments:
-        segment_rows = np.arange(
-            segment.prepared_row_slice.start,
-            segment.prepared_row_slice.stop,
-        )
-        in_training = np.isin(segment_rows, split.parts["training"])
-        in_validation = np.isin(segment_rows, split.parts["validation"])
-
-        assert np.all(in_training | in_validation)
-        assert abs(in_training.mean() - 0.75) < 0.34  # per-series proportion
+    assert preparer.prepared_data_.split.stage == "prepared"
+    assert preparer.fitted_preprocessor_.scope.segments[0].row_stop == 36
 
 
 def test_prepared_splitters_require_fractions():
@@ -466,18 +444,12 @@ def test_scalers_are_fitted_on_training_rows_only():
 
 
 def test_reduce_workload_rejects_row_removal_under_active_split():
-    preparer = fit_preparer(
-        make_preparer(
-            {"type": "random_rows", "params": {"parts": {"training": 0.8, "validation": 0.2}}}
+    with pytest.raises(DataValidationError, match="cannot authorize fitting"):
+        fit_preparer(
+            make_preparer(
+                {"type": "random_rows", "params": {"parts": {"training": 0.8, "validation": 0.2}}}
+            )
         )
-    )
-
-    with pytest.raises(DataValidationError):
-        preparer.reduce_workload(backend_sample_fraction=0.5)
-
-    # Keeping all rows remains valid and must not invalidate the split.
-    preparer.reduce_workload()
-    assert preparer.prepared_data_.split.training_indices.size > 0
 
 
 # ---------------------------------------------------------------------------

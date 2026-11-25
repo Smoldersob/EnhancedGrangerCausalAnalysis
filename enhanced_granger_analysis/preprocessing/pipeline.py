@@ -18,13 +18,18 @@ from .lag import (
     resolve_lag_engine_config,
     resolve_lag_selector,
 )
+from .lag.artifacts import LaggedData
 from .missing import BaseImputer
-from .artifacts import PreparedData
+from .artifacts import _PreparationState
 from ..core.data.provenance import RemovedVariable
 from ..core.data.analysis_roles import VariableRoles
+from ..core.data.variables import VariableDescription
+from ..core.data.feature_layout import FeatureLayout
+from ..core.data.split import DataSplit as CoreDataSplit
 from .sampling import NoSampling, SamplingStrategy
 from .scaling import resolve_scaler, BlockScaler
 from .splitting import DataSplit, resolve_data_splitter
+from .splitting.scope import FitScope
 from .stationarity import resolve_stationarity_enforcer
 
 _UNSET = object()
@@ -37,8 +42,8 @@ def _to_dataframe_list(data: pd.DataFrame | Sequence[pd.DataFrame]) -> list[pd.D
     raise DataValidationError("data must be a DataFrame or a sequence of DataFrames")
 
 
-class DataPreparer:
-    """Stage-by-stage preparation builder for :class:`PreparedData`."""
+class _PreparationExecutor:
+    """Stage-by-stage preparation builder with a mutable workspace."""
 
     def __init__(
         self,
@@ -50,7 +55,11 @@ class DataPreparer:
         self.config = config or DataPreparationConfig(**config_overrides)
         self.splitter = resolve_data_splitter(self.config.splitter)
         self.data_list: Optional[list[pd.DataFrame]] = None
-        self.prepared_data_: Optional[PreparedData] = PreparedData.empty()
+        self.prepared_data_ = _PreparationState()
+        self._fit_scope: Optional[FitScope] = None
+        self._original_data: Optional[list[pd.DataFrame]] = None
+        self._fitted_imputer: Optional[BaseImputer] = None
+        self._schema_missing_columns = False
         self._roles_assigned = False
         self._redundancy_removed = False
 
@@ -64,6 +73,10 @@ class DataPreparer:
         self,
     ) -> Optional[list[pd.DataFrame]]:
         """Frames used to fit preprocessing decisions under a source split."""
+        if self._fit_scope is not None:
+            if self.data_list is None:
+                return None
+            return self._fit_scope.select_frames(self.data_list)
         source_splitter = self._source_splitter()
 
         if source_splitter is None or self.data_list is None:
@@ -100,7 +113,12 @@ class DataPreparer:
                 )
 
         self.data_list = data_list
-        self.prepared_data_ = PreparedData.empty()
+        self._original_data = [frame.copy() for frame in data_list]
+        self.prepared_data_ = _PreparationState(
+            original_row_counts=tuple(len(frame) for frame in data_list),
+        )
+        self._fitted_imputer = None
+        self._schema_missing_columns = False
         self._roles_assigned = False
         self._redundancy_removed = False
 
@@ -213,8 +231,13 @@ class DataPreparer:
         aligned_data = [df.copy() for df in self.data_list]
         if schema_policy == "union":
             columns = list(dict.fromkeys(column for df in aligned_data for column in df.columns))
+            self._schema_missing_columns = any(
+                set(columns).difference(dataframe.columns)
+                for dataframe in aligned_data
+            )
             aligned_data = [df.reindex(columns=columns).copy() for df in aligned_data]
         else:
+            self._schema_missing_columns = False
             reference_columns = list(aligned_data[0].columns)
             for index, dataframe in enumerate(aligned_data[1:], start=1):
                 if list(dataframe.columns) != reference_columns:
@@ -235,15 +258,36 @@ class DataPreparer:
             if imputer is _UNSET
             else imputer
         )
+        if self._schema_missing_columns and effective is None:
+            raise DataValidationError(
+                "Union schema added missing columns, so a fitted imputer is required."
+            )
         result = [df.copy() for df in self.data_list]
+        fitted_imputer = None
         if effective is not None:
+            try:
+                effective = copy.deepcopy(effective)
+            except Exception as exc:
+                raise TypeError(
+                    "Missing-value imputers must support deepcopy to isolate fits."
+                ) from exc
             training_frames = self._splitter_training_frames()
+            if (
+                self._fit_scope is not None
+                and not self._fit_scope.whole_sample
+                and type(effective).__name__ == "LinearInterpolationImputer"
+            ):
+                raise DataValidationError(
+                    "Linear interpolation is not allowed with a restricted FitScope "
+                    "because it can use held-out observations to transform training rows."
+                )
             if training_frames is None:
-                result = effective.fit_transform(result)
-            else:
-                result = effective.fit(training_frames).transform(result)
+                training_frames = result
+            fitted_imputer = effective.fit(training_frames)
+            result = fitted_imputer.transform(result)
 
         self.data_list = [df.copy() for df in result]
+        self._fitted_imputer = fitted_imputer
         return self
 
     def remove_redundant(self) -> "DataPreparer":
@@ -280,12 +324,12 @@ class DataPreparer:
             detection_frames = data_list
 
         detection_aligned = [
-            dataframe.loc[:, required_columns].astype(float).copy()
+            dataframe.loc[:, required_columns].copy()
             for dataframe in detection_frames
         ]
 
         all_columns = list(dict.fromkeys(column for dataframe in data_list for column in dataframe.columns))
-        aligned_data = [df.astype(float).copy() for df in data_list]
+        aligned_data = [df.copy() for df in data_list]
 
         combined = pd.concat(detection_aligned, axis=0, ignore_index=True)
         constant_columns = [
@@ -486,10 +530,35 @@ class DataPreparer:
                 "Scaling inputs are not aligned with prepared rows."
             )
 
-        training = prepared.indices_for(
-            "training",
-            require_nonempty=True,
-        )
+        if self._fit_scope is None:
+            training = prepared.indices_for(
+                "training",
+                require_nonempty=True,
+            )
+        else:
+            if self._original_data is None:
+                raise RuntimeError("Original source data is unavailable for FitScope mapping.")
+            lagged = LaggedData(
+                X=prepared.X_raw,
+                y=prepared.y_raw,
+                segments=prepared.segments,
+            )
+            history = int(np.max(prepared.feature_lags)) if prepared.feature_lags.size else 0
+            training = self._fit_scope.prepared_row_indices(
+                lagged,
+                self._original_data,
+                history=history,
+            )
+            if prepared.split is not None:
+                training = np.intersect1d(
+                    training,
+                    prepared.indices_for("training"),
+                    assume_unique=True,
+                )
+            if training.size == 0:
+                raise DataValidationError(
+                    "FitScope contains no prepared training rows with sufficient history."
+                )
 
         x_obj.fit(X[training])
         y_obj.fit(y[training])
@@ -865,6 +934,7 @@ class DataPreparer:
 
         prepared.X_raw = lagged.X.copy()
         prepared.y_raw = lagged.y.copy()
+        prepared.segments = lagged.segments
 
         prepared.base_mask = np.asarray(
             fitted.mask,
@@ -888,11 +958,16 @@ class DataPreparer:
         return self
 
     def fit(
-    self,
+        self,
         data: pd.DataFrame | Sequence[pd.DataFrame],
         roles: Optional[VariableRoles] = None,
-    ) -> "DataPreparer":
+        *,
+        scope: Optional[FitScope] = None,
+        variable_descriptions: Optional[Mapping[str, VariableDescription]] = None,
+        apply_sampling: bool = True,
+    ) -> "_PreparationExecutor":
         self.set_data(data)
+        self._fit_scope = scope
 
         if roles is None:
             self.set_roles()
@@ -902,17 +977,13 @@ class DataPreparer:
                 tested_causes=roles.tested_causes,
                 effects=roles.effects,
             )
-
-        (
-            self
-            .align()
-            .imput()
-            .remove_redundant()
-            .force_stationarity()
-            .lag()
-            .scale()
-            .reduce_workload()
+        self.prepared_data_.variable_descriptions = dict(
+            variable_descriptions or self.config.variable_descriptions
         )
+
+        self.align().imput().remove_redundant().force_stationarity().lag().scale()
+        if apply_sampling:
+            self.reduce_workload()
         self.prepared_data_.finalize_split()
         return self
     
@@ -932,6 +1003,120 @@ class DataPreparer:
             "tested_causes": self.prepared_data_.effective_roles.tested_causes,
             "split": self.prepared_data_.split_snapshot(),
         }
+
+
+class DataPreparer:
+    """Public façade for plan → fit → transform preprocessing.
+
+    The historical stage methods remain delegated to a private executor for
+    migration compatibility; normal use should call :meth:`fit` once and
+    :meth:`transform` for subsequent datasets.
+    """
+
+    def __init__(
+        self,
+        config: Optional[DataPreparationConfig] = None,
+        **config_overrides: Any,
+    ) -> None:
+        if config is not None and config_overrides:
+            raise ValueError("Use config or config_overrides, not both.")
+        self.config = config or DataPreparationConfig(**config_overrides)
+        self._legacy_executor = _PreparationExecutor(config=self.config)
+        self._fitted_preprocessor = None
+        self._prepared_data = None
+
+    def fit(
+        self,
+        data: pd.DataFrame | Sequence[pd.DataFrame],
+        roles: Optional[VariableRoles] = None,
+        *,
+        scope: Optional[FitScope] = None,
+    ) -> "DataPreparer":
+        from .planning import SourceSchema, plan_preparation
+        from .fitting import fit_preprocessor
+
+        schema = SourceSchema.from_frames(data, policy=self.config.schema_policy)
+        plan = plan_preparation(self.config, schema, roles)
+        fitted, result = fit_preprocessor(plan, data, scope=scope)
+
+        # Publish only after every fit stage and final artifact validation succeeds.
+        self._fitted_preprocessor = fitted
+        self._prepared_data = result
+        return self
+
+    def transform(
+        self,
+        data: pd.DataFrame | Sequence[pd.DataFrame],
+        *,
+        options: Any = None,
+    ):
+        if self._fitted_preprocessor is None:
+            raise RuntimeError("DataPreparer.fit() must be called before transform().")
+        return self._fitted_preprocessor.transform(data, options=options)
+
+    def reduce_workload(
+        self,
+        *,
+        backend_sample_fraction: Any = _UNSET,
+        backend_max_samples: Any = _UNSET,
+        random_state: Any = _UNSET,
+        sampling_strategy: Any = _UNSET,
+    ) -> "DataPreparer":
+        from .sampling import sample_prepared_data
+
+        if self._prepared_data is None:
+            raise RuntimeError("DataPreparer.fit() must be called before sampling.")
+        result = sample_prepared_data(
+            self._prepared_data,
+            fraction=(
+                self.config.backend_sample_fraction
+                if backend_sample_fraction is _UNSET
+                else backend_sample_fraction
+            ),
+            max_samples=(
+                self.config.backend_max_samples
+                if backend_max_samples is _UNSET
+                else backend_max_samples
+            ),
+            random_state=(
+                self.config.random_state
+                if random_state is _UNSET
+                else random_state
+            ),
+            strategy=(
+                self.config.sampling_strategy
+                if sampling_strategy is _UNSET
+                else sampling_strategy
+            ),
+        )
+        self._prepared_data = result
+        return self
+
+    @property
+    def fitted_preprocessor_(self):
+        if self._fitted_preprocessor is None:
+            raise RuntimeError("DataPreparer is not fitted. Call fit() first.")
+        return self._fitted_preprocessor
+
+    @property
+    def prepared_data_(self):
+        if self._prepared_data is None:
+            raise RuntimeError(
+                "DataPreparer has no PreparedData until fit() succeeds. "
+                "The explicitly staged compatibility API exposes its "
+                "working state as workspace_."
+            )
+        return self._prepared_data
+
+    @property
+    def workspace_(self):
+        """Return the separate legacy workspace for explicit staged calls."""
+        return self._legacy_executor.prepared_data_
+
+    def __getattr__(self, name: str):
+        if name.startswith("_"):
+            raise AttributeError(name)
+        return getattr(self._legacy_executor, name)
 
 
 __all__ = ["DataPreparationConfig", "DataPreparer"]

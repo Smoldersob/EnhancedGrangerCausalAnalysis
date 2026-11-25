@@ -4,10 +4,14 @@ from __future__ import annotations
 
 from abc import ABC, abstractmethod
 from collections.abc import Sequence
+from typing import TYPE_CHECKING
 
 import pandas as pd
 
 from ....core.lags.specification import LagSpec
+
+if TYPE_CHECKING:
+    from ..space import LagSelectionSpace
 
 
 class BaseLagSelector(ABC):
@@ -29,6 +33,7 @@ class BaseLagSelector(ABC):
         data: pd.DataFrame,
         *,
         outputs: Sequence[str] | None = None,
+        space: LagSelectionSpace | None = None,
     ) -> LagSpec:
         """Select lags for one independent time-series dataset.
 
@@ -40,8 +45,9 @@ class BaseLagSelector(ABC):
             Rows represent observations and columns represent variables.
             Column names must be unique strings.
 
-            All supplied columns are candidate predictors. An output's
-            own column is also available as an autoregressive predictor.
+            Without ``space``, all supplied columns are candidate
+            predictors. With ``space``, columns remain available as
+            responses, but only its listed predictors may enter designs.
 
             Concrete selectors may use the supplied variables jointly
             during selection, even when only some outputs are requested.
@@ -54,6 +60,14 @@ class BaseLagSelector(ABC):
             sequence rather than a single string. The sequence must not
             be empty.
 
+        space
+            Resolved finite lag-selection plan. Its output axis must match
+            ``outputs`` exactly. Required lags are mandatory in every
+            scored candidate. A fixed pair is included exactly as specified
+            in every candidate and contributes context when scoring other
+            pairs; only optional lags on non-fixed pairs are selectable.
+            If omitted, the historical unrestricted behavior applies.
+
         Returns
         -------
         LagSpec
@@ -63,7 +77,8 @@ class BaseLagSelector(ABC):
             The returned specification must satisfy these rules:
 
             - Include exactly the requested outputs.
-            - Include every data column as a predictor for each output.
+            - Include every plan predictor (or every data column when no
+              plan is supplied) for each output.
             - Preserve requested output order and data-column order.
             - Use sorted tuples of unique non-negative integer lags.
             - Use an empty tuple for an excluded predictor.

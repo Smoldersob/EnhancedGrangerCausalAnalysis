@@ -10,6 +10,7 @@ from .naive_var import (
 from .incremental import BaseIncrementalLagSelector, ICLagSelector, CVLagSelector
 from . import utils as _utils
 from . import order_utils as _order_utils
+from ._space import LagSelectionCapabilityError
 
 __all__ = [
     "BaseLagSelector",
@@ -20,6 +21,7 @@ __all__ = [
     "BaseIncrementalLagSelector",
     "ICLagSelector",
     "CVLagSelector",
+    "LagSelectionCapabilityError",
     "_utils",
     "_order_utils",
 ]

@@ -4,6 +4,7 @@ import numpy as np
 
 from ...core.data.provenance import LagSegmentInfo
 from ...core.lags.specification import LagSpec
+from .space import LagSelectionSpace
 
 
 @dataclass(frozen=True)
@@ -20,6 +21,8 @@ class LagFittedConfig:
     final_lags: LagSpec
     aggregated_lags: LagSpec
     selection_results: tuple[LagSpec, ...]
+    selection_space: LagSelectionSpace | None = None
+    overridden_pairs: tuple[tuple[str, str], ...] = ()
 
 
 @dataclass(frozen=True)
@@ -48,3 +51,5 @@ class LagPreparationResult:
     aggregated_lags: LagSpec
     selection_results: tuple[LagSpec, ...]
     segments: tuple[LagSegmentInfo, ...]
+    selection_space: LagSelectionSpace | None = None
+    overridden_pairs: tuple[tuple[str, str], ...] = ()

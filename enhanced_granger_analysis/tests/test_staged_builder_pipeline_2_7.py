@@ -10,7 +10,7 @@ from pathlib import Path
 from ..core.models.training_result import TrainingResult
 from ..api.builder import MultiTaskGrangerBuilder
 from ..core.exceptions import DataValidationError
-from ..preprocessing.artifacts import PreparedData, VariableRoles
+from ..core.data import DataSplit, FeatureLayout, PreparedData, VariableRoles
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 builder = importlib.import_module(
@@ -220,19 +220,18 @@ def _prepared_data() -> PreparedData:
         y_scaled=np.arange(6, dtype=float).reshape(6, 1),
         X_raw=np.arange(24, dtype=float).reshape(6, 4),
         y_raw=np.arange(6, dtype=float).reshape(6, 1),
-        x_scaler=_IdentityScaler(),
-        y_scaler=_IdentityScaler(),
+        target_inverse=_IdentityScaler().inverse_transform,
+        split=DataSplit.all_training(6),
+        sample_indices=np.arange(6),
         base_mask=np.ones((1, 4), dtype=float),
         requested_roles=VariableRoles(("effect",), ("context", "x", "z"), ("z", "x")),
         effective_roles=VariableRoles(("effect",), ("context", "x", "z"), ("z", "x")),
-        cause_slices={
-            "context": slice(0, 1),
-            "x": slice(1, 3),
-            "z": slice(3, 4),
-        },
-        feature_lags=np.arange(4, dtype=np.int64),
+        feature_layout=FeatureLayout(
+            ("context", "x", "z"),
+            {"context": slice(0, 1), "x": slice(1, 3), "z": slice(3, 4)},
+            (0, 1, 2, 3),
+        ),
     )
-    prepared.stationarity_enforcer = None
     return prepared
 
 
@@ -344,7 +343,7 @@ def test_builder_reuses_one_model_and_restricted_runs_start_from_base_weights(
         masked_x = prepared.X_scaled.copy()
         masked_x[:, prepared.cause_slices[cause]] = 0.0
 
-        expected = prepared.y_scaler.inverse_transform(
+        expected = prepared.inverse_transform_targets(
             masked_x @ base_weights[0] + base_weights[1]
         )
 
@@ -391,7 +390,7 @@ def test_restricted_blocks_are_selected_by_cause_name_not_test_order(
     masked_x = prepared.X_scaled.copy()
     masked_x[:, prepared.cause_slices["x"]] = 0.0
 
-    expected = prepared.y_scaler.inverse_transform(
+    expected = prepared.inverse_transform_targets(
         masked_x @ base_weights[0] + base_weights[1]
     )
 
